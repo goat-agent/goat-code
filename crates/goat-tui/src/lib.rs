@@ -1,5 +1,7 @@
 mod app;
 mod composer;
+pub mod highlight;
+pub mod markdown;
 mod theme;
 mod transcript;
 mod tui;
