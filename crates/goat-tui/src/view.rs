@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
@@ -9,9 +9,13 @@ use crate::{app::App, theme::Theme};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
-    let area = frame.area();
-    frame.render_widget(Block::new().style(theme.base()), area);
+    let full = frame.area();
+    frame.render_widget(Block::new().style(theme.base()), full);
 
+    let area = full.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
     let [header, body, composer, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
