@@ -11,6 +11,15 @@ impl fmt::Display for TaskId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ToolCallId(pub u64);
+
+impl fmt::Display for ToolCallId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -47,8 +56,15 @@ impl Conversation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
+    pub id: ToolCallId,
     pub name: String,
-    pub input: Option<String>,
+    pub input: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolOutcome {
+    pub ok: bool,
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,24 +86,24 @@ pub enum Event {
     TaskStarted {
         id: TaskId,
     },
-    AgentMessageDelta {
+    TextDelta {
         id: TaskId,
         chunk: String,
     },
-    AgentMessage {
+    TextDone {
         id: TaskId,
         text: String,
     },
-    ToolBegin {
+    ToolStarted {
         id: TaskId,
         call: ToolCall,
     },
-    ToolEnd {
+    ToolDone {
         id: TaskId,
-        call: ToolCall,
-        ok: bool,
+        call: ToolCallId,
+        outcome: ToolOutcome,
     },
-    TaskComplete {
+    TaskDone {
         id: TaskId,
         interrupted: bool,
     },
