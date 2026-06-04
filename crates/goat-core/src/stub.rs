@@ -1,14 +1,73 @@
 use std::time::Duration;
 
-use goat_protocol::{Conversation, Event, Message, Op, Role, TaskId};
+use goat_protocol::{Conversation, Event, Message, Op, Role, TaskId, ToolCall};
 use tokio::{sync::mpsc, task::JoinHandle, time};
 
 use crate::engine::Engine;
 
-const DELTA_DELAY: Duration = Duration::from_millis(45);
+const DELTA_DELAY: Duration = Duration::from_millis(30);
 
-const REPLY: &str = "Got it. This is a stubbed streaming reply from goat-code. When the real \
-agent implements the Engine trait, this turn will run actual model and tool calls instead.";
+const REPLIES: &[Reply] = &[
+    Reply::Markdown(
+        "Here's how to fix the bug:\n\n\
+         ## Steps\n\n\
+         1. Open `src/main.rs`\n\
+         2. Replace the broken function\n\
+         3. Run the tests\n\n\
+         ```rust\nfn parse_args(input: &str) -> Result<Args> {\n    input.parse().map_err(Into::into)\n}\n```\n\n\
+         The key change is using `map_err` instead of `unwrap`. \
+         This makes the **error handling** explicit and avoids a panic at runtime.",
+    ),
+    Reply::WithTools {
+        tools: &[
+            ("read", Some("src/main.rs"), true),
+            ("grep", Some("parse_args"), true),
+            ("bash", Some("cargo test --workspace"), false),
+        ],
+        text: "I read the file and searched the codebase.\n\n\
+               Running the tests **failed** — here's what I found:\n\n\
+               ```\nthread 'main' panicked at 'assertion failed'\nnote: run with RUST_BACKTRACE=1\n```\n\n\
+               The test expects `Some(42)` but got `None`. \
+               The root cause is in the `resolve` function — it returns early when the cache is empty.",
+    },
+    Reply::Markdown(
+        "Sure! Here's a quick summary:\n\n\
+         - `goat-protocol` — shared wire types, no TUI deps\n\
+         - `goat-core` — session lifecycle and engine trait\n\
+         - `goat-tui` — full-screen ratatui interface\n\
+         - `goat-code` — binary that wires everything together\n\n\
+         The UI and engine communicate **only** through `goat-protocol` types \
+         over bounded `tokio::mpsc` channels.",
+    ),
+    Reply::WithTools {
+        tools: &[
+            ("write", Some("src/lib.rs"), true),
+            ("bash", Some("cargo fmt --all"), true),
+        ],
+        text: "Done! I wrote the changes and ran the formatter.\n\n\
+               ```bash\ncargo fmt --all\ncargo clippy -- -D warnings\n```\n\n\
+               Everything passes. The **3 files** I changed:\n\n\
+               1. `src/lib.rs` — added the new trait\n\
+               2. `src/engine.rs` — implemented it\n\
+               3. `tests/integration.rs` — added coverage",
+    },
+];
+
+enum Reply {
+    Markdown(&'static str),
+    WithTools {
+        tools: &'static [(&'static str, Option<&'static str>, bool)],
+        text: &'static str,
+    },
+}
+
+impl Reply {
+    fn text(&self) -> &'static str {
+        match self {
+            Self::Markdown(t) | Self::WithTools { text: t, .. } => t,
+        }
+    }
+}
 
 pub struct StubEngine;
 
@@ -26,11 +85,14 @@ enum Flow {
 async fn run(mut ops: mpsc::Receiver<Op>, events: mpsc::Sender<Event>) {
     tracing::debug!("stub engine started");
     let mut conversation = Conversation::default();
+    let mut turn: usize = 0;
     while let Some(op) = ops.recv().await {
         match op {
             Op::SubmitMessage { id, text } => {
+                let reply = &REPLIES[turn % REPLIES.len()];
+                turn += 1;
                 if let Flow::Shutdown =
-                    handle_turn(id, text, &mut ops, &events, &mut conversation).await
+                    handle_turn(id, text, reply, &mut ops, &events, &mut conversation).await
                 {
                     break;
                 }
@@ -44,6 +106,7 @@ async fn run(mut ops: mpsc::Receiver<Op>, events: mpsc::Sender<Event>) {
 async fn handle_turn(
     id: TaskId,
     text: String,
+    reply: &Reply,
     ops: &mut mpsc::Receiver<Op>,
     events: &mpsc::Sender<Event>,
     conversation: &mut Conversation,
@@ -55,26 +118,42 @@ async fn handle_turn(
         return Flow::Shutdown;
     }
 
-    let mut acc = String::new();
-    let mut interrupted = false;
-    let mut shutdown = false;
-
-    for chunk in REPLY.split_inclusive(' ') {
-        tokio::select! {
-            biased;
-            maybe_op = ops.recv() => match maybe_op {
-                Some(Op::Interrupt { .. }) => { interrupted = true; break; }
-                Some(Op::Shutdown) | None => { interrupted = true; shutdown = true; break; }
-                Some(Op::SubmitMessage { .. }) => {}
-            },
-            () = time::sleep(DELTA_DELAY) => {
-                acc.push_str(chunk);
-                if events.send(Event::AgentMessageDelta { id, chunk: chunk.to_owned() }).await.is_err() {
-                    return Flow::Shutdown;
-                }
+    if let Reply::WithTools { tools, .. } = reply {
+        for (name, input, _ok) in *tools {
+            let call = ToolCall {
+                name: name.to_string(),
+                input: input.map(str::to_string),
+            };
+            if events
+                .send(Event::ToolBegin {
+                    id,
+                    call: call.clone(),
+                })
+                .await
+                .is_err()
+            {
+                return Flow::Shutdown;
+            }
+            time::sleep(Duration::from_millis(180)).await;
+        }
+        for (name, input, ok) in *tools {
+            let call = ToolCall {
+                name: name.to_string(),
+                input: input.map(str::to_string),
+            };
+            if events
+                .send(Event::ToolEnd { id, call, ok: *ok })
+                .await
+                .is_err()
+            {
+                return Flow::Shutdown;
             }
         }
     }
+
+    let text = reply.text();
+
+    let (final_text, interrupted, shutdown) = stream_text(id, text, ops, events).await;
 
     if interrupted {
         let _ = events
@@ -84,8 +163,13 @@ async fn handle_turn(
             })
             .await;
     } else {
-        conversation.push(Message::new(Role::Agent, acc.clone()));
-        let _ = events.send(Event::AgentMessage { id, text: acc }).await;
+        conversation.push(Message::new(Role::Agent, final_text));
+        let _ = events
+            .send(Event::AgentMessage {
+                id,
+                text: text.to_string(),
+            })
+            .await;
         let _ = events
             .send(Event::TaskComplete {
                 id,
@@ -99,6 +183,38 @@ async fn handle_turn(
     } else {
         Flow::Continue
     }
+}
+
+async fn stream_text(
+    id: TaskId,
+    text: &str,
+    ops: &mut mpsc::Receiver<Op>,
+    events: &mpsc::Sender<Event>,
+) -> (String, bool, bool) {
+    let mut acc = String::new();
+    let mut interrupted = false;
+    let mut shutdown = false;
+
+    for chunk in text.split_inclusive(' ') {
+        tokio::select! {
+            biased;
+            maybe_op = ops.recv() => match maybe_op {
+                Some(Op::Interrupt { .. }) => { interrupted = true; break; }
+                Some(Op::Shutdown) | None => { interrupted = true; shutdown = true; break; }
+                Some(Op::SubmitMessage { .. }) => {}
+            },
+            () = time::sleep(DELTA_DELAY) => {
+                acc.push_str(chunk);
+                if events.send(Event::AgentMessageDelta { id, chunk: chunk.to_owned() }).await.is_err() {
+                    interrupted = true;
+                    shutdown = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    (acc, interrupted, shutdown)
 }
 
 #[cfg(test)]
@@ -134,7 +250,7 @@ mod tests {
                     assert!(!interrupted);
                     break;
                 }
-                other => panic!("unexpected event: {other:?}"),
+                _ => {}
             }
         }
         assert!(started);
@@ -167,5 +283,47 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tool_turn_emits_tool_events() {
+        let mut session = Session::spawn(StubEngine);
+        let ops = session.ops();
+
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "first".into(),
+        })
+        .await
+        .unwrap();
+        loop {
+            if matches!(
+                session.next_event().await.expect("engine stopped early"),
+                Event::TaskComplete { .. }
+            ) {
+                break;
+            }
+        }
+
+        ops.send(Op::SubmitMessage {
+            id: TaskId(2),
+            text: "use tools".into(),
+        })
+        .await
+        .unwrap();
+
+        let mut tool_begins = 0;
+        let mut tool_ends = 0;
+        loop {
+            match session.next_event().await.expect("engine stopped early") {
+                Event::ToolBegin { .. } => tool_begins += 1,
+                Event::ToolEnd { .. } => tool_ends += 1,
+                Event::TaskComplete { .. } => break,
+                _ => {}
+            }
+        }
+
+        assert!(tool_begins > 0, "expected tool begin events");
+        assert_eq!(tool_begins, tool_ends);
     }
 }
