@@ -251,7 +251,7 @@ impl App {
             EngineEvent::TextDelta { chunk, .. } => self.transcript.push_delta(&chunk),
             EngineEvent::TextDone { text, .. } => {
                 self.transcript
-                    .commit_text_rendered(&text, &self.highlighter, self.theme);
+                    .commit_text(&text, &self.highlighter, self.theme);
             }
             EngineEvent::ToolStarted { call, .. } => self.transcript.push_tool(call),
             EngineEvent::ToolDone { call, outcome, .. } => {
@@ -259,7 +259,7 @@ impl App {
             }
             EngineEvent::TaskDone { interrupted, .. } => {
                 self.transcript
-                    .complete_rendered(interrupted, &self.highlighter, self.theme);
+                    .complete(interrupted, &self.highlighter, self.theme);
                 self.active = None;
             }
             EngineEvent::Error { message, .. } => {
