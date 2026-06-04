@@ -36,7 +36,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(" {}", app.cwd()),
-            theme.base(),
+            theme.muted(),
         ))),
         area,
     );
