@@ -8,7 +8,7 @@ use goat_protocol::{Event as EngineEvent, Op, TaskId};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::{composer::Composer, theme::Theme, transcript::Transcript, tui, view};
+use crate::{composer::Composer, keymap, theme::Theme, transcript::Transcript, tui, view};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK: Duration = Duration::from_millis(120);
@@ -96,8 +96,14 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Vec<Op> {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-            return self.on_ctrl_c();
+        tracing::trace!(code = ?key.code, modifiers = ?key.modifiers, "key");
+        if let Some(ch) = keymap::ctrl_key(&key) {
+            if ch == 'c' {
+                return self.on_ctrl_c();
+            }
+            self.quit_arm = None;
+            self.dirty = true;
+            return Vec::new();
         }
         self.quit_arm = None;
         self.dirty = true;
@@ -281,10 +287,20 @@ async fn event_loop(
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use goat_protocol::Op;
 
     use super::App;
     use crate::theme::Theme;
+
+    fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
 
     #[test]
     fn submit_then_interrupt_emit_ops() {
@@ -305,5 +321,30 @@ mod tests {
         assert!(!app.should_quit);
         app.on_ctrl_c();
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_dubeolsik_arms_then_quits() {
+        let mut app = App::new(Theme::dark());
+        assert!(!app.quit_armed());
+        app.on_key(press(KeyCode::Char('ㅊ'), KeyModifiers::CONTROL));
+        assert!(app.quit_armed());
+        assert!(!app.should_quit);
+        app.on_key(press(KeyCode::Char('ㅊ'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn plain_dubeolsik_inserts_into_composer() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('ㅊ'), KeyModifiers::NONE));
+        assert!(!app.composer.is_empty());
+    }
+
+    #[test]
+    fn ctrl_other_key_does_not_insert() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('ㄴ'), KeyModifiers::CONTROL));
+        assert!(app.composer.is_empty());
     }
 }

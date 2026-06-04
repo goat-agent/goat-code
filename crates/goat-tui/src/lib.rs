@@ -1,5 +1,6 @@
 mod app;
 mod composer;
+mod keymap;
 mod theme;
 mod transcript;
 mod tui;
