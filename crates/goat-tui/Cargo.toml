@@ -17,6 +17,8 @@ color-eyre = { workspace = true }
 unicode-width = { workspace = true }
 unicode-normalization = { workspace = true }
 tracing = { workspace = true }
+pulldown-cmark = { workspace = true }
+syntect = { workspace = true }
 
 [lints]
 workspace = true

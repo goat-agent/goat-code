@@ -1,6 +1,17 @@
 use ratatui::style::{Color, Modifier, Style};
 
 #[derive(Debug, Clone, Copy)]
+pub struct CodePalette {
+    pub bg: Color,
+    pub keyword: Color,
+    pub string: Color,
+    pub comment: Color,
+    pub number: Color,
+    pub type_: Color,
+    pub function: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct Theme {
     bg: Color,
     fg: Color,
@@ -11,6 +22,7 @@ pub struct Theme {
     muted: Color,
     accent: Color,
     border: Color,
+    pub code: CodePalette,
 }
 
 impl Default for Theme {
@@ -31,6 +43,15 @@ impl Theme {
             muted: Color::Rgb(0x6b, 0x70, 0x7c),
             accent: Color::Rgb(0xbb, 0x9a, 0xf7),
             border: Color::Rgb(0x2a, 0x2c, 0x32),
+            code: CodePalette {
+                bg: Color::Rgb(0x1a, 0x1b, 0x26),
+                keyword: Color::Rgb(0xbb, 0x9a, 0xf7),
+                string: Color::Rgb(0x9e, 0xce, 0x6a),
+                comment: Color::Rgb(0x56, 0x5f, 0x89),
+                number: Color::Rgb(0xff, 0x9e, 0x64),
+                type_: Color::Rgb(0x2a, 0xc3, 0xde),
+                function: Color::Rgb(0x7a, 0xa2, 0xf7),
+            },
         }
     }
 
@@ -45,6 +66,15 @@ impl Theme {
             muted: Color::Rgb(0x8a, 0x8f, 0x98),
             accent: Color::Rgb(0x6a, 0x3d, 0xc9),
             border: Color::Rgb(0xd9, 0xdc, 0xe1),
+            code: CodePalette {
+                bg: Color::Rgb(0xf0, 0xf0, 0xf5),
+                keyword: Color::Rgb(0x6a, 0x3d, 0xc9),
+                string: Color::Rgb(0x2f, 0x7d, 0x32),
+                comment: Color::Rgb(0x9e, 0xa3, 0xb0),
+                number: Color::Rgb(0xb5, 0x6a, 0x00),
+                type_: Color::Rgb(0x00, 0x7a, 0x8a),
+                function: Color::Rgb(0x2e, 0x5c, 0xc9),
+            },
         }
     }
 
@@ -78,5 +108,17 @@ impl Theme {
 
     pub fn error(self) -> Style {
         Style::new().fg(self.error).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn code_bg(self) -> Style {
+        Style::new().bg(self.code.bg)
+    }
+
+    pub fn code_token(self, color: Color) -> Style {
+        Style::new().fg(color).bg(self.code.bg)
+    }
+
+    pub fn code_plain(self) -> Style {
+        Style::new().fg(self.fg).bg(self.code.bg)
     }
 }

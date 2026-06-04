@@ -1,19 +1,41 @@
 use std::io;
 
 use crossterm::{
-    event::{DisableBracketedPaste, EnableBracketedPaste},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
+    terminal::supports_keyboard_enhancement,
 };
 use ratatui::DefaultTerminal;
 
 pub fn init() -> io::Result<DefaultTerminal> {
     let terminal = ratatui::init();
-    execute!(io::stdout(), EnableBracketedPaste)?;
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        execute!(
+            io::stdout(),
+            EnableBracketedPaste,
+            EnableMouseCapture,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        )?;
+    } else {
+        execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
+    }
     Ok(terminal)
 }
 
 pub fn restore() {
-    let _ = execute!(io::stdout(), DisableBracketedPaste);
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            PopKeyboardEnhancementFlags,
+        );
+    } else {
+        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
+    }
     ratatui::restore();
 }
 

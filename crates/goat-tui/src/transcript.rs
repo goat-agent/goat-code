@@ -8,7 +8,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::theme::Theme;
+use crate::{highlight::Highlighter, markdown, theme::Theme};
 
 #[derive(Debug)]
 enum ToolStatus {
@@ -19,7 +19,7 @@ enum ToolStatus {
 #[derive(Debug)]
 enum Item {
     User(String),
-    Text(String),
+    Agent(Vec<Line<'static>>),
     Tool {
         id: ToolCallId,
         name: String,
@@ -46,9 +46,10 @@ impl Transcript {
             .push_str(chunk);
     }
 
-    pub fn commit_text(&mut self, text: String) {
+    pub fn commit_text(&mut self, text: &str, hl: &dyn Highlighter, theme: Theme) {
         self.streaming = None;
-        self.items.push(Item::Text(text));
+        self.items
+            .push(Item::Agent(markdown::render(text, theme, hl)));
     }
 
     pub fn push_tool(&mut self, call: ToolCall) {
@@ -76,7 +77,7 @@ impl Transcript {
         self.items.push(Item::Error(text.into()));
     }
 
-    pub fn complete(&mut self, interrupted: bool) {
+    pub fn complete(&mut self, interrupted: bool, hl: &dyn Highlighter, theme: Theme) {
         if interrupted {
             for item in &mut self.items {
                 if let Item::Tool { status, .. } = item {
@@ -95,21 +96,33 @@ impl Transcript {
             } else {
                 buffer
             };
-            self.items.push(Item::Text(text));
+            self.items
+                .push(Item::Agent(markdown::render(&text, theme, hl)));
         }
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        let mut lines: Vec<Line> = Vec::new();
-
-        for (i, item) in self.items.iter().enumerate() {
-            lines.extend(item_lines(item, theme, area.width));
-            let next_is_tool = matches!(self.items.get(i + 1), Some(Item::Tool { .. }));
-            if !(matches!(item, Item::Tool { .. }) && next_is_tool) {
-                lines.push(Line::default());
-            }
+    pub fn content_height(&self, width: u16, theme: Theme) -> u16 {
+        let lines = self.build_lines(theme, width);
+        if width == 0 {
+            return u16::try_from(lines.len()).unwrap_or(u16::MAX);
         }
+        let w = usize::from(width);
+        lines
+            .iter()
+            .map(|l| {
+                let display: usize = l
+                    .spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                let rows = if display == 0 { 1 } else { display.div_ceil(w) };
+                u16::try_from(rows).unwrap_or(u16::MAX)
+            })
+            .sum::<u16>()
+    }
 
+    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, scroll: u16) {
+        let mut lines = self.build_lines(theme, area.width);
         if let Some(buffer) = &self.streaming {
             let mut streamed = labelled(buffer, "● ", theme.role_agent(), theme);
             if let Some(last) = streamed.last_mut() {
@@ -117,9 +130,6 @@ impl Transcript {
             }
             lines.extend(streamed);
         }
-
-        let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-        let scroll = total.saturating_sub(area.height);
         frame.render_widget(
             Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
@@ -127,12 +137,37 @@ impl Transcript {
             area,
         );
     }
+
+    fn build_lines(&self, theme: Theme, width: u16) -> Vec<Line<'_>> {
+        let mut lines: Vec<Line<'_>> = Vec::new();
+        for (i, item) in self.items.iter().enumerate() {
+            lines.extend(item_lines(item, theme, width));
+            let next_is_tool = matches!(self.items.get(i + 1), Some(Item::Tool { .. }));
+            if !(matches!(item, Item::Tool { .. }) && next_is_tool) {
+                lines.push(Line::default());
+            }
+        }
+        lines
+    }
 }
 
 fn item_lines(item: &Item, theme: Theme, width: u16) -> Vec<Line<'_>> {
     match item {
         Item::User(text) => labelled(text, "› ", theme.role_user(), theme),
-        Item::Text(text) => labelled(text, "● ", theme.role_agent(), theme),
+        Item::Agent(rendered) => {
+            let mut out: Vec<Line<'_>> = Vec::new();
+            if let Some(first) = rendered.first() {
+                let mut line = first.clone();
+                line.spans.insert(0, Span::styled("● ", theme.role_agent()));
+                out.push(line);
+            }
+            out.extend(rendered[1..].iter().map(|l| {
+                let mut padded = l.clone();
+                padded.spans.insert(0, Span::raw("  "));
+                padded
+            }));
+            out
+        }
         Item::Error(text) => labelled(text, "✗ ", theme.error(), theme),
         Item::Tool {
             name,
@@ -241,6 +276,7 @@ mod tests {
     use goat_protocol::{ToolCall, ToolCallId, ToolOutcome};
 
     use super::{Item, ToolStatus, Transcript};
+    use crate::{highlight::PlainHighlighter, theme::Theme};
 
     fn call(id: u64, name: &str, input: &str) -> ToolCall {
         ToolCall {
@@ -262,6 +298,10 @@ mod tests {
             ok: false,
             summary: Some(summary.to_owned()),
         }
+    }
+
+    fn commit(t: &mut Transcript, text: &str) {
+        t.commit_text(text, &PlainHighlighter, Theme::dark());
     }
 
     #[test]
@@ -301,23 +341,23 @@ mod tests {
         let mut t = Transcript::default();
         t.push_user("hi");
         t.push_delta("step one");
-        t.commit_text("step one".into());
+        commit(&mut t, "step one");
         t.push_tool(call(1, "Read", "src/lib.rs"));
         t.finish_tool(ToolCallId(1), ok());
         t.push_delta("step two");
-        t.commit_text("step two".into());
+        commit(&mut t, "step two");
 
         assert!(matches!(&t.items[0], Item::User(_)));
-        assert!(matches!(&t.items[1], Item::Text(s) if s == "step one"));
+        assert!(matches!(&t.items[1], Item::Agent(_)));
         assert!(matches!(&t.items[2], Item::Tool { .. }));
-        assert!(matches!(&t.items[3], Item::Text(s) if s == "step two"));
+        assert!(matches!(&t.items[3], Item::Agent(_)));
     }
 
     #[test]
     fn complete_interrupted_clears_running_tools() {
         let mut t = Transcript::default();
         t.push_tool(call(5, "Bash", "long cmd"));
-        t.complete(true);
+        t.complete(true, &PlainHighlighter, Theme::dark());
         if let Some(Item::Tool {
             status: ToolStatus::Done(o),
             ..
