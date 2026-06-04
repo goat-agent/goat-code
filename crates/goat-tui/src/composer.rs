@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::theme::Theme;
 
 const PROMPT_COLS: u16 = 2;
+const PLACEHOLDER: &str = "Ask anything…";
 
 pub struct Composer {
     lines: Vec<Vec<char>>,
@@ -39,6 +40,14 @@ impl Composer {
     pub fn desired_height(&self) -> u16 {
         let lines = u16::try_from(self.lines.len()).unwrap_or(u16::MAX);
         lines.saturating_add(2).clamp(3, 8)
+    }
+
+    pub fn on_first_row(&self) -> bool {
+        self.row == 0
+    }
+
+    pub fn on_last_row(&self) -> bool {
+        self.row + 1 == self.lines.len()
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -78,6 +87,28 @@ impl Composer {
         self.hist_cursor = None;
     }
 
+    pub fn delete_forward(&mut self) {
+        if self.col < self.lines[self.row].len() {
+            self.lines[self.row].remove(self.col);
+        } else if self.row + 1 < self.lines.len() {
+            let next = self.lines.remove(self.row + 1);
+            self.lines[self.row].extend(next);
+        }
+        self.hist_cursor = None;
+    }
+
+    pub fn delete_word_before(&mut self) {
+        while self.col > 0 && self.lines[self.row][self.col - 1] == ' ' {
+            self.lines[self.row].remove(self.col - 1);
+            self.col -= 1;
+        }
+        while self.col > 0 && self.lines[self.row][self.col - 1] != ' ' {
+            self.lines[self.row].remove(self.col - 1);
+            self.col -= 1;
+        }
+        self.hist_cursor = None;
+    }
+
     pub fn move_left(&mut self) {
         if self.col > 0 {
             self.col -= 1;
@@ -93,6 +124,47 @@ impl Composer {
         } else if self.row + 1 < self.lines.len() {
             self.row += 1;
             self.col = 0;
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        if self.row > 0 {
+            self.row -= 1;
+            self.col = self.col.min(self.lines[self.row].len());
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if self.row + 1 < self.lines.len() {
+            self.row += 1;
+            self.col = self.col.min(self.lines[self.row].len());
+        }
+    }
+
+    pub fn move_home(&mut self) {
+        self.col = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.col = self.lines[self.row].len();
+    }
+
+    pub fn move_word_left(&mut self) {
+        while self.col > 0 && self.lines[self.row][self.col - 1] == ' ' {
+            self.col -= 1;
+        }
+        while self.col > 0 && self.lines[self.row][self.col - 1] != ' ' {
+            self.col -= 1;
+        }
+    }
+
+    pub fn move_word_right(&mut self) {
+        let len = self.lines[self.row].len();
+        while self.col < len && self.lines[self.row][self.col] != ' ' {
+            self.col += 1;
+        }
+        while self.col < len && self.lines[self.row][self.col] == ' ' {
+            self.col += 1;
         }
     }
 
@@ -182,6 +254,19 @@ impl Composer {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
+        if self.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("› ", theme.accent()),
+                    Span::styled(PLACEHOLDER, theme.muted()),
+                ])),
+                inner,
+            );
+            let x = inner.x + PROMPT_COLS;
+            frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
+            return;
+        }
+
         let cursor_col = self.cursor_col();
         let scroll = cursor_col.saturating_sub(inner.width.saturating_sub(1));
 
@@ -224,5 +309,61 @@ mod tests {
         let mut composer = Composer::default();
         composer.insert_str("\u{1100}\u{1161}");
         assert_eq!(composer.cursor_col(), 2 + 2);
+    }
+
+    #[test]
+    fn delete_forward_removes_next_char() {
+        let mut composer = Composer::default();
+        composer.insert_str("abc");
+        composer.move_home();
+        composer.delete_forward();
+        assert_eq!(composer.text(), "bc");
+    }
+
+    #[test]
+    fn delete_word_before_removes_last_word() {
+        let mut composer = Composer::default();
+        composer.insert_str("hello world");
+        composer.delete_word_before();
+        assert_eq!(composer.text(), "hello ");
+    }
+
+    #[test]
+    fn move_up_down_stays_within_bounds() {
+        let mut composer = Composer::default();
+        composer.insert_str("line1\nline2\nline3");
+        assert_eq!(composer.row, 2);
+        composer.move_up();
+        assert_eq!(composer.row, 1);
+        composer.move_down();
+        assert_eq!(composer.row, 2);
+        composer.move_down();
+        assert_eq!(composer.row, 2);
+    }
+
+    #[test]
+    fn home_end_move_to_line_bounds() {
+        let mut composer = Composer::default();
+        composer.insert_str("hello");
+        composer.move_home();
+        assert_eq!(composer.col, 0);
+        composer.move_end();
+        assert_eq!(composer.col, 5);
+    }
+
+    #[test]
+    fn on_first_last_row_correct() {
+        let mut composer = Composer::default();
+        assert!(composer.on_first_row());
+        assert!(composer.on_last_row());
+        composer.insert_str("a\nb");
+        assert!(!composer.on_first_row());
+        assert!(composer.on_last_row());
+    }
+
+    #[test]
+    fn placeholder_shows_when_empty() {
+        let composer = Composer::default();
+        assert!(composer.is_empty());
     }
 }

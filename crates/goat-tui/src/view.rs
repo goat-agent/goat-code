@@ -7,7 +7,7 @@ use ratatui::{
 
 use crate::{app::App, theme::Theme};
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
     let area = frame.area();
     frame.render_widget(Block::new().style(theme.base()), area);
@@ -20,8 +20,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     ])
     .areas(area);
 
+    app.clamp_scroll(body.height, body.width);
+
     render_header(frame, header, app, theme);
-    app.transcript().render(frame, body, theme);
+    app.transcript().render(frame, body, theme, app.scroll());
     app.composer().render(frame, composer, theme);
     render_footer(frame, footer, app, theme);
 }
@@ -29,10 +31,9 @@ pub fn render(frame: &mut Frame, app: &App) {
 fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!("{} ", app.cwd()),
-            theme.muted(),
-        )))
-        .right_aligned(),
+            format!(" {}", app.cwd()),
+            theme.base(),
+        ))),
         area,
     );
 }
@@ -42,18 +43,24 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         Line::from(vec![
             Span::styled(format!(" {} ", app.spinner_frame()), theme.accent()),
             Span::styled("Working…", theme.muted()),
+            Span::styled(" · ", theme.muted()),
+            Span::styled("⌃c", theme.muted()),
+            Span::styled(" interrupt", theme.muted()),
         ])
     } else if app.quit_armed() {
-        Line::from(Span::styled(" ⌃C again to quit", theme.muted()))
+        Line::from(Span::styled(" ⌃c again to quit", theme.muted()))
     } else {
-        return;
+        Line::from(vec![
+            Span::styled(" ⇧↵", theme.muted()),
+            Span::styled(" newline", theme.muted()),
+            Span::styled(" · ", theme.muted()),
+            Span::styled("↑↓", theme.muted()),
+            Span::styled(" history", theme.muted()),
+            Span::styled(" · ", theme.muted()),
+            Span::styled("⌃c", theme.muted()),
+            Span::styled(" quit", theme.muted()),
+        ])
     };
-
-    let row = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: 1,
-    };
+    let row = Rect { height: 1, ..area };
     frame.render_widget(Paragraph::new(line), row);
 }

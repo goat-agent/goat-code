@@ -1,14 +1,17 @@
 use std::{path::Path, time::Duration};
 
 use crossterm::event::{
-    Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use futures::StreamExt;
 use goat_protocol::{Event as EngineEvent, Op, TaskId};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::{composer::Composer, theme::Theme, transcript::Transcript, tui, view};
+use crate::{
+    composer::Composer, highlight::SyntectHighlighter, theme::Theme, transcript::Transcript, tui,
+    view,
+};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK: Duration = Duration::from_millis(120);
@@ -25,6 +28,7 @@ pub struct App {
     theme: Theme,
     transcript: Transcript,
     composer: Composer,
+    highlighter: SyntectHighlighter,
     cwd: String,
     active: Option<TaskId>,
     next_task: u64,
@@ -32,6 +36,8 @@ pub struct App {
     quit_arm: Option<u16>,
     should_quit: bool,
     dirty: bool,
+    scroll: u16,
+    follow: bool,
 }
 
 impl App {
@@ -44,6 +50,7 @@ impl App {
             theme,
             transcript: Transcript::default(),
             composer: Composer::default(),
+            highlighter: SyntectHighlighter::new(),
             cwd,
             active: None,
             next_task: 1,
@@ -51,6 +58,8 @@ impl App {
             quit_arm: None,
             should_quit: false,
             dirty: true,
+            scroll: 0,
+            follow: true,
         }
     }
 
@@ -82,6 +91,21 @@ impl App {
                 self.dirty = true;
                 Vec::new()
             }
+            AppEvent::Input(CtEvent::Mouse(mouse)) => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.follow = false;
+                        self.scroll = self.scroll.saturating_sub(3);
+                        self.dirty = true;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.scroll = self.scroll.saturating_add(3);
+                        self.dirty = true;
+                    }
+                    _ => {}
+                }
+                Vec::new()
+            }
             AppEvent::Input(_) => Vec::new(),
             AppEvent::Engine(event) => {
                 self.on_engine(event);
@@ -102,6 +126,15 @@ impl App {
         self.quit_arm = None;
         self.dirty = true;
         match key.code {
+            KeyCode::PageUp => {
+                self.follow = false;
+                self.scroll = self.scroll.saturating_sub(10);
+                Vec::new()
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_add(10);
+                Vec::new()
+            }
             KeyCode::Enter
                 if key
                     .modifiers
@@ -115,24 +148,64 @@ impl App {
                 self.composer.backspace();
                 Vec::new()
             }
+            KeyCode::Delete => {
+                self.composer.delete_forward();
+                Vec::new()
+            }
             KeyCode::Left => {
-                self.composer.move_left();
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    self.composer.move_word_left();
+                } else {
+                    self.composer.move_left();
+                }
                 Vec::new()
             }
             KeyCode::Right => {
-                self.composer.move_right();
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    self.composer.move_word_right();
+                } else {
+                    self.composer.move_right();
+                }
+                Vec::new()
+            }
+            KeyCode::Home => {
+                self.composer.move_home();
+                Vec::new()
+            }
+            KeyCode::End => {
+                self.composer.move_end();
                 Vec::new()
             }
             KeyCode::Up => {
-                self.composer.history_prev();
+                if self.composer.on_first_row() {
+                    self.composer.history_prev();
+                } else {
+                    self.composer.move_up();
+                }
                 Vec::new()
             }
             KeyCode::Down => {
-                self.composer.history_next();
+                if self.composer.on_last_row() {
+                    self.composer.history_next();
+                } else {
+                    self.composer.move_down();
+                }
                 Vec::new()
             }
             KeyCode::Esc => {
                 self.composer.clear();
+                Vec::new()
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.composer.move_home();
+                Vec::new()
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.composer.move_end();
+                Vec::new()
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.composer.delete_word_before();
                 Vec::new()
             }
             KeyCode::Char(c) => {
@@ -168,6 +241,7 @@ impl App {
         self.next_task += 1;
         self.active = Some(id);
         self.transcript.push_user(text.clone());
+        self.follow = true;
         vec![Op::SubmitMessage { id, text }]
     }
 
@@ -175,17 +249,33 @@ impl App {
         match event {
             EngineEvent::TaskStarted { .. } => {}
             EngineEvent::AgentMessageDelta { chunk, .. } => self.transcript.push_delta(&chunk),
-            EngineEvent::AgentMessage { text, .. } => self.transcript.finish_agent(text),
-            EngineEvent::ToolBegin { call, .. } => self.transcript.push_tool(call.name),
+            EngineEvent::AgentMessage { text, .. } => {
+                self.transcript
+                    .finish_agent(&text, &self.highlighter, &self.theme);
+            }
+            EngineEvent::ToolBegin { call, .. } => self.transcript.push_tool(call.name, call.input),
             EngineEvent::ToolEnd { call, ok, .. } => self.transcript.finish_tool(&call.name, ok),
             EngineEvent::TaskComplete { interrupted, .. } => {
-                self.transcript.complete(interrupted);
+                self.transcript
+                    .complete(interrupted, &self.highlighter, &self.theme);
                 self.active = None;
             }
             EngineEvent::Error { message, .. } => {
                 self.transcript.push_error(message);
                 self.active = None;
             }
+        }
+        if self.follow {
+            self.scroll = u16::MAX;
+        }
+    }
+
+    pub(crate) fn clamp_scroll(&mut self, viewport_height: u16, content_width: u16) {
+        let content = self.transcript.content_height(content_width, self.theme);
+        let max = content.saturating_sub(viewport_height);
+        self.scroll = self.scroll.min(max);
+        if self.scroll >= max {
+            self.follow = true;
         }
     }
 
@@ -216,6 +306,9 @@ impl App {
     }
     pub(crate) fn spinner_frame(&self) -> &'static str {
         SPINNER[self.spinner % SPINNER.len()]
+    }
+    pub(crate) fn scroll(&self) -> u16 {
+        self.scroll
     }
 }
 
@@ -252,7 +345,7 @@ async fn event_loop(
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(TICK);
 
-    terminal.draw(|frame| view::render(frame, &app))?;
+    terminal.draw(|frame| view::render(frame, &mut app))?;
     while !app.should_quit {
         let event = tokio::select! {
             maybe = input.next() => match maybe {
@@ -273,7 +366,7 @@ async fn event_loop(
         }
 
         if app.take_dirty() {
-            terminal.draw(|frame| view::render(frame, &app))?;
+            terminal.draw(|frame| view::render(frame, &mut app))?;
         }
     }
     Ok(())
@@ -305,5 +398,14 @@ mod tests {
         assert!(!app.should_quit);
         app.on_ctrl_c();
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn scroll_follow_resets_on_submit() {
+        let mut app = App::new(Theme::dark());
+        app.follow = false;
+        app.composer.insert_str("hello");
+        app.submit();
+        assert!(app.follow);
     }
 }
