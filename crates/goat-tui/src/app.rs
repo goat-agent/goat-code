@@ -180,11 +180,13 @@ impl App {
     fn on_engine(&mut self, event: EngineEvent) {
         match event {
             EngineEvent::TaskStarted { .. } => {}
-            EngineEvent::AgentMessageDelta { chunk, .. } => self.transcript.push_delta(&chunk),
-            EngineEvent::AgentMessage { text, .. } => self.transcript.finish_agent(text),
-            EngineEvent::ToolBegin { call, .. } => self.transcript.push_tool(call.name),
-            EngineEvent::ToolEnd { call, ok, .. } => self.transcript.finish_tool(&call.name, ok),
-            EngineEvent::TaskComplete { interrupted, .. } => {
+            EngineEvent::TextDelta { chunk, .. } => self.transcript.push_delta(&chunk),
+            EngineEvent::TextDone { text, .. } => self.transcript.commit_text(text),
+            EngineEvent::ToolStarted { call, .. } => self.transcript.push_tool(call),
+            EngineEvent::ToolDone { call, outcome, .. } => {
+                self.transcript.finish_tool(call, outcome);
+            }
+            EngineEvent::TaskDone { interrupted, .. } => {
                 self.transcript.complete(interrupted);
                 self.active = None;
             }
