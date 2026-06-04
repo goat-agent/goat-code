@@ -1,0 +1,21 @@
+[package]
+name = "goat-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+goat-protocol = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+color-eyre = { workspace = true }
+unicode-width = { workspace = true }
+unicode-normalization = { workspace = true }
+
+[lints]
+workspace = true

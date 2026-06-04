@@ -1,0 +1,63 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jbj338033/goat-code"
+authors = ["jbj338033"]
+
+[workspace.dependencies]
+goat-protocol = { path = "crates/goat-protocol" }
+goat-config = { path = "crates/goat-config" }
+goat-core = { path = "crates/goat-core" }
+goat-tui = { path = "crates/goat-tui" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-util = "0.7"
+futures = "0.3"
+
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+clap = { version = "4", features = ["derive"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+directories = "6"
+unicode-width = "0.2"
+unicode-normalization = "0.1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+color-eyre = "0.6"
+anyhow = "1"
+thiserror = "2"
+
+axoupdater = "0.10"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "unwind"
+
+[profile.dist]
+inherits = "release"
+lto = "fat"
