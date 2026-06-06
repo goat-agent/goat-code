@@ -33,7 +33,7 @@ The UI and the engine communicate only through `goat-protocol` types over bounde
 
 - **No comments.** Write none of any kind — no `//`, `///`, `//!`, block comments, or TOML `#`. Convey intent through names and structure.
 - `unsafe` is forbidden workspace-wide (`unsafe_code = "forbid"`). clippy `pedantic` runs at warn; keep the tree clean under `-D warnings`.
-- Edition 2024, MSRV 1.86; the toolchain is pinned to 1.93 in `rust-toolchain.toml`.
+- Edition 2024, MSRV 1.95; `rust-toolchain.toml` tracks `stable` (let-chains and `cfg_select` rely on a current compiler).
 - Errors: library crates use `thiserror` enums; the application boundary uses `color_eyre::Result`.
 - **Logging goes to a rolling file, never stdout/stderr** — stdout corrupts the full-screen TUI. Use `tracing`; `GOAT_LOG` sets the filter and `goat --print-log-path` prints the directory.
 - Centralize dependency versions in the root `[workspace.dependencies]`; crates inherit with `{ workspace = true }`.
