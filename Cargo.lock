@@ -902,8 +902,13 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "color-eyre",
+ "goat-agent",
+ "goat-auth",
  "goat-config",
  "goat-core",
+ "goat-provider",
+ "goat-providers",
+ "goat-store",
  "goat-tui",
  "tokio",
  "tracing-appender",

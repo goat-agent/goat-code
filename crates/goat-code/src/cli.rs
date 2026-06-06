@@ -13,4 +13,26 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     Update,
+    #[command(subcommand)]
+    Auth(AuthCommand),
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommand {
+    #[command(visible_alias = "add")]
+    Login {
+        provider: String,
+        #[arg(long, short)]
+        account: Option<String>,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    #[command(visible_alias = "ls")]
+    List,
+    #[command(visible_alias = "rm")]
+    Logout {
+        provider: String,
+        #[arg(long, short)]
+        account: Option<String>,
+    },
 }
