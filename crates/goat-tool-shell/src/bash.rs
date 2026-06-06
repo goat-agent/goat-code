@@ -99,7 +99,7 @@ fn build_output(stdout: &[u8], stderr: &[u8], code: Option<i32>, max_bytes: usiz
         out.push_str(&String::from_utf8_lossy(stderr));
     }
     if out.len() > max_bytes {
-        let boundary = floor_char_boundary(&out, max_bytes);
+        let boundary = out.floor_char_boundary(max_bytes);
         out.truncate(boundary);
         out.push_str("\n[output truncated]");
     }
@@ -110,17 +110,6 @@ fn build_output(stdout: &[u8], stderr: &[u8], code: Option<i32>, max_bytes: usiz
         }
     }
     out
-}
-
-fn floor_char_boundary(text: &str, index: usize) -> usize {
-    if index >= text.len() {
-        return text.len();
-    }
-    let mut boundary = index;
-    while boundary > 0 && !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    boundary
 }
 
 #[cfg(test)]

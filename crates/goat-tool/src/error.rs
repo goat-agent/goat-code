@@ -60,20 +60,9 @@ pub fn outcome_from(result: &Result<String, ToolError>) -> (ToolOutcome, String)
 fn summarize(text: &str) -> Option<String> {
     text.lines().next().map(|line| {
         if line.len() > 80 {
-            format!("{}…", &line[..floor_char_boundary(line, 80)])
+            format!("{}…", &line[..line.floor_char_boundary(80)])
         } else {
             line.to_owned()
         }
     })
-}
-
-fn floor_char_boundary(text: &str, index: usize) -> usize {
-    if index >= text.len() {
-        return text.len();
-    }
-    let mut boundary = index;
-    while boundary > 0 && !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    boundary
 }
