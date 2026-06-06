@@ -28,6 +28,11 @@ goat-provider-lmstudio = { path = "crates/goat-provider-lmstudio" }
 goat-provider-llama-cpp = { path = "crates/goat-provider-llama-cpp" }
 goat-providers = { path = "crates/goat-providers" }
 goat-agent = { path = "crates/goat-agent" }
+goat-tool = { path = "crates/goat-tool" }
+goat-tool-fs = { path = "crates/goat-tool-fs" }
+goat-tool-shell = { path = "crates/goat-tool-shell" }
+goat-tool-search = { path = "crates/goat-tool-search" }
+goat-tools = { path = "crates/goat-tools" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
 tokio-util = "0.7"
@@ -40,6 +45,9 @@ clap = { version = "4", features = ["derive"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ignore = "0.4"
+regex = "1"
+tempfile = "3"
 unicode-width = "0.2"
 unicode-normalization = "0.1"
 pulldown-cmark = { version = "0.12", default-features = false }

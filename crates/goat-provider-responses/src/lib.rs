@@ -1,10 +1,13 @@
+use std::collections::HashMap;
+
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
-    AuthMethod, MessageRole, ModelEvent, ModelInfo, ModelProvider, ModelRequest,
-    ProviderCapabilities, ProviderId, ProviderMessage,
+    AuthMethod, ContentBlock, MessageRole, ModelEvent, ModelInfo, ModelProvider, ModelRequest,
+    ProviderCapabilities, ProviderId, ProviderMessage, ToolDefinition,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle};
 
 #[derive(Serialize)]
@@ -12,61 +15,91 @@ struct ResponsesRequest<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'a str>,
-    input: Vec<InputMessage<'a>>,
+    input: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
-    tool_choice: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     parallel_tool_calls: bool,
     store: bool,
     stream: bool,
 }
 
-#[derive(Serialize)]
-struct InputMessage<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    role: &'static str,
-    content: [ContentPart<'a>; 1],
+fn text_item(role: &str, content_kind: &str, text: &str) -> serde_json::Value {
+    json!({
+        "type": "message",
+        "role": role,
+        "content": [{ "type": content_kind, "text": text }],
+    })
 }
 
-#[derive(Serialize)]
-struct ContentPart<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    text: &'a str,
+fn append_message_items(
+    message: &ProviderMessage,
+    role: &str,
+    content_kind: &str,
+    input: &mut Vec<serde_json::Value>,
+) {
+    let mut text = String::new();
+    for block in &message.content {
+        match block {
+            ContentBlock::Text { text: chunk } => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(chunk);
+            }
+            ContentBlock::ToolUse {
+                id,
+                name,
+                input: args,
+            } => {
+                input.push(json!({
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                    "arguments": args.to_string(),
+                }));
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": tool_use_id,
+                    "output": content,
+                }));
+            }
+        }
+    }
+    if !text.is_empty() {
+        input.push(text_item(role, content_kind, &text));
+    }
 }
 
 pub fn build_body(
     model: &str,
     messages: &[ProviderMessage],
+    tools: &[ToolDefinition],
     default_instructions: Option<&str>,
     store: bool,
 ) -> serde_json::Value {
     let mut instructions = String::new();
-    let mut input: Vec<InputMessage> = Vec::new();
+    let mut input: Vec<serde_json::Value> = Vec::new();
     for message in messages {
         match message.role {
             MessageRole::System => {
                 if !instructions.is_empty() {
                     instructions.push('\n');
                 }
-                instructions.push_str(&message.content);
+                instructions.push_str(&message.text_content());
             }
-            MessageRole::User => input.push(InputMessage {
-                kind: "message",
-                role: "user",
-                content: [ContentPart {
-                    kind: "input_text",
-                    text: &message.content,
-                }],
-            }),
-            MessageRole::Assistant => input.push(InputMessage {
-                kind: "message",
-                role: "assistant",
-                content: [ContentPart {
-                    kind: "output_text",
-                    text: &message.content,
-                }],
-            }),
+            MessageRole::User => append_message_items(message, "user", "input_text", &mut input),
+            MessageRole::Assistant => {
+                append_message_items(message, "assistant", "output_text", &mut input);
+            }
         }
     }
     let instructions = if instructions.is_empty() {
@@ -74,13 +107,25 @@ pub fn build_body(
     } else {
         Some(instructions.as_str())
     };
+    let tools: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+            })
+        })
+        .collect();
+    let has_tools = !tools.is_empty();
     let request = ResponsesRequest {
         model,
         instructions,
         input,
-        tools: Vec::new(),
-        tool_choice: "auto",
-        parallel_tool_calls: false,
+        tools,
+        tool_choice: if has_tools { Some("auto") } else { None },
+        parallel_tool_calls: has_tools,
         store,
         stream: true,
     };
@@ -131,12 +176,40 @@ pub async fn run_request(
 
 async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<ModelEvent>) {
     let mut stream = response.bytes_stream().eventsource();
+    let mut tool_calls: HashMap<String, (String, String, String)> = HashMap::new();
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => match event.event.as_str() {
                 "response.output_text.delta" => {
                     if let Some(text) = parse_output_delta(&event.data)
                         && events.send(ModelEvent::TextDelta { text }).await.is_err()
+                    {
+                        return;
+                    }
+                }
+                "response.output_item.added" => {
+                    if let Some(call) = parse_function_call_item(&event.data) {
+                        tool_calls.insert(call.item_id, (call.call_id, call.name, String::new()));
+                    }
+                }
+                "response.function_call_arguments.delta" => {
+                    if let Some(delta) = parse_arguments_delta(&event.data)
+                        && let Some(entry) = tool_calls.get_mut(&delta.item_id)
+                    {
+                        entry.2.push_str(&delta.delta);
+                    }
+                }
+                "response.output_item.done" | "response.function_call_arguments.done" => {
+                    if let Some(item_id) = parse_item_id(&event.data)
+                        && let Some((call_id, name, input)) = tool_calls.remove(&item_id)
+                        && events
+                            .send(ModelEvent::ToolCall {
+                                id: call_id,
+                                name,
+                                input,
+                            })
+                            .await
+                            .is_err()
                     {
                         return;
                     }
@@ -172,6 +245,61 @@ struct OutputTextDelta {
 
 fn parse_output_delta(data: &str) -> Option<String> {
     serde_json::from_str::<OutputTextDelta>(data).ok()?.delta
+}
+
+#[derive(Deserialize)]
+struct OutputItemAdded {
+    item: OutputItem,
+}
+
+#[derive(Deserialize)]
+struct OutputItem {
+    #[serde(rename = "type")]
+    kind: String,
+    id: Option<String>,
+    call_id: Option<String>,
+    name: Option<String>,
+}
+
+struct FunctionCallItem {
+    item_id: String,
+    call_id: String,
+    name: String,
+}
+
+fn parse_function_call_item(data: &str) -> Option<FunctionCallItem> {
+    let item = serde_json::from_str::<OutputItemAdded>(data).ok()?.item;
+    if item.kind != "function_call" {
+        return None;
+    }
+    Some(FunctionCallItem {
+        item_id: item.id?,
+        call_id: item.call_id?,
+        name: item.name?,
+    })
+}
+
+#[derive(Deserialize)]
+struct ArgumentsDelta {
+    item_id: String,
+    delta: String,
+}
+
+fn parse_arguments_delta(data: &str) -> Option<ArgumentsDelta> {
+    serde_json::from_str::<ArgumentsDelta>(data).ok()
+}
+
+#[derive(Deserialize)]
+struct ItemRef {
+    item_id: Option<String>,
+    item: Option<OutputItem>,
+}
+
+fn parse_item_id(data: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<ItemRef>(data).ok()?;
+    parsed
+        .item_id
+        .or_else(|| parsed.item.and_then(|item| item.id))
 }
 
 #[derive(Deserialize)]
@@ -240,7 +368,7 @@ impl ModelProvider for ResponsesProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,
-            tools: false,
+            tools: true,
             auth: self.auth,
         }
     }
@@ -254,7 +382,7 @@ impl ModelProvider for ResponsesProvider {
         let url = format!("{}/responses", self.base_url);
         let bearer = self.bearer.clone();
         tokio::spawn(async move {
-            let body = build_body(&req.model, &req.messages, None, false);
+            let body = build_body(&req.model, &req.messages, &req.tools, None, false);
             run_request(&client, &url, bearer.as_deref(), None, &body, &events).await;
         })
     }
@@ -291,8 +419,12 @@ impl ModelProvider for ResponsesProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_body, parse_output_delta};
-    use goat_provider::{MessageRole, ProviderMessage};
+    use super::{
+        build_body, parse_arguments_delta, parse_function_call_item, parse_item_id,
+        parse_output_delta,
+    };
+    use goat_provider::{ContentBlock, MessageRole, ProviderMessage, ToolDefinition};
+    use serde_json::json;
 
     #[test]
     fn parses_output_text_delta() {
@@ -302,11 +434,8 @@ mod tests {
 
     #[test]
     fn default_instructions_used_when_no_system_message() {
-        let messages = vec![ProviderMessage {
-            role: MessageRole::User,
-            content: "hi".to_owned(),
-        }];
-        let body = build_body("gpt-5.5", &messages, Some("base"), false);
+        let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
+        let body = build_body("gpt-5.5", &messages, &[], Some("base"), false);
         assert_eq!(body["instructions"], "base");
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
@@ -315,26 +444,83 @@ mod tests {
     #[test]
     fn system_message_overrides_default_instructions() {
         let messages = vec![
-            ProviderMessage {
-                role: MessageRole::System,
-                content: "be terse".to_owned(),
-            },
-            ProviderMessage {
-                role: MessageRole::User,
-                content: "hi".to_owned(),
-            },
+            ProviderMessage::text(MessageRole::System, "be terse"),
+            ProviderMessage::text(MessageRole::User, "hi"),
         ];
-        let body = build_body("gpt-5.5", &messages, Some("base"), false);
+        let body = build_body("gpt-5.5", &messages, &[], Some("base"), false);
         assert_eq!(body["instructions"], "be terse");
     }
 
     #[test]
     fn instructions_omitted_when_empty_and_no_default() {
-        let messages = vec![ProviderMessage {
-            role: MessageRole::User,
-            content: "hi".to_owned(),
-        }];
-        let body = build_body("gpt-5.5", &messages, None, false);
+        let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
+        let body = build_body("gpt-5.5", &messages, &[], None, false);
         assert!(body.get("instructions").is_none());
+    }
+
+    #[test]
+    fn serializes_tool_definitions() {
+        let tools = vec![ToolDefinition {
+            name: "read_file".to_owned(),
+            description: "reads a file".to_owned(),
+            input_schema: json!({ "type": "object" }),
+        }];
+        let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
+        let body = build_body("gpt-5.5", &messages, &tools, None, false);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "read_file");
+        assert_eq!(body["tools"][0]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn serializes_tool_use_and_result_items() {
+        let assistant = ProviderMessage {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".to_owned(),
+                name: "read_file".to_owned(),
+                input: json!({ "path": "a.txt" }),
+            }],
+        };
+        let result = ProviderMessage {
+            role: MessageRole::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_owned(),
+                content: "file body".to_owned(),
+                is_error: false,
+            }],
+        };
+        let body = build_body("gpt-5.5", &[assistant, result], &[], None, false);
+        assert_eq!(body["input"][0]["type"], "function_call");
+        assert_eq!(body["input"][0]["call_id"], "call_1");
+        assert_eq!(body["input"][0]["name"], "read_file");
+        assert_eq!(body["input"][0]["arguments"], r#"{"path":"a.txt"}"#);
+        assert_eq!(body["input"][1]["type"], "function_call_output");
+        assert_eq!(body["input"][1]["call_id"], "call_1");
+        assert_eq!(body["input"][1]["output"], "file body");
+    }
+
+    #[test]
+    fn accumulates_function_call_from_stream() {
+        let added = r#"{"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file"}}"#;
+        let call = parse_function_call_item(added).unwrap();
+        assert_eq!(call.item_id, "fc_1");
+        assert_eq!(call.call_id, "call_1");
+        assert_eq!(call.name, "read_file");
+
+        let first = r#"{"item_id":"fc_1","delta":"{\"path\":"}"#;
+        let second = r#"{"item_id":"fc_1","delta":"\"a.txt\"}"}"#;
+        let mut buf = String::new();
+        for chunk in [first, second] {
+            let delta = parse_arguments_delta(chunk).unwrap();
+            assert_eq!(delta.item_id, "fc_1");
+            buf.push_str(&delta.delta);
+        }
+        assert_eq!(buf, r#"{"path":"a.txt"}"#);
+
+        let done = r#"{"item_id":"fc_1"}"#;
+        assert_eq!(parse_item_id(done).as_deref(), Some("fc_1"));
+        let done_item = r#"{"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file"}}"#;
+        assert_eq!(parse_item_id(done_item).as_deref(), Some("fc_1"));
     }
 }

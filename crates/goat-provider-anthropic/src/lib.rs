@@ -1,11 +1,14 @@
+use std::collections::HashMap;
+
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_auth::{CredentialKey, CredentialStore};
 use goat_provider::{
-    AuthMethod, MessageRole, ModelEvent, ModelInfo, ModelProvider, ModelRequest,
-    ProviderCapabilities, ProviderId,
+    AuthMethod, ContentBlock, MessageRole, ModelEvent, ModelInfo, ModelProvider, ModelRequest,
+    ProviderCapabilities, ProviderId, ProviderMessage,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle};
 
 pub const PROVIDER_ID: &str = "anthropic";
@@ -59,23 +62,71 @@ struct MessagesRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<&'a str>,
-    messages: Vec<OutMessage<'a>>,
+    messages: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<serde_json::Value>,
 }
 
-#[derive(Serialize)]
-struct OutMessage<'a> {
-    role: &'a str,
-    content: &'a str,
+fn content_block_json(block: &ContentBlock) -> serde_json::Value {
+    match block {
+        ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
+        ContentBlock::ToolUse { id, name, input } => json!({
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": input,
+        }),
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": content,
+            "is_error": is_error,
+        }),
+    }
+}
+
+fn message_json(role: &str, message: &ProviderMessage) -> serde_json::Value {
+    let blocks: Vec<serde_json::Value> = message.content.iter().map(content_block_json).collect();
+    json!({ "role": role, "content": blocks })
 }
 
 #[derive(Deserialize)]
 struct DeltaEvent {
-    delta: Option<TextDelta>,
+    delta: Option<DeltaBody>,
 }
 
 #[derive(Deserialize)]
-struct TextDelta {
+struct DeltaBody {
     text: Option<String>,
+    partial_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ContentBlockStart {
+    index: u32,
+    content_block: ContentBlockInfo,
+}
+
+#[derive(Deserialize)]
+struct ContentBlockInfo {
+    #[serde(rename = "type")]
+    kind: String,
+    id: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ContentBlockStop {
+    index: u32,
+}
+
+#[derive(Deserialize)]
+struct IndexedEvent {
+    index: u32,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +144,108 @@ fn parse_text_delta(data: &str) -> Option<String> {
     serde_json::from_str::<DeltaEvent>(data).ok()?.delta?.text
 }
 
+fn parse_input_json_delta(data: &str) -> Option<String> {
+    serde_json::from_str::<DeltaEvent>(data)
+        .ok()?
+        .delta?
+        .partial_json
+}
+
+fn event_index(data: &str) -> Result<u32, serde_json::Error> {
+    serde_json::from_str::<IndexedEvent>(data).map(|event| event.index)
+}
+
+fn split_request(req: &ModelRequest) -> (String, Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let mut system = String::new();
+    let mut messages = Vec::new();
+    for message in &req.messages {
+        match message.role {
+            MessageRole::System => {
+                if !system.is_empty() {
+                    system.push('\n');
+                }
+                system.push_str(&message.text_content());
+            }
+            MessageRole::User => messages.push(message_json("user", message)),
+            MessageRole::Assistant => messages.push(message_json("assistant", message)),
+        }
+    }
+    let tools = req
+        .tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            })
+        })
+        .collect();
+    (system, messages, tools)
+}
+
+async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<ModelEvent>) {
+    let mut stream = response.bytes_stream().eventsource();
+    let mut tool_calls: HashMap<u32, (String, String, String)> = HashMap::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(event) => match event.event.as_str() {
+                "content_block_start" => {
+                    if let Ok(start) = serde_json::from_str::<ContentBlockStart>(&event.data)
+                        && start.content_block.kind == "tool_use"
+                        && let (Some(id), Some(name)) =
+                            (start.content_block.id, start.content_block.name)
+                    {
+                        tool_calls.insert(start.index, (id, name, String::new()));
+                    }
+                }
+                "content_block_delta" => {
+                    if let Some(text) = parse_text_delta(&event.data) {
+                        if events.send(ModelEvent::TextDelta { text }).await.is_err() {
+                            return;
+                        }
+                    } else if let Some(partial) = parse_input_json_delta(&event.data)
+                        && let Ok(index) = event_index(&event.data)
+                        && let Some(entry) = tool_calls.get_mut(&index)
+                    {
+                        entry.2.push_str(&partial);
+                    }
+                }
+                "content_block_stop" => {
+                    if let Ok(stop) = serde_json::from_str::<ContentBlockStop>(&event.data)
+                        && let Some((id, name, input)) = tool_calls.remove(&stop.index)
+                        && events
+                            .send(ModelEvent::ToolCall { id, name, input })
+                            .await
+                            .is_err()
+                    {
+                        return;
+                    }
+                }
+                "message_stop" => break,
+                "error" => {
+                    let _ = events
+                        .send(ModelEvent::Failed {
+                            message: event.data,
+                        })
+                        .await;
+                    return;
+                }
+                _ => {}
+            },
+            Err(err) => {
+                let _ = events
+                    .send(ModelEvent::Failed {
+                        message: err.to_string(),
+                    })
+                    .await;
+                return;
+            }
+        }
+    }
+    let _ = events.send(ModelEvent::Completed).await;
+}
+
 impl ModelProvider for AnthropicProvider {
     fn id(&self) -> ProviderId {
         ProviderId::from(PROVIDER_ID)
@@ -101,7 +254,7 @@ impl ModelProvider for AnthropicProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,
-            tools: false,
+            tools: true,
             auth: AuthMethod::ApiKey,
         }
     }
@@ -111,26 +264,7 @@ impl ModelProvider for AnthropicProvider {
         let url = format!("{}/messages", self.base_url);
         let api_key = self.api_key.clone();
         tokio::spawn(async move {
-            let mut system = String::new();
-            let mut out_messages = Vec::new();
-            for message in &req.messages {
-                match message.role {
-                    MessageRole::System => {
-                        if !system.is_empty() {
-                            system.push('\n');
-                        }
-                        system.push_str(&message.content);
-                    }
-                    MessageRole::User => out_messages.push(OutMessage {
-                        role: "user",
-                        content: &message.content,
-                    }),
-                    MessageRole::Assistant => out_messages.push(OutMessage {
-                        role: "assistant",
-                        content: &message.content,
-                    }),
-                }
-            }
+            let (system, messages, tools) = split_request(&req);
             let body = MessagesRequest {
                 model: &req.model,
                 max_tokens: MAX_TOKENS,
@@ -140,7 +274,8 @@ impl ModelProvider for AnthropicProvider {
                 } else {
                     Some(system.as_str())
                 },
-                messages: out_messages,
+                messages,
+                tools,
             };
             let mut builder = client
                 .post(&url)
@@ -170,39 +305,7 @@ impl ModelProvider for AnthropicProvider {
                     .await;
                 return;
             }
-            let mut stream = resp.bytes_stream().eventsource();
-            while let Some(event) = stream.next().await {
-                match event {
-                    Ok(event) => match event.event.as_str() {
-                        "content_block_delta" => {
-                            if let Some(text) = parse_text_delta(&event.data)
-                                && events.send(ModelEvent::TextDelta { text }).await.is_err()
-                            {
-                                return;
-                            }
-                        }
-                        "message_stop" => break,
-                        "error" => {
-                            let _ = events
-                                .send(ModelEvent::Failed {
-                                    message: event.data,
-                                })
-                                .await;
-                            return;
-                        }
-                        _ => {}
-                    },
-                    Err(err) => {
-                        let _ = events
-                            .send(ModelEvent::Failed {
-                                message: err.to_string(),
-                            })
-                            .await;
-                        return;
-                    }
-                }
-            }
-            let _ = events.send(ModelEvent::Completed).await;
+            stream_messages(resp, &events).await;
         })
     }
 
@@ -240,7 +343,9 @@ impl ModelProvider for AnthropicProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_text_delta;
+    use std::collections::HashMap;
+
+    use super::{event_index, parse_input_json_delta, parse_text_delta};
 
     #[test]
     fn parses_text_delta() {
@@ -249,13 +354,52 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_text_delta() {
-        let data = r#"{"type":"content_block_delta","delta":{"type":"input_json_delta"}}"#;
+    fn text_delta_helper_skips_input_json() {
+        let data = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\""}}"#;
         assert_eq!(parse_text_delta(data), None);
+    }
+
+    #[test]
+    fn parses_input_json_delta() {
+        let data = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\""}}"#;
+        assert_eq!(parse_input_json_delta(data).as_deref(), Some("{\"a\""));
+        assert_eq!(event_index(data).unwrap(), 1);
+    }
+
+    #[test]
+    fn accumulates_tool_call_across_events() {
+        let mut tool_calls: HashMap<u32, (String, String, String)> = HashMap::new();
+        let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file"}}"#;
+        let start: super::ContentBlockStart = serde_json::from_str(start).unwrap();
+        assert_eq!(start.content_block.kind, "tool_use");
+        tool_calls.insert(
+            start.index,
+            (
+                start.content_block.id.unwrap(),
+                start.content_block.name.unwrap(),
+                String::new(),
+            ),
+        );
+
+        let first = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#;
+        let second = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"a.txt\"}"}}"#;
+        for chunk in [first, second] {
+            let partial = parse_input_json_delta(chunk).unwrap();
+            let index = event_index(chunk).unwrap();
+            tool_calls.get_mut(&index).unwrap().2.push_str(&partial);
+        }
+
+        let stop = r#"{"type":"content_block_stop","index":0}"#;
+        let stop: super::ContentBlockStop = serde_json::from_str(stop).unwrap();
+        let (id, name, input) = tool_calls.remove(&stop.index).unwrap();
+        assert_eq!(id, "toolu_1");
+        assert_eq!(name, "read_file");
+        assert_eq!(input, r#"{"path":"a.txt"}"#);
     }
 
     #[test]
     fn handles_malformed_json() {
         assert_eq!(parse_text_delta("not json"), None);
+        assert_eq!(parse_input_json_delta("not json"), None);
     }
 }

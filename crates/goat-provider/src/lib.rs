@@ -26,10 +26,55 @@ pub enum MessageRole {
     Assistant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderMessage {
     pub role: MessageRole,
-    pub content: String,
+    pub content: Vec<ContentBlock>,
+}
+
+impl ProviderMessage {
+    pub fn text(role: MessageRole, text: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    pub fn text_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,10 +82,12 @@ pub struct ModelInfo {
     pub id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub model: String,
     pub messages: Vec<ProviderMessage>,
+    #[serde(default)]
+    pub tools: Vec<ToolDefinition>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,10 +201,8 @@ mod tests {
         let handle = provider.request(
             ModelRequest {
                 model: "mock-1".into(),
-                messages: vec![ProviderMessage {
-                    role: MessageRole::User,
-                    content: "hi".into(),
-                }],
+                messages: vec![ProviderMessage::text(MessageRole::User, "hi")],
+                tools: vec![],
             },
             tx,
         );

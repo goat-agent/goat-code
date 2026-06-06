@@ -334,7 +334,7 @@ impl ModelProvider for CodexProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,
-            tools: false,
+            tools: true,
             auth: AuthMethod::OAuth,
         }
     }
@@ -356,6 +356,7 @@ impl ModelProvider for CodexProvider {
             let body = goat_provider_responses::build_body(
                 &req.model,
                 &req.messages,
+                &req.tools,
                 Some(DEFAULT_INSTRUCTIONS),
                 false,
             );
