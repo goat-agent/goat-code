@@ -79,4 +79,15 @@ mod tests {
         let resolved = resolve_in_cwd(&cwd, "./subdir/../file").unwrap();
         assert_eq!(resolved, cwd.join("file"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_rejected() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        symlink("/etc", cwd.join("link")).unwrap();
+        let result = resolve_in_cwd(&cwd, "link/passwd");
+        assert!(matches!(result, Err(ToolError::PathEscape { .. })));
+    }
 }
