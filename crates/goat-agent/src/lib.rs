@@ -717,13 +717,14 @@ async fn handle_turn(
                 None
             };
 
+            let run_fut = async {
+                match ctx.tools.get(name) {
+                    Some(tool) => tool.run(input_json, &tool_ctx).await,
+                    None => Err(goat_tool::ToolError::UnknownTool { name: name.clone() }),
+                }
+            };
+            let mut run_fut = std::pin::pin!(run_fut);
             let result = loop {
-                let run_fut = async {
-                    match ctx.tools.get(name) {
-                        Some(tool) => tool.run(input_json, &tool_ctx).await,
-                        None => Err(goat_tool::ToolError::UnknownTool { name: name.clone() }),
-                    }
-                };
                 tokio::select! {
                     biased;
                     maybe_op = ops.recv() => match maybe_op {
@@ -734,7 +735,7 @@ async fn handle_turn(
                         Some(Op::Shutdown) | None => return Flow::Shutdown,
                         Some(_) => {}
                     },
-                    r = run_fut => break r,
+                    r = &mut run_fut => break r,
                 }
             };
 
