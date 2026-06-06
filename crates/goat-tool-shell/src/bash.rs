@@ -6,7 +6,6 @@ use tokio::{io::AsyncReadExt, process::Command, time};
 
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 300_000;
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 pub struct BashTool;
 
@@ -39,10 +38,10 @@ impl Tool for BashTool {
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
-            let timeout_ms = args
-                .timeout_ms
-                .unwrap_or(DEFAULT_TIMEOUT_MS)
-                .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+            let timeout_dur = match args.timeout_ms {
+                Some(ms) => Duration::from_millis(ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)),
+                None => ctx.bash_timeout,
+            };
 
             let mut child = Command::new("sh")
                 .arg("-c")
@@ -70,11 +69,13 @@ impl Tool for BashTool {
                 (stdout, stderr, status)
             };
 
-            let result = time::timeout(Duration::from_millis(timeout_ms), collect).await;
+            let result = time::timeout(timeout_dur, collect).await;
             let Ok((stdout, stderr, status)) = result else {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                return Err(ToolError::Timeout { ms: timeout_ms });
+                return Err(ToolError::Timeout {
+                    ms: u64::try_from(timeout_dur.as_millis()).unwrap_or(MAX_TIMEOUT_MS),
+                });
             };
 
             let code = status.ok().and_then(|s| s.code());
