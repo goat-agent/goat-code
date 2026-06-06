@@ -7,6 +7,14 @@ use tokio::{io::AsyncReadExt, process::Command, time};
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 
+struct ChildGuard(tokio::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.start_kill();
+    }
+}
+
 pub struct BashTool;
 
 #[derive(Deserialize)]
@@ -43,7 +51,7 @@ impl Tool for BashTool {
                 None => ctx.bash_timeout,
             };
 
-            let mut child = Command::new("sh")
+            let child = Command::new("sh")
                 .arg("-c")
                 .arg(&args.command)
                 .current_dir(&ctx.cwd)
@@ -53,10 +61,11 @@ impl Tool for BashTool {
                 .spawn()
                 .map_err(|source| ToolError::Spawn { source })?;
 
-            let mut stdout_pipe = child.stdout.take();
-            let mut stderr_pipe = child.stderr.take();
+            let mut guard = ChildGuard(child);
+            let mut stdout_pipe = guard.0.stdout.take();
+            let mut stderr_pipe = guard.0.stderr.take();
 
-            let collect = async {
+            let result = time::timeout(timeout_dur, async {
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
                 if let Some(pipe) = stdout_pipe.as_mut() {
@@ -65,14 +74,12 @@ impl Tool for BashTool {
                 if let Some(pipe) = stderr_pipe.as_mut() {
                     let _ = pipe.read_to_end(&mut stderr).await;
                 }
-                let status = child.wait().await;
+                let status = guard.0.wait().await;
                 (stdout, stderr, status)
-            };
+            })
+            .await;
 
-            let result = time::timeout(timeout_dur, collect).await;
             let Ok((stdout, stderr, status)) = result else {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
                 return Err(ToolError::Timeout {
                     ms: u64::try_from(timeout_dur.as_millis()).unwrap_or(MAX_TIMEOUT_MS),
                 });
