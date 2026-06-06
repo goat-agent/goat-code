@@ -94,6 +94,13 @@ impl Theme {
         Style::new().fg(self.border)
     }
 
+    pub fn selected(self) -> Style {
+        Style::new()
+            .fg(self.bg)
+            .bg(self.accent)
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub fn role_user(self) -> Style {
         Style::new().fg(self.user).add_modifier(Modifier::BOLD)
     }

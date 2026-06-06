@@ -4,13 +4,21 @@ use crossterm::event::{
     Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use futures::StreamExt;
-use goat_protocol::{Event as EngineEvent, Op, TaskId};
+use goat_protocol::{
+    Event as EngineEvent, LoginCredential, LoginProvider, ModelEntry, ModelTarget, Op, TaskId,
+};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
-    composer::Composer, highlight::SyntectHighlighter, keymap, theme::Theme,
-    transcript::Transcript, tui, view,
+    composer::Composer,
+    highlight::SyntectHighlighter,
+    keymap,
+    login::{Login, LoginOutcome},
+    picker::{Picker, PickerOutcome},
+    theme::Theme,
+    transcript::Transcript,
+    tui, view,
 };
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -38,6 +46,11 @@ pub struct App {
     dirty: bool,
     scroll: u16,
     follow: bool,
+    models: Vec<ModelEntry>,
+    model: Option<ModelTarget>,
+    picker: Option<Picker>,
+    login: Option<Login>,
+    login_providers: Vec<LoginProvider>,
 }
 
 impl App {
@@ -60,6 +73,11 @@ impl App {
             dirty: true,
             scroll: 0,
             follow: true,
+            models: Vec::new(),
+            model: None,
+            picker: None,
+            login: None,
+            login_providers: Vec::new(),
         }
     }
 
@@ -83,7 +101,15 @@ impl App {
                 self.on_key(key)
             }
             AppEvent::Input(CtEvent::Paste(text)) => {
-                self.composer.insert_str(&text);
+                if let Some(picker) = &mut self.picker {
+                    for ch in text.chars() {
+                        picker.on_char(ch);
+                    }
+                } else if let Some(login) = &mut self.login {
+                    login.insert_str(&text);
+                } else {
+                    self.composer.insert_str(&text);
+                }
                 self.dirty = true;
                 Vec::new()
             }
@@ -121,6 +147,12 @@ impl App {
 
     fn on_key(&mut self, key: KeyEvent) -> Vec<Op> {
         tracing::trace!(code = ?key.code, modifiers = ?key.modifiers, "key");
+        if self.picker.is_some() {
+            return self.on_picker_key(key);
+        }
+        if self.login.is_some() {
+            return self.on_login_key(key);
+        }
         if let Some(ch) = keymap::ctrl_key(&key) {
             if ch == 'c' {
                 return self.on_ctrl_c();
@@ -216,6 +248,100 @@ impl App {
         }
     }
 
+    fn on_picker_key(&mut self, key: KeyEvent) -> Vec<Op> {
+        self.dirty = true;
+        if let Some(ch) = keymap::ctrl_key(&key) {
+            if ch == 'c' {
+                self.picker = None;
+            }
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Esc => self.picker = None,
+            KeyCode::Up => {
+                if let Some(picker) = &mut self.picker {
+                    picker.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(picker) = &mut self.picker {
+                    picker.move_down();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(picker) = &mut self.picker {
+                    picker.backspace();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(picker) = &mut self.picker
+                    && let PickerOutcome::Selected(target) = picker.choose()
+                {
+                    self.picker = None;
+                    return vec![Op::SelectModel { target }];
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(picker) = &mut self.picker {
+                    picker.on_char(c);
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn on_login_key(&mut self, key: KeyEvent) -> Vec<Op> {
+        self.dirty = true;
+        if let Some(ch) = keymap::ctrl_key(&key) {
+            if ch == 'c' {
+                self.login = None;
+            }
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Esc => self.login = None,
+            KeyCode::Up => {
+                if let Some(login) = &mut self.login {
+                    login.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(login) = &mut self.login {
+                    login.move_down();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(login) = &mut self.login {
+                    login.backspace();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(login) = &mut self.login
+                    && let LoginOutcome::Submit {
+                        provider,
+                        credential,
+                    } = login.enter()
+                {
+                    if matches!(credential, LoginCredential::ApiKey(_)) {
+                        self.login = None;
+                    }
+                    return vec![Op::Login {
+                        provider,
+                        credential,
+                    }];
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(login) = &mut self.login {
+                    login.on_char(c);
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
     fn on_ctrl_c(&mut self) -> Vec<Op> {
         self.dirty = true;
         if let Some(id) = self.active {
@@ -234,7 +360,22 @@ impl App {
             return Vec::new();
         }
         let text = self.composer.take();
-        if text.trim().is_empty() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        if trimmed == "/model" {
+            self.picker = Some(Picker::new(self.models.clone()));
+            self.dirty = true;
+            return Vec::new();
+        }
+        if trimmed == "/login" {
+            self.login = Some(Login::new(self.login_providers.clone()));
+            self.dirty = true;
+            return Vec::new();
+        }
+        if trimmed.starts_with('/') {
+            self.dirty = true;
             return Vec::new();
         }
         let id = TaskId(self.next_task);
@@ -248,6 +389,28 @@ impl App {
     fn on_engine(&mut self, event: EngineEvent) {
         match event {
             EngineEvent::TaskStarted { .. } => {}
+            EngineEvent::ModelListChanged { entries } => {
+                if let Some(picker) = &mut self.picker {
+                    picker.set_entries(entries.clone());
+                }
+                self.models = entries;
+            }
+            EngineEvent::ModelSelected { target } => self.model = Some(target),
+            EngineEvent::LoginProviders { providers } => self.login_providers = providers,
+            EngineEvent::LoginStatus {
+                message, done, ok, ..
+            } => {
+                if done {
+                    self.login = None;
+                    if ok {
+                        self.transcript.push_notice(message);
+                    } else {
+                        self.transcript.push_error(message);
+                    }
+                } else if let Some(login) = &mut self.login {
+                    login.set_status(message);
+                }
+            }
             EngineEvent::TextDelta { chunk, .. } => self.transcript.push_delta(&chunk),
             EngineEvent::TextDone { text, .. } => {
                 self.transcript
@@ -311,6 +474,15 @@ impl App {
     }
     pub(crate) fn scroll(&self) -> u16 {
         self.scroll
+    }
+    pub(crate) fn picker(&self) -> Option<&Picker> {
+        self.picker.as_ref()
+    }
+    pub(crate) fn login(&self) -> Option<&Login> {
+        self.login.as_ref()
+    }
+    pub(crate) fn current_model(&self) -> Option<&ModelTarget> {
+        self.model.as_ref()
     }
 }
 
@@ -377,10 +549,36 @@ async fn event_loop(
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use goat_protocol::Op;
+    use goat_protocol::{
+        AccountChoice, AuthMethod, Event as EngineEvent, LoginCredential, LoginProvider,
+        ModelEntry, ModelTarget, Op,
+    };
 
     use super::App;
     use crate::theme::Theme;
+
+    fn login_provider(id: &str, method: AuthMethod) -> LoginProvider {
+        LoginProvider {
+            id: id.to_owned(),
+            method,
+        }
+    }
+
+    fn single_entry(provider: &str, model: &str) -> ModelEntry {
+        ModelEntry {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            accounts: vec![AccountChoice {
+                id: "default".to_owned(),
+                display: "default".to_owned(),
+                target: ModelTarget {
+                    provider: provider.to_owned(),
+                    model: model.to_owned(),
+                    account: "default".to_owned(),
+                },
+            }],
+        }
+    }
 
     fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
@@ -444,5 +642,127 @@ mod tests {
         app.composer.insert_str("hello");
         app.submit();
         assert!(app.follow);
+    }
+
+    #[test]
+    fn slash_model_opens_picker_without_op() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("/model");
+        let ops = app.submit();
+        assert!(ops.is_empty());
+        assert!(app.picker.is_some());
+    }
+
+    #[test]
+    fn picker_esc_closes() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("/model");
+        app.submit();
+        app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn picker_enter_selects_and_emits_op() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ModelListChanged {
+            entries: vec![single_entry("openai", "gpt")],
+        });
+        app.composer.insert_str("/model");
+        app.submit();
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(ops.as_slice(), [Op::SelectModel { .. }]));
+        assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn picker_filter_then_select() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ModelListChanged {
+            entries: vec![
+                single_entry("openai", "gpt"),
+                single_entry("anthropic", "claude"),
+            ],
+        });
+        app.composer.insert_str("/model");
+        app.submit();
+        for ch in "claude".chars() {
+            app.on_key(press(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(ops.as_slice(), [Op::SelectModel { target }] if target.provider == "anthropic")
+        );
+    }
+
+    #[test]
+    fn picker_empty_state_keeps_open_on_enter() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("/model");
+        app.submit();
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(ops.is_empty());
+        assert!(app.picker.is_some());
+    }
+
+    #[test]
+    fn slash_login_opens_login_overlay() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::LoginProviders {
+            providers: vec![login_provider("openai", AuthMethod::ApiKey)],
+        });
+        app.composer.insert_str("/login");
+        let ops = app.submit();
+        assert!(ops.is_empty());
+        assert!(app.login.is_some());
+    }
+
+    #[test]
+    fn login_api_key_provider_enters_key_and_emits_op() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::LoginProviders {
+            providers: vec![login_provider("openai", AuthMethod::ApiKey)],
+        });
+        app.composer.insert_str("/login");
+        app.submit();
+        app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        for ch in "sk".chars() {
+            app.on_key(press(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            ops.as_slice(),
+            [Op::Login { provider, credential }]
+                if provider == "openai" && matches!(credential, LoginCredential::ApiKey(key) if key == "sk")
+        ));
+        assert!(app.login.is_none());
+    }
+
+    #[test]
+    fn login_oauth_provider_emits_oauth_and_stays_open() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::LoginProviders {
+            providers: vec![login_provider("openai-codex", AuthMethod::OAuth)],
+        });
+        app.composer.insert_str("/login");
+        app.submit();
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            ops.as_slice(),
+            [Op::Login { provider, credential }]
+                if provider == "openai-codex" && matches!(credential, LoginCredential::OAuth)
+        ));
+        assert!(app.login.is_some());
+    }
+
+    #[test]
+    fn unknown_slash_command_is_ignored() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("/bogus");
+        let ops = app.submit();
+        assert!(ops.is_empty());
+        assert!(app.picker.is_none());
+        assert!(app.login.is_none());
+        assert!(app.active.is_none());
     }
 }

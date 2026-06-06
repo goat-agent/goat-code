@@ -246,7 +246,7 @@ impl Composer {
         PROMPT_COLS.saturating_add(u16::try_from(width).unwrap_or(u16::MAX))
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
+    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool) {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(theme.border())
@@ -262,8 +262,10 @@ impl Composer {
                 ])),
                 inner,
             );
-            let x = inner.x + PROMPT_COLS;
-            frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
+            if focused {
+                let x = inner.x + PROMPT_COLS;
+                frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
+            }
             return;
         }
 
@@ -285,9 +287,11 @@ impl Composer {
             .collect();
         frame.render_widget(Paragraph::new(lines).scroll((0, scroll)), inner);
 
-        let x = inner.x + cursor_col.saturating_sub(scroll);
-        let y = inner.y + u16::try_from(self.row).unwrap_or(u16::MAX);
-        frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), y));
+        if focused {
+            let x = inner.x + cursor_col.saturating_sub(scroll);
+            let y = inner.y + u16::try_from(self.row).unwrap_or(u16::MAX);
+            frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), y));
+        }
     }
 }
 
