@@ -462,10 +462,7 @@ async fn handle_turn(
         return Flow::Continue;
     };
 
-    history.push(ProviderMessage {
-        role: MessageRole::User,
-        content: text.clone(),
-    });
+    history.push(ProviderMessage::text(MessageRole::User, text.clone()));
 
     let stored_thread = ensure_thread(ctx.store, thread_id, target).await;
     let turn_db_id = if let Some(tid) = stored_thread {
@@ -502,6 +499,7 @@ async fn handle_turn(
     let request = ModelRequest {
         model: target.model.clone(),
         messages: history.clone(),
+        tools: vec![],
     };
     let (mev_tx, mut mev_rx) = mpsc::channel(64);
     let handle = provider.request(request, mev_tx);
@@ -543,10 +541,7 @@ async fn handle_turn(
                     text: ctx.redaction.redact(&raw),
                 })
                 .await;
-            history.push(ProviderMessage {
-                role: MessageRole::Assistant,
-                content: raw.clone(),
-            });
+            history.push(ProviderMessage::text(MessageRole::Assistant, raw.clone()));
             if let (Some(tid), Some(turn)) = (stored_thread, turn_db_id) {
                 let _ = ctx
                     .store

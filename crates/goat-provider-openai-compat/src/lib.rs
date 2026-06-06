@@ -1,8 +1,8 @@
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
-    AuthMethod, ModelEvent, ModelInfo, ModelProvider, ModelRequest, ProviderCapabilities,
-    ProviderId, ProviderMessage,
+    AuthMethod, MessageRole, ModelEvent, ModelInfo, ModelProvider, ModelRequest,
+    ProviderCapabilities, ProviderId, ProviderMessage,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -35,8 +35,32 @@ impl OpenAiCompatProvider {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: &'a [ProviderMessage],
+    messages: Vec<ChatMessage>,
     stream: bool,
+}
+
+#[derive(Serialize)]
+struct ChatMessage {
+    role: &'static str,
+    content: String,
+}
+
+fn role_label(role: MessageRole) -> &'static str {
+    match role {
+        MessageRole::System => "system",
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+    }
+}
+
+fn to_chat_messages(messages: &[ProviderMessage]) -> Vec<ChatMessage> {
+    messages
+        .iter()
+        .map(|message| ChatMessage {
+            role: role_label(message.role),
+            content: message.text_content(),
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -99,7 +123,7 @@ impl ModelProvider for OpenAiCompatProvider {
         tokio::spawn(async move {
             let body = ChatRequest {
                 model: &req.model,
-                messages: &req.messages,
+                messages: to_chat_messages(&req.messages),
                 stream: true,
             };
             let mut builder = client.post(&url).json(&body);

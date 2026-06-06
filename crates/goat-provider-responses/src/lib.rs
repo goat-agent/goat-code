@@ -12,7 +12,7 @@ struct ResponsesRequest<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'a str>,
-    input: Vec<InputMessage<'a>>,
+    input: Vec<InputMessage>,
     tools: Vec<serde_json::Value>,
     tool_choice: &'a str,
     parallel_tool_calls: bool,
@@ -21,18 +21,18 @@ struct ResponsesRequest<'a> {
 }
 
 #[derive(Serialize)]
-struct InputMessage<'a> {
+struct InputMessage {
     #[serde(rename = "type")]
     kind: &'static str,
     role: &'static str,
-    content: [ContentPart<'a>; 1],
+    content: [ContentPart; 1],
 }
 
 #[derive(Serialize)]
-struct ContentPart<'a> {
+struct ContentPart {
     #[serde(rename = "type")]
     kind: &'static str,
-    text: &'a str,
+    text: String,
 }
 
 pub fn build_body(
@@ -49,14 +49,14 @@ pub fn build_body(
                 if !instructions.is_empty() {
                     instructions.push('\n');
                 }
-                instructions.push_str(&message.content);
+                instructions.push_str(&message.text_content());
             }
             MessageRole::User => input.push(InputMessage {
                 kind: "message",
                 role: "user",
                 content: [ContentPart {
                     kind: "input_text",
-                    text: &message.content,
+                    text: message.text_content(),
                 }],
             }),
             MessageRole::Assistant => input.push(InputMessage {
@@ -64,7 +64,7 @@ pub fn build_body(
                 role: "assistant",
                 content: [ContentPart {
                     kind: "output_text",
-                    text: &message.content,
+                    text: message.text_content(),
                 }],
             }),
         }
@@ -302,10 +302,7 @@ mod tests {
 
     #[test]
     fn default_instructions_used_when_no_system_message() {
-        let messages = vec![ProviderMessage {
-            role: MessageRole::User,
-            content: "hi".to_owned(),
-        }];
+        let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
         let body = build_body("gpt-5.5", &messages, Some("base"), false);
         assert_eq!(body["instructions"], "base");
         assert_eq!(body["input"][0]["role"], "user");
@@ -315,14 +312,8 @@ mod tests {
     #[test]
     fn system_message_overrides_default_instructions() {
         let messages = vec![
-            ProviderMessage {
-                role: MessageRole::System,
-                content: "be terse".to_owned(),
-            },
-            ProviderMessage {
-                role: MessageRole::User,
-                content: "hi".to_owned(),
-            },
+            ProviderMessage::text(MessageRole::System, "be terse"),
+            ProviderMessage::text(MessageRole::User, "hi"),
         ];
         let body = build_body("gpt-5.5", &messages, Some("base"), false);
         assert_eq!(body["instructions"], "be terse");
@@ -330,10 +321,7 @@ mod tests {
 
     #[test]
     fn instructions_omitted_when_empty_and_no_default() {
-        let messages = vec![ProviderMessage {
-            role: MessageRole::User,
-            content: "hi".to_owned(),
-        }];
+        let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
         let body = build_body("gpt-5.5", &messages, None, false);
         assert!(body.get("instructions").is_none());
     }

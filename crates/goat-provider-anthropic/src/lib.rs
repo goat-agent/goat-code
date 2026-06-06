@@ -59,13 +59,13 @@ struct MessagesRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<&'a str>,
-    messages: Vec<OutMessage<'a>>,
+    messages: Vec<OutMessage>,
 }
 
 #[derive(Serialize)]
-struct OutMessage<'a> {
-    role: &'a str,
-    content: &'a str,
+struct OutMessage {
+    role: &'static str,
+    content: String,
 }
 
 #[derive(Deserialize)]
@@ -119,15 +119,15 @@ impl ModelProvider for AnthropicProvider {
                         if !system.is_empty() {
                             system.push('\n');
                         }
-                        system.push_str(&message.content);
+                        system.push_str(&message.text_content());
                     }
                     MessageRole::User => out_messages.push(OutMessage {
                         role: "user",
-                        content: &message.content,
+                        content: message.text_content(),
                     }),
                     MessageRole::Assistant => out_messages.push(OutMessage {
                         role: "assistant",
-                        content: &message.content,
+                        content: message.text_content(),
                     }),
                 }
             }
