@@ -1,0 +1,22 @@
+[package]
+name = "goat-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+goat-provider = { workspace = true }
+goat-auth = { workspace = true }
+tokio = { workspace = true }
+goat-provider-openai = { workspace = true }
+goat-provider-openai-codex = { workspace = true }
+goat-provider-anthropic = { workspace = true }
+goat-provider-ollama = { workspace = true }
+goat-provider-lmstudio = { workspace = true }
+goat-provider-llama-cpp = { workspace = true }
+
+[lints]
+workspace = true

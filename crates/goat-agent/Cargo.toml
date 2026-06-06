@@ -1,0 +1,21 @@
+[package]
+name = "goat-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+goat-core = { workspace = true }
+goat-protocol = { workspace = true }
+goat-provider = { workspace = true }
+goat-providers = { workspace = true }
+goat-auth = { workspace = true }
+goat-store = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

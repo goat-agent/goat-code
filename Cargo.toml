@@ -15,8 +15,21 @@ goat-protocol = { path = "crates/goat-protocol" }
 goat-config = { path = "crates/goat-config" }
 goat-core = { path = "crates/goat-core" }
 goat-tui = { path = "crates/goat-tui" }
+goat-provider = { path = "crates/goat-provider" }
+goat-auth = { path = "crates/goat-auth" }
+goat-store = { path = "crates/goat-store" }
+goat-provider-openai-compat = { path = "crates/goat-provider-openai-compat" }
+goat-provider-responses = { path = "crates/goat-provider-responses" }
+goat-provider-openai = { path = "crates/goat-provider-openai" }
+goat-provider-openai-codex = { path = "crates/goat-provider-openai-codex" }
+goat-provider-anthropic = { path = "crates/goat-provider-anthropic" }
+goat-provider-ollama = { path = "crates/goat-provider-ollama" }
+goat-provider-lmstudio = { path = "crates/goat-provider-lmstudio" }
+goat-provider-llama-cpp = { path = "crates/goat-provider-llama-cpp" }
+goat-providers = { path = "crates/goat-providers" }
+goat-agent = { path = "crates/goat-agent" }
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
 tokio-util = "0.7"
 futures = "0.3"
 
@@ -27,12 +40,19 @@ clap = { version = "4", features = ["derive"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.9"
-directories = "6"
 unicode-width = "0.2"
 unicode-normalization = "0.1"
 pulldown-cmark = { version = "0.12", default-features = false }
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+
+rusqlite = { version = "0.40", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+eventsource-stream = "0.2"
+bytes = "1"
+sha2 = "0.11"
+base64 = "0.22"
+rand = "0.10"
+open = "5"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
