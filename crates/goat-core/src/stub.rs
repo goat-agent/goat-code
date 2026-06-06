@@ -100,7 +100,10 @@ async fn run(mut ops: mpsc::Receiver<Op>, events: mpsc::Sender<Event>) {
                     break;
                 }
             }
-            Op::Interrupt { .. } => {}
+            Op::Interrupt { .. }
+            | Op::SelectModel { .. }
+            | Op::RefreshModels
+            | Op::Login { .. } => {}
             Op::Shutdown => break,
         }
     }
@@ -119,7 +122,12 @@ async fn stream_text(
             maybe_op = ops.recv() => match maybe_op {
                 Some(Op::Interrupt { .. }) => return Some(Halt::Interrupted),
                 Some(Op::Shutdown) | None => return Some(Halt::Shutdown),
-                Some(Op::SubmitMessage { .. }) => {}
+                Some(
+                    Op::SubmitMessage { .. }
+                    | Op::SelectModel { .. }
+                    | Op::RefreshModels
+                    | Op::Login { .. },
+                ) => {}
             },
             () = time::sleep(DELTA_DELAY) => {
                 acc.push_str(chunk);
@@ -159,7 +167,12 @@ async fn run_tool(
         maybe_op = ops.recv() => match maybe_op {
             Some(Op::Interrupt { .. }) => Some(Halt::Interrupted),
             Some(Op::Shutdown) | None => Some(Halt::Shutdown),
-            Some(Op::SubmitMessage { .. }) => None,
+            Some(
+                Op::SubmitMessage { .. }
+                | Op::SelectModel { .. }
+                | Op::RefreshModels
+                | Op::Login { .. },
+            ) => None,
         },
         () = time::sleep(step.tool_delay) => None,
     };
@@ -296,7 +309,11 @@ mod tests {
                     assert!(!interrupted);
                     break;
                 }
-                other @ Event::Error { .. } => panic!("unexpected event: {other:?}"),
+                other @ (Event::Error { .. }
+                | Event::ModelListChanged { .. }
+                | Event::ModelSelected { .. }
+                | Event::LoginProviders { .. }
+                | Event::LoginStatus { .. }) => panic!("unexpected event: {other:?}"),
             }
         }
 
