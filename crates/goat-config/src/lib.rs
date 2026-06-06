@@ -1,6 +1,5 @@
 use std::{fs, path::PathBuf};
 
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -19,31 +18,82 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        config_file_path()
+        config_path()
             .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|raw| toml::from_str(&raw).ok())
+            .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default()
     }
 
-    pub fn from_toml(raw: &str) -> Result<Self, ConfigError> {
-        toml::from_str(raw).map_err(ConfigError::Parse)
+    pub fn from_json(raw: &str) -> Result<Self, ConfigError> {
+        Ok(serde_json::from_str(raw)?)
+    }
+
+    pub fn save(&self) -> Result<(), ConfigError> {
+        let path = config_path().ok_or(ConfigError::NoHome)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("failed to parse config: {0}")]
-    Parse(#[from] toml::de::Error),
+    #[error("config json failed: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("could not resolve home directory")]
+    NoHome,
+    #[error("config io failed: {0}")]
+    Io(#[from] std::io::Error),
 }
 
-pub fn project_dirs() -> Option<ProjectDirs> {
-    ProjectDirs::from("", "", "goat")
+pub fn app_home() -> Option<PathBuf> {
+    std::env::home_dir().map(|home| home.join(".goat-code"))
 }
 
-pub fn config_file_path() -> Option<PathBuf> {
-    project_dirs().map(|dirs| dirs.config_dir().join("config.toml"))
+pub fn config_path() -> Option<PathBuf> {
+    app_home().map(|home| home.join("config.json"))
+}
+
+pub fn db_path() -> Option<PathBuf> {
+    app_home().map(|home| home.join("goat-code.db"))
+}
+
+pub fn auth_path() -> Option<PathBuf> {
+    app_home().map(|home| home.join("auth.json"))
 }
 
 pub fn log_dir() -> Option<PathBuf> {
-    project_dirs().map(|dirs| dirs.data_local_dir().join("logs"))
+    app_home().map(|home| home.join("logs"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, ThemeChoice};
+
+    #[test]
+    fn defaults_to_dark() {
+        assert_eq!(Config::default().theme, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn parses_minimal_json() {
+        let cfg = Config::from_json(r#"{ "theme": "light" }"#).unwrap();
+        assert_eq!(cfg.theme, ThemeChoice::Light);
+    }
+
+    #[test]
+    fn empty_object_is_default() {
+        assert_eq!(Config::from_json("{}").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn round_trips_through_json() {
+        let cfg = Config {
+            theme: ThemeChoice::Light,
+        };
+        let raw = serde_json::to_string(&cfg).unwrap();
+        assert_eq!(Config::from_json(&raw).unwrap(), cfg);
+    }
 }
