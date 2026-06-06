@@ -16,8 +16,11 @@ struct ResponsesRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'a str>,
     input: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
-    tool_choice: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     parallel_tool_calls: bool,
     store: bool,
     stream: bool,
@@ -104,7 +107,7 @@ pub fn build_body(
     } else {
         Some(instructions.as_str())
     };
-    let tools = tools
+    let tools: Vec<serde_json::Value> = tools
         .iter()
         .map(|tool| {
             json!({
@@ -115,13 +118,14 @@ pub fn build_body(
             })
         })
         .collect();
+    let has_tools = !tools.is_empty();
     let request = ResponsesRequest {
         model,
         instructions,
         input,
         tools,
-        tool_choice: "auto",
-        parallel_tool_calls: false,
+        tool_choice: if has_tools { Some("auto") } else { None },
+        parallel_tool_calls: has_tools,
         store,
         stream: true,
     };
