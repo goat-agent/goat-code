@@ -72,7 +72,8 @@ impl ProviderMessage {
                 ContentBlock::Text { text } => Some(text.as_str()),
                 _ => None,
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
