@@ -1,5 +1,5 @@
 [package]
-name = "goat-config"
+name = "goat-auth"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,13 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+base64 = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

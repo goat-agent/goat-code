@@ -1,5 +1,5 @@
 [package]
-name = "goat-config"
+name = "goat-provider"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+tokio = { workspace = true }
 thiserror = { workspace = true }
 
 [lints]

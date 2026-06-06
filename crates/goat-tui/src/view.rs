@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Paragraph},
 };
 
-use crate::{app::App, theme::Theme};
+use crate::{app::App, login::Login, picker::Picker, theme::Theme};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
@@ -24,22 +24,46 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     ])
     .areas(area);
 
-    app.clamp_scroll(body.height, body.width);
-
     render_header(frame, header, app, theme);
-    app.transcript().render(frame, body, theme, app.scroll());
-    app.composer().render(frame, composer, theme);
+
+    let overlay_height = app
+        .picker()
+        .map(Picker::desired_height)
+        .or_else(|| app.login().map(Login::desired_height));
+
+    if let Some(height) = overlay_height {
+        let height = height.min(body.height.saturating_sub(1)).max(1);
+        let [transcript_area, panel] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).areas(body);
+        app.clamp_scroll(transcript_area.height, transcript_area.width);
+        app.transcript()
+            .render(frame, transcript_area, theme, app.scroll());
+        if let Some(picker) = app.picker() {
+            picker.render(frame, panel, theme);
+        }
+        if let Some(login) = app.login() {
+            login.render(frame, panel, theme);
+        }
+        app.composer().render(frame, composer, theme, false);
+    } else {
+        app.clamp_scroll(body.height, body.width);
+        app.transcript().render(frame, body, theme, app.scroll());
+        app.composer().render(frame, composer, theme, true);
+    }
+
     render_footer(frame, footer, app, theme);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!(" {}", app.cwd()),
+    let mut spans = vec![Span::styled(format!(" {}", app.cwd()), theme.muted())];
+    if let Some(model) = app.current_model() {
+        spans.push(Span::styled("  ·  ", theme.muted()));
+        spans.push(Span::styled(
+            format!("{}/{}", model.provider, model.model),
             theme.muted(),
-        ))),
-        area,
-    );
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {

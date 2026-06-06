@@ -27,6 +27,7 @@ enum Item {
         status: ToolStatus,
     },
     Error(String),
+    Notice(String),
 }
 
 #[derive(Default)]
@@ -63,11 +64,12 @@ impl Transcript {
 
     pub fn finish_tool(&mut self, call_id: ToolCallId, outcome: ToolOutcome) {
         for item in self.items.iter_mut().rev() {
-            if let Item::Tool { id, status, .. } = item {
-                if *id == call_id && matches!(status, ToolStatus::Running) {
-                    *status = ToolStatus::Done(outcome);
-                    return;
-                }
+            if let Item::Tool { id, status, .. } = item
+                && *id == call_id
+                && matches!(status, ToolStatus::Running)
+            {
+                *status = ToolStatus::Done(outcome);
+                return;
             }
         }
     }
@@ -77,16 +79,20 @@ impl Transcript {
         self.items.push(Item::Error(text.into()));
     }
 
+    pub fn push_notice(&mut self, text: impl Into<String>) {
+        self.items.push(Item::Notice(text.into()));
+    }
+
     pub fn complete(&mut self, interrupted: bool, hl: &dyn Highlighter, theme: Theme) {
         if interrupted {
             for item in &mut self.items {
-                if let Item::Tool { status, .. } = item {
-                    if matches!(status, ToolStatus::Running) {
-                        *status = ToolStatus::Done(ToolOutcome {
-                            ok: false,
-                            summary: None,
-                        });
-                    }
+                if let Item::Tool { status, .. } = item
+                    && matches!(status, ToolStatus::Running)
+                {
+                    *status = ToolStatus::Done(ToolOutcome {
+                        ok: false,
+                        summary: None,
+                    });
                 }
             }
         }
@@ -169,6 +175,7 @@ fn item_lines(item: &Item, theme: Theme, width: u16) -> Vec<Line<'_>> {
             out
         }
         Item::Error(text) => labelled(text, "✗ ", theme.error(), theme),
+        Item::Notice(text) => labelled(text, "✓ ", theme.role_tool(), theme),
         Item::Tool {
             name,
             input,

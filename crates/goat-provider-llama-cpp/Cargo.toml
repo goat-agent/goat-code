@@ -1,5 +1,5 @@
 [package]
-name = "goat-config"
+name = "goat-provider-llama-cpp"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
+goat-provider = { workspace = true }
+goat-provider-openai-compat = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,0 +1,187 @@
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+use tokio::{sync::mpsc, task::JoinHandle};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProviderId(pub String);
+
+impl fmt::Display for ProviderId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for ProviderId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageRole {
+    System,
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderMessage {
+    pub role: MessageRole,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRequest {
+    pub model: String,
+    pub messages: Vec<ProviderMessage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    None,
+    ApiKey,
+    OAuth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCapabilities {
+    pub streaming: bool,
+    pub tools: bool,
+    pub auth: AuthMethod,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelEvent {
+    TextDelta {
+        text: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        input: String,
+    },
+    Completed,
+    Failed {
+        message: String,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderError {
+    #[error("http error: {0}")]
+    Http(String),
+    #[error("decode error: {0}")]
+    Decode(String),
+    #[error("auth error: {0}")]
+    Auth(String),
+    #[error("provider unavailable")]
+    Unavailable,
+    #[error("{0}")]
+    Other(String),
+}
+
+pub trait ModelProvider: Send + Sync + 'static {
+    fn id(&self) -> ProviderId;
+    fn capabilities(&self) -> ProviderCapabilities;
+    fn request(&self, req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()>;
+    fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()>;
+    fn catalog(&self) -> &'static [&'static str] {
+        &[]
+    }
+    fn authenticated(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{sync::mpsc, task::JoinHandle};
+
+    use super::{
+        AuthMethod, MessageRole, ModelEvent, ModelInfo, ModelProvider, ModelRequest,
+        ProviderCapabilities, ProviderId, ProviderMessage,
+    };
+
+    struct MockProvider;
+
+    impl ModelProvider for MockProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::from("mock")
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: false,
+                auth: AuthMethod::None,
+            }
+        }
+
+        fn request(&self, _req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                let _ = events
+                    .send(ModelEvent::TextDelta { text: "hi".into() })
+                    .await;
+                let _ = events.send(ModelEvent::Completed).await;
+            })
+        }
+
+        fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                let _ = out
+                    .send(ModelInfo {
+                        id: "mock-1".into(),
+                    })
+                    .await;
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_provider_streams_events() {
+        let provider = MockProvider;
+        assert_eq!(provider.id(), ProviderId::from("mock"));
+        assert!(provider.capabilities().streaming);
+        let (tx, mut rx) = mpsc::channel(8);
+        let handle = provider.request(
+            ModelRequest {
+                model: "mock-1".into(),
+                messages: vec![ProviderMessage {
+                    role: MessageRole::User,
+                    content: "hi".into(),
+                }],
+            },
+            tx,
+        );
+        let mut events = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            events.push(ev);
+        }
+        handle.await.unwrap();
+        assert_eq!(
+            events,
+            vec![
+                ModelEvent::TextDelta { text: "hi".into() },
+                ModelEvent::Completed
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_provider_discovers_models() {
+        let provider = MockProvider;
+        let (tx, mut rx) = mpsc::channel(8);
+        let handle = provider.discover(tx);
+        let info = rx.recv().await.unwrap();
+        assert_eq!(info.id, "mock-1");
+        handle.await.unwrap();
+    }
+}
