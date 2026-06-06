@@ -631,15 +631,10 @@ async fn handle_turn(
             });
         }
 
-        if !raw.is_empty() {
+        let shown_text = if raw.is_empty() {
+            None
+        } else {
             let shown = ctx.redaction.redact(&raw);
-            let _ = ctx
-                .events
-                .send(Event::TextDone {
-                    id,
-                    text: shown.clone(),
-                })
-                .await;
             if let (Some(tid), Some(turn)) = (stored_thread, turn_db_id) {
                 let _ = ctx
                     .store
@@ -647,19 +642,38 @@ async fn handle_turn(
                         thread_id: tid,
                         turn_id: Some(turn),
                         role: "assistant".to_owned(),
-                        body: shown,
+                        body: shown.clone(),
                         created_at: now(),
                     })
                     .await;
             }
-        }
+            Some(shown)
+        };
 
         if pending_calls.is_empty() {
+            if let Some(shown) = shown_text {
+                let _ = ctx.events.send(Event::TextDone { id, text: shown }).await;
+            }
             break RoundEnd::Completed;
         }
 
         if rounds >= MAX_TOOL_ROUNDS {
             tracing::warn!(rounds, "tool round cap reached; ending turn");
+            let synthetic: Vec<ContentBlock> = pending_calls
+                .iter()
+                .map(|(vendor_id, _, _)| ContentBlock::ToolResult {
+                    tool_use_id: vendor_id.clone(),
+                    content: "tool round limit reached".to_owned(),
+                    is_error: true,
+                })
+                .collect();
+            history.push(ProviderMessage {
+                role: MessageRole::User,
+                content: synthetic,
+            });
+            if let Some(shown) = shown_text {
+                let _ = ctx.events.send(Event::TextDone { id, text: shown }).await;
+            }
             break RoundEnd::Completed;
         }
 
@@ -669,7 +683,8 @@ async fn handle_turn(
         };
 
         let mut tool_results: Vec<ContentBlock> = Vec::new();
-        for (vendor_id, name, input_json) in pending_calls {
+        let mut interrupted_at: Option<usize> = None;
+        for (index, (vendor_id, name, input_json)) in pending_calls.iter().enumerate() {
             call_seq += 1;
             let tui_id = call_seq;
 
@@ -702,10 +717,58 @@ async fn handle_turn(
                 None
             };
 
-            let result = match ctx.tools.get(&name) {
-                Some(tool) => tool.run(&input_json, &tool_ctx).await,
-                None => Err(goat_tool::ToolError::UnknownTool { name: name.clone() }),
+            let result = loop {
+                let run_fut = async {
+                    match ctx.tools.get(name) {
+                        Some(tool) => tool.run(input_json, &tool_ctx).await,
+                        None => Err(goat_tool::ToolError::UnknownTool { name: name.clone() }),
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    maybe_op = ops.recv() => match maybe_op {
+                        Some(Op::Interrupt { id: task_id }) if task_id == id => {
+                            interrupted_at = Some(index);
+                            break Ok(String::new());
+                        }
+                        Some(Op::Shutdown) | None => return Flow::Shutdown,
+                        Some(_) => {}
+                    },
+                    r = run_fut => break r,
+                }
             };
+
+            if interrupted_at == Some(index) {
+                if let Some(db) = db_id {
+                    let _ = ctx
+                        .store
+                        .finish_tool_call(
+                            db,
+                            "interrupted".to_owned(),
+                            Some("interrupted".to_owned()),
+                            now_ms(),
+                        )
+                        .await;
+                }
+                let _ = ctx
+                    .events
+                    .send(Event::ToolDone {
+                        id,
+                        call: ToolCallId(tui_id),
+                        outcome: goat_protocol::ToolOutcome {
+                            ok: false,
+                            summary: Some("interrupted".to_owned()),
+                        },
+                    })
+                    .await;
+                tool_results.push(ContentBlock::ToolResult {
+                    tool_use_id: vendor_id.clone(),
+                    content: "interrupted".to_owned(),
+                    is_error: true,
+                });
+                break;
+            }
+
             let (outcome, result_text) = outcome_from(&result);
 
             if let Some(db) = db_id {
@@ -727,16 +790,30 @@ async fn handle_turn(
                 .await;
 
             tool_results.push(ContentBlock::ToolResult {
-                tool_use_id: vendor_id,
+                tool_use_id: vendor_id.clone(),
                 content: ctx.redaction.redact(&result_text),
                 is_error,
             });
+        }
+
+        if let Some(index) = interrupted_at {
+            for (vendor_id, _, _) in pending_calls.iter().skip(index + 1) {
+                tool_results.push(ContentBlock::ToolResult {
+                    tool_use_id: vendor_id.clone(),
+                    content: "interrupted".to_owned(),
+                    is_error: true,
+                });
+            }
         }
 
         history.push(ProviderMessage {
             role: MessageRole::User,
             content: tool_results,
         });
+
+        if interrupted_at.is_some() {
+            break RoundEnd::Interrupted;
+        }
     };
 
     match outcome {
