@@ -10,7 +10,7 @@ pub fn all() -> Vec<Box<dyn goat_tool::Tool>> {
 
 pub(crate) fn ignore_error(err: &ignore::Error) -> goat_tool::ToolError {
     goat_tool::ToolError::Io {
-        path: String::new(),
+        path: "<glob/walk>".to_owned(),
         source: std::io::Error::other(err.to_string()),
     }
 }
