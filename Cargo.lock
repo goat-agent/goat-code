@@ -927,6 +927,9 @@ dependencies = [
  "goat-provider",
  "goat-providers",
  "goat-store",
+ "goat-tool",
+ "goat-tools",
+ "serde_json",
  "tokio",
  "tracing",
 ]
