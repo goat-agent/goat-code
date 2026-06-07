@@ -3,9 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use goat_auth::{
-    CredentialKey, CredentialKind, CredentialStore, RedactionSet, ResolvedCredential, SecretString,
-};
+use goat_auth::{CredentialKey, CredentialKind, CredentialStore, ResolvedCredential, SecretString};
 use goat_core::Engine;
 use goat_protocol::{
     AccountChoice, AccountEntry, AccountInfo, AuthMethod, Event, LoginCredential, LoginProvider,
@@ -59,7 +57,6 @@ struct Ctx<'a> {
     credentials: &'a CredentialStore,
     tools: &'a ToolRegistry,
     store: &'a Store,
-    redaction: &'a RedactionSet,
     events: &'a mpsc::Sender<Event>,
 }
 
@@ -193,7 +190,6 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
         credentials,
         mut target,
     } = agent;
-    let mut redaction = RedactionSet::new();
     let mut history: Vec<ProviderMessage> = Vec::new();
     let mut thread_id: Option<i64> = None;
 
@@ -210,7 +206,6 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     credentials: &credentials,
                     tools: &tools,
                     store: &store,
-                    redaction: &redaction,
                     events: &events,
                 };
                 if let Flow::Shutdown = handle_turn(
@@ -238,7 +233,6 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 let ctx = LoginCtx {
                     credentials: &credentials,
                     registry: &mut registry,
-                    redaction: &mut redaction,
                     events: &events,
                 };
                 handle_login(ctx, provider, DEFAULT_ACCOUNT.to_owned(), credential, false).await;
@@ -251,7 +245,6 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 let ctx = LoginCtx {
                     credentials: &credentials,
                     registry: &mut registry,
-                    redaction: &mut redaction,
                     events: &events,
                 };
                 handle_login(ctx, provider, name, credential, true).await;
@@ -331,7 +324,6 @@ async fn announce_startup(
 struct LoginCtx<'a> {
     credentials: &'a CredentialStore,
     registry: &'a mut Registry,
-    redaction: &'a mut RedactionSet,
     events: &'a mpsc::Sender<Event>,
 }
 
@@ -372,7 +364,6 @@ async fn store_credential(
     match credential {
         LoginCredential::ApiKey(secret) => {
             let resolved = ResolvedCredential::ApiKey(SecretString::from(secret));
-            ctx.redaction.insert_credential(&resolved);
             ctx.credentials
                 .store(key, resolved)
                 .map_err(|err| err.to_string())
@@ -399,7 +390,6 @@ async fn store_credential(
             match result {
                 Ok(tokens) => {
                     let resolved = ResolvedCredential::OAuth(tokens);
-                    ctx.redaction.insert_credential(&resolved);
                     ctx.credentials
                         .store(key, resolved)
                         .map_err(|err| err.to_string())
@@ -574,15 +564,12 @@ async fn run_round(
     request: ModelRequest,
     ops: &mut mpsc::Receiver<Op>,
     events: &mpsc::Sender<Event>,
-    redaction: &RedactionSet,
     deferred: &mut Vec<Op>,
 ) -> RoundResult {
     let (mev_tx, mut mev_rx) = mpsc::channel(64);
     let handle = provider.request(request, mev_tx);
     let mut raw = String::new();
     let mut pending_calls: Vec<(String, String, String)> = Vec::new();
-    let mut pending_tail = String::new();
-    let window = redaction.max_secret_len().max(64);
     let end = loop {
         tokio::select! {
             biased;
@@ -597,17 +584,9 @@ async fn run_round(
             maybe_event = mev_rx.recv() => match maybe_event {
                 Some(ModelEvent::TextDelta { text }) => {
                     raw.push_str(&text);
-                    pending_tail.push_str(&text);
-                    let safe_len = pending_tail.len().saturating_sub(window);
-                    let safe_boundary = pending_tail.floor_char_boundary(safe_len);
-                    let safe = pending_tail[..safe_boundary].to_owned();
-                    pending_tail = pending_tail[safe_boundary..].to_owned();
-                    if !safe.is_empty() {
-                        let shown = redaction.redact(&safe);
-                        if events.send(Event::TextDelta { id, chunk: shown }).await.is_err() {
-                            handle.abort();
-                            break RoundEnd::ShuttingDown;
-                        }
+                    if events.send(Event::TextDelta { id, chunk: text }).await.is_err() {
+                        handle.abort();
+                        break RoundEnd::ShuttingDown;
                     }
                 }
                 Some(ModelEvent::ToolCall { id: vendor_id, name, input }) => {
@@ -618,10 +597,6 @@ async fn run_round(
             }
         }
     };
-    if !pending_tail.is_empty() {
-        let shown = redaction.redact(&pending_tail);
-        let _ = events.send(Event::TextDelta { id, chunk: shown }).await;
-    }
     RoundResult {
         end,
         raw,
@@ -697,7 +672,7 @@ async fn finish_tool_success(
         .await;
     ContentBlock::ToolResult {
         tool_use_id: vendor_id.to_owned(),
-        content: cap_tool_result(ctx.redaction.redact(&result_text)),
+        content: cap_tool_result(result_text),
         is_error,
     }
 }
@@ -790,7 +765,6 @@ async fn run_tool_batch(
     for (index, (vendor_id, name, input_json)) in pending_calls.iter().enumerate() {
         *state.call_seq += 1;
         let tui_id = *state.call_seq;
-        let redacted_input = ctx.redaction.redact(input_json);
         let _ = ctx
             .events
             .send(Event::ToolStarted {
@@ -798,7 +772,7 @@ async fn run_tool_batch(
                 call: goat_protocol::ToolCall {
                     id: ToolCallId(tui_id),
                     name: name.clone(),
-                    input: redacted_input.clone(),
+                    input: input_json.clone(),
                 },
             })
             .await;
@@ -811,7 +785,7 @@ async fn run_tool_batch(
                     turn_id: turn,
                     call_id: vendor_id.clone(),
                     name: name.clone(),
-                    input: redacted_input,
+                    input: input_json.clone(),
                     status: "running".to_owned(),
                     started_at: now_ms(),
                 })
@@ -947,7 +921,7 @@ async fn persist_assistant_text(ctx: &Ctx<'_>, raw: &str, ids: &TurnIds) -> Opti
     if raw.is_empty() {
         return None;
     }
-    let shown = ctx.redaction.redact(raw);
+    let shown = raw.to_owned();
     if let (Some(tid), Some(turn)) = (ids.stored_thread, ids.turn_db_id)
         && let Err(err) = ctx
             .store
@@ -1006,7 +980,7 @@ async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &RoundEnd, ids: &Turn
                 .events
                 .send(Event::Error {
                     id: Some(id),
-                    message: ctx.redaction.redact(message),
+                    message: message.clone(),
                 })
                 .await;
             if let Some(turn) = ids.turn_db_id
@@ -1042,9 +1016,7 @@ async fn process_round_output(
     if !raw.is_empty() || !pending_calls.is_empty() {
         let mut content = Vec::new();
         if !raw.is_empty() {
-            content.push(ContentBlock::Text {
-                text: ctx.redaction.redact(&raw),
-            });
+            content.push(ContentBlock::Text { text: raw.clone() });
         }
         for (vendor_id, name, input_json) in &pending_calls {
             let input_val = serde_json::from_str(input_json).unwrap_or(serde_json::Value::Null);
@@ -1245,7 +1217,6 @@ async fn handle_turn(
             request,
             ops,
             ctx.events,
-            ctx.redaction,
             &mut deferred,
         )
         .await;

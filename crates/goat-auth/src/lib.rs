@@ -281,54 +281,10 @@ impl CredentialStore {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct RedactionSet {
-    secrets: Vec<String>,
-}
-
-impl RedactionSet {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn insert(&mut self, secret: &str) {
-        if !secret.is_empty() && !self.secrets.iter().any(|known| known == secret) {
-            self.secrets.push(secret.to_owned());
-        }
-    }
-
-    pub fn insert_credential(&mut self, credential: &ResolvedCredential) {
-        match credential {
-            ResolvedCredential::ApiKey(secret) => self.insert(secret.expose()),
-            ResolvedCredential::OAuth(tokens) => {
-                self.insert(tokens.access_token.expose());
-                if let Some(refresh) = &tokens.refresh_token {
-                    self.insert(refresh.expose());
-                }
-            }
-        }
-    }
-
-    pub fn max_secret_len(&self) -> usize {
-        self.secrets.iter().map(String::len).max().unwrap_or(0)
-    }
-
-    pub fn redact(&self, text: &str) -> String {
-        let mut out = text.to_owned();
-        for secret in &self.secrets {
-            if out.contains(secret.as_str()) {
-                out = out.replace(secret.as_str(), "***");
-            }
-        }
-        out
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialKey, CredentialKind, CredentialStore, Pkce, RedactionSet, ResolvedCredential,
-        SecretString,
+        CredentialKey, CredentialKind, CredentialStore, Pkce, ResolvedCredential, SecretString,
     };
 
     #[test]
@@ -354,22 +310,6 @@ mod tests {
     fn secret_string_serializes_transparently() {
         let secret = SecretString::from("abc");
         assert_eq!(serde_json::to_string(&secret).unwrap(), "\"abc\"");
-    }
-
-    #[test]
-    fn redaction_replaces_known_secrets() {
-        let mut set = RedactionSet::new();
-        set.insert("sk-secret");
-        set.insert("");
-        assert_eq!(set.redact("key=sk-secret done"), "key=*** done");
-        assert_eq!(set.redact("nothing here"), "nothing here");
-    }
-
-    #[test]
-    fn redaction_from_credential() {
-        let mut set = RedactionSet::new();
-        set.insert_credential(&ResolvedCredential::ApiKey(SecretString::from("hunter2")));
-        assert_eq!(set.redact("token hunter2!"), "token ***!");
     }
 
     #[test]
