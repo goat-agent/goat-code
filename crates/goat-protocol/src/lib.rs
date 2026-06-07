@@ -33,13 +33,6 @@ pub struct ToolOutcome {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Severity {
-    Recoverable,
-    Fatal,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelTarget {
     pub provider: String,
@@ -93,7 +86,6 @@ pub enum Op {
     SelectModel {
         target: ModelTarget,
     },
-    RefreshModels,
     Login {
         provider: String,
         credential: LoginCredential,
@@ -144,7 +136,6 @@ pub enum Event {
     },
     Error {
         id: Option<TaskId>,
-        severity: Severity,
         message: String,
     },
 }
