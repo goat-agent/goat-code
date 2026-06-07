@@ -1,16 +1,10 @@
-use goat_provider::{AuthMethod, ProviderId};
 use goat_provider_openai_compat::OpenAiCompatProvider;
 
 pub const PROVIDER_ID: &str = "lmstudio";
 const BASE_URL: &str = "http://localhost:1234/v1";
 
 pub fn build() -> OpenAiCompatProvider {
-    OpenAiCompatProvider::new(
-        ProviderId::from(PROVIDER_ID),
-        BASE_URL,
-        None,
-        AuthMethod::None,
-    )
+    OpenAiCompatProvider::local(PROVIDER_ID, BASE_URL)
 }
 
 #[cfg(test)]
