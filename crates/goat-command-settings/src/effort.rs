@@ -1,22 +1,22 @@
 use goat_command::{Command, CommandEffect};
 
-pub struct Model;
+pub struct Effort;
 
-impl Command for Model {
+impl Command for Effort {
     fn name(&self) -> &'static str {
-        "model"
+        "effort"
     }
 
     fn description(&self) -> &'static str {
-        "switch model (optional: /model <name>)"
+        "set reasoning effort (optional: /effort <level>)"
     }
 
     fn run(&self, args: &str) -> CommandEffect {
         let args = args.trim();
         if args.is_empty() {
-            CommandEffect::OpenModelPicker
+            CommandEffect::OpenEffortPicker
         } else {
-            CommandEffect::SelectModelNamed(args.to_owned())
+            CommandEffect::SelectEffort(args.to_ascii_lowercase())
         }
     }
 }

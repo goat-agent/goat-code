@@ -5,6 +5,11 @@ pub struct CommandSpec<'a> {
 
 pub enum CommandEffect {
     OpenModelPicker,
+    SelectModelNamed(String),
+    OpenEffortPicker,
+    SelectEffort(String),
+    OpenThreadPicker,
+    ResumeIndex(usize),
     OpenConfig,
     ShowHelp,
     ClearConversation,

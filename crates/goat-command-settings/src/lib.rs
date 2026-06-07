@@ -1,11 +1,13 @@
 mod config;
+mod effort;
 mod model;
 
 use goat_command::Command;
 
 pub use config::Config;
+pub use effort::Effort;
 pub use model::Model;
 
 pub fn all() -> Vec<Box<dyn Command>> {
-    vec![Box::new(Model), Box::new(Config)]
+    vec![Box::new(Model), Box::new(Effort), Box::new(Config)]
 }

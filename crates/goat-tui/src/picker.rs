@@ -1,4 +1,4 @@
-use goat_protocol::{AccountChoice, ModelEntry, ModelTarget};
+use goat_protocol::{AccountChoice, Effort, ModelEntry, ModelTarget, ThreadSummary};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -234,6 +234,210 @@ impl Picker {
     }
 }
 
+pub enum EffortOutcome {
+    NoOp,
+    Selected(Effort),
+}
+
+pub struct EffortPicker {
+    label: String,
+    options: Vec<Effort>,
+    cursor: usize,
+}
+
+impl EffortPicker {
+    pub fn new(label: String, options: Vec<Effort>, current: Option<Effort>) -> Self {
+        let cursor = current
+            .and_then(|cur| options.iter().position(|opt| *opt == cur))
+            .unwrap_or(0);
+        Self {
+            label,
+            options,
+            cursor,
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        if self.cursor + 1 < self.options.len() {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn choose(&self) -> EffortOutcome {
+        self.options
+            .get(self.cursor)
+            .map_or(EffortOutcome::NoOp, |effort| {
+                EffortOutcome::Selected(*effort)
+            })
+    }
+
+    pub fn desired_height(&self) -> u16 {
+        clamp_u16(self.options.len().max(1))
+            .min(10)
+            .saturating_add(5)
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
+        let rect = centered_rect(area, 48, self.desired_height());
+        let Some(inner) = overlay_frame(frame, rect, theme, None) else {
+            return;
+        };
+        let [title_area, _, list_area, _, hint_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" reasoning effort", theme.key()),
+                Span::styled(format!("  {}", self.label), theme.muted()),
+            ])),
+            title_area,
+        );
+
+        let rows = usize::from(list_area.height);
+        let lines: Vec<Line> = self
+            .options
+            .iter()
+            .take(rows)
+            .enumerate()
+            .map(|(index, effort)| {
+                let selected = index == self.cursor;
+                Line::from(vec![
+                    Span::styled(if selected { " \u{203a} " } else { "   " }, theme.accent()),
+                    Span::styled(
+                        effort.as_str().to_owned(),
+                        if selected { theme.key() } else { theme.base() },
+                    ),
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), list_area);
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " \u{2191}\u{2193} navigate   \u{21b5} select   esc close",
+                theme.muted(),
+            ))),
+            hint_area,
+        );
+    }
+}
+
+pub enum ThreadOutcome {
+    NoOp,
+    Selected(i64),
+}
+
+pub struct ThreadPicker {
+    threads: Vec<ThreadSummary>,
+    cursor: usize,
+}
+
+impl ThreadPicker {
+    pub fn new(threads: Vec<ThreadSummary>) -> Self {
+        Self { threads, cursor: 0 }
+    }
+
+    pub fn move_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        if self.cursor + 1 < self.threads.len() {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn choose(&self) -> ThreadOutcome {
+        self.threads
+            .get(self.cursor)
+            .map_or(ThreadOutcome::NoOp, |thread| {
+                ThreadOutcome::Selected(thread.id)
+            })
+    }
+
+    pub fn desired_height(&self) -> u16 {
+        clamp_u16(self.threads.len().max(1))
+            .min(12)
+            .saturating_add(5)
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
+        let rect = centered_rect(area, 72, self.desired_height());
+        let Some(inner) = overlay_frame(frame, rect, theme, None) else {
+            return;
+        };
+        let [title_area, _, list_area, _, hint_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " resume conversation",
+                theme.key(),
+            ))),
+            title_area,
+        );
+
+        let width = usize::from(list_area.width);
+        let rows = usize::from(list_area.height);
+        let mut lines: Vec<Line> = Vec::new();
+        if self.threads.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " no past conversations in this directory",
+                theme.muted(),
+            )));
+        } else {
+            let start = if self.cursor >= rows {
+                self.cursor + 1 - rows
+            } else {
+                0
+            };
+            for (idx, thread) in self.threads.iter().enumerate().skip(start).take(rows) {
+                let selected = idx == self.cursor;
+                let marker = if selected {
+                    format!(" \u{203a} {}. ", idx + 1)
+                } else {
+                    format!("   {}. ", idx + 1)
+                };
+                let title_style = if selected { theme.key() } else { theme.base() };
+                let left_len = marker.chars().count() + thread.title.chars().count();
+                let right_len = thread.model.chars().count();
+                let pad = width.saturating_sub(left_len + right_len + 1);
+                lines.push(Line::from(vec![
+                    Span::styled(marker, theme.accent()),
+                    Span::styled(thread.title.clone(), title_style),
+                    Span::styled(" ".repeat(pad), theme.base()),
+                    Span::styled(thread.model.clone(), theme.muted()),
+                ]));
+            }
+        }
+        frame.render_widget(Paragraph::new(lines), list_area);
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " \u{2191}\u{2193} navigate   \u{21b5} resume   esc close",
+                theme.muted(),
+            ))),
+            hint_area,
+        );
+    }
+}
+
 fn render_account(frame: &mut Frame, inner: Rect, theme: Theme, account: &AccountPicker) {
     let [title_area, _, list_area, _, hint_area] = Layout::vertical([
         Constraint::Length(1),
@@ -300,6 +504,7 @@ mod tests {
                         provider: provider.to_owned(),
                         model: model.to_owned(),
                         account: id,
+                        effort: None,
                     },
                 }
             })
@@ -309,6 +514,7 @@ mod tests {
             model: model.to_owned(),
             accounts: choices,
             context_window: None,
+            efforts: Vec::new(),
         }
     }
 

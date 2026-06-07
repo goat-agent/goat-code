@@ -4,8 +4,8 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_auth::{CredentialKey, CredentialStore};
 use goat_provider::{
-    AuthMethod, ContentBlock, MessageRole, ModelEvent, ModelInfo, ModelProvider, ModelRequest,
-    ProviderCapabilities, ProviderId, ProviderMessage,
+    AuthMethod, ContentBlock, Effort, MessageRole, ModelEvent, ModelInfo, ModelProvider,
+    ModelRequest, ProviderCapabilities, ProviderId, ProviderMessage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -69,11 +69,100 @@ struct MessagesRequest<'a> {
     messages: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<serde_json::Value>,
+}
+
+struct ThinkingConfig {
+    thinking: Option<serde_json::Value>,
+    output_config: Option<serde_json::Value>,
+    max_tokens: u32,
+}
+
+fn uses_effort_param(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    id.contains("opus-4-8")
+        || id.contains("opus-4-7")
+        || id.contains("opus-4-6")
+        || id.contains("sonnet-4-6")
+}
+
+fn budget_tokens(effort: Effort) -> Option<u32> {
+    match effort {
+        Effort::Off => None,
+        Effort::Low => Some(2048),
+        Effort::Medium => Some(8192),
+        Effort::High | Effort::Xhigh | Effort::Max => Some(24576),
+    }
+}
+
+fn thinking_config(model: &str, effort: Option<Effort>) -> ThinkingConfig {
+    let none = ThinkingConfig {
+        thinking: None,
+        output_config: None,
+        max_tokens: MAX_TOKENS,
+    };
+    let Some(effort) = effort else {
+        return none;
+    };
+    if uses_effort_param(model) {
+        if matches!(effort, Effort::Off) {
+            return none;
+        }
+        ThinkingConfig {
+            thinking: Some(json!({ "type": "adaptive" })),
+            output_config: Some(json!({ "effort": effort.as_str() })),
+            max_tokens: MAX_TOKENS,
+        }
+    } else {
+        match budget_tokens(effort) {
+            None => none,
+            Some(budget) => ThinkingConfig {
+                thinking: Some(json!({ "type": "enabled", "budget_tokens": budget })),
+                output_config: None,
+                max_tokens: budget + MAX_TOKENS,
+            },
+        }
+    }
+}
+
+fn anthropic_efforts(model: &str) -> Vec<Effort> {
+    let id = model.to_ascii_lowercase();
+    if id.contains("opus-4-8") || id.contains("opus-4-7") {
+        vec![
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+            Effort::Max,
+        ]
+    } else if id.contains("opus-4-6") || id.contains("sonnet-4-6") {
+        vec![Effort::Low, Effort::Medium, Effort::High, Effort::Max]
+    } else if id.contains("opus-4-5")
+        || id.contains("sonnet-4-5")
+        || id.contains("opus-4-1")
+        || id.contains("haiku-4-5")
+    {
+        vec![Effort::Off, Effort::Low, Effort::Medium, Effort::High]
+    } else {
+        Vec::new()
+    }
 }
 
 fn content_block_json(block: &ContentBlock) -> serde_json::Value {
     match block {
         ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
+        ContentBlock::Thinking { text, signature } => json!({
+            "type": "thinking",
+            "thinking": text,
+            "signature": signature,
+        }),
+        ContentBlock::RedactedThinking { data } => json!({
+            "type": "redacted_thinking",
+            "data": data,
+        }),
         ContentBlock::ToolUse { id, name, input } => json!({
             "type": "tool_use",
             "id": id,
@@ -107,6 +196,8 @@ struct DeltaEvent {
 struct DeltaBody {
     text: Option<String>,
     partial_json: Option<String>,
+    thinking: Option<String>,
+    signature: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +212,7 @@ struct ContentBlockInfo {
     kind: String,
     id: Option<String>,
     name: Option<String>,
+    data: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -153,6 +245,20 @@ fn parse_input_json_delta(data: &str) -> Option<String> {
         .ok()?
         .delta?
         .partial_json
+}
+
+fn parse_thinking_delta(data: &str) -> Option<String> {
+    serde_json::from_str::<DeltaEvent>(data)
+        .ok()?
+        .delta?
+        .thinking
+}
+
+fn parse_signature_delta(data: &str) -> Option<String> {
+    serde_json::from_str::<DeltaEvent>(data)
+        .ok()?
+        .delta?
+        .signature
 }
 
 fn event_index(data: &str) -> Result<u32, serde_json::Error> {
@@ -195,17 +301,48 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Mode
         match event {
             Ok(event) => match event.event.as_str() {
                 "content_block_start" => {
-                    if let Ok(start) = serde_json::from_str::<ContentBlockStart>(&event.data)
-                        && start.content_block.kind == "tool_use"
-                        && let (Some(id), Some(name)) =
-                            (start.content_block.id, start.content_block.name)
-                    {
-                        tool_calls.insert(start.index, (id, name, String::new()));
+                    if let Ok(start) = serde_json::from_str::<ContentBlockStart>(&event.data) {
+                        match start.content_block.kind.as_str() {
+                            "tool_use" => {
+                                if let (Some(id), Some(name)) =
+                                    (start.content_block.id, start.content_block.name)
+                                {
+                                    tool_calls.insert(start.index, (id, name, String::new()));
+                                }
+                            }
+                            "redacted_thinking" => {
+                                if let Some(data) = start.content_block.data
+                                    && events
+                                        .send(ModelEvent::RedactedThinking { data })
+                                        .await
+                                        .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 "content_block_delta" => {
                     if let Some(text) = parse_text_delta(&event.data) {
                         if events.send(ModelEvent::TextDelta { text }).await.is_err() {
+                            return;
+                        }
+                    } else if let Some(text) = parse_thinking_delta(&event.data) {
+                        if events
+                            .send(ModelEvent::ThinkingDelta { text })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    } else if let Some(signature) = parse_signature_delta(&event.data) {
+                        if events
+                            .send(ModelEvent::ThinkingSignature { signature })
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     } else if let Some(partial) = parse_input_json_delta(&event.data)
@@ -268,9 +405,10 @@ impl ModelProvider for AnthropicProvider {
         let api_key = self.api_key.clone();
         tokio::spawn(async move {
             let (system, messages, tools) = split_request(&req);
+            let cfg = thinking_config(&req.model, req.effort);
             let body = MessagesRequest {
                 model: &req.model,
-                max_tokens: MAX_TOKENS,
+                max_tokens: cfg.max_tokens,
                 stream: true,
                 system: if system.is_empty() {
                     None
@@ -279,6 +417,8 @@ impl ModelProvider for AnthropicProvider {
                 },
                 messages,
                 tools,
+                thinking: cfg.thinking,
+                output_config: cfg.output_config,
             };
             let mut builder = client
                 .post(&url)
@@ -346,6 +486,10 @@ impl ModelProvider for AnthropicProvider {
 
     fn catalog(&self) -> &'static [&'static str] {
         CATALOG
+    }
+
+    fn efforts(&self, model: &str) -> Vec<Effort> {
+        anthropic_efforts(model)
     }
 
     fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()> {
@@ -432,5 +576,49 @@ mod tests {
     fn handles_malformed_json() {
         assert_eq!(parse_text_delta("not json"), None);
         assert_eq!(parse_input_json_delta("not json"), None);
+    }
+
+    #[test]
+    fn serializes_thinking_blocks() {
+        use goat_provider::ContentBlock;
+        let thinking = super::content_block_json(&ContentBlock::Thinking {
+            text: "ponder".to_owned(),
+            signature: "sig".to_owned(),
+        });
+        assert_eq!(thinking["type"], "thinking");
+        assert_eq!(thinking["thinking"], "ponder");
+        assert_eq!(thinking["signature"], "sig");
+        let redacted = super::content_block_json(&ContentBlock::RedactedThinking {
+            data: "blob".to_owned(),
+        });
+        assert_eq!(redacted["type"], "redacted_thinking");
+        assert_eq!(redacted["data"], "blob");
+    }
+
+    #[test]
+    fn effort_model_uses_output_config() {
+        use goat_provider::Effort;
+        let cfg = super::thinking_config("claude-opus-4-8", Some(Effort::High));
+        assert_eq!(cfg.thinking.unwrap()["type"], "adaptive");
+        assert_eq!(cfg.output_config.unwrap()["effort"], "high");
+    }
+
+    #[test]
+    fn budget_model_uses_budget_tokens() {
+        use goat_provider::Effort;
+        let cfg = super::thinking_config("claude-sonnet-4-5-20250929", Some(Effort::Medium));
+        assert_eq!(cfg.thinking.as_ref().unwrap()["type"], "enabled");
+        assert_eq!(cfg.thinking.unwrap()["budget_tokens"], 8192);
+        assert!(cfg.max_tokens > 8192);
+        assert!(cfg.output_config.is_none());
+    }
+
+    #[test]
+    fn off_disables_thinking() {
+        use goat_provider::Effort;
+        let cfg = super::thinking_config("claude-sonnet-4-5-20250929", Some(Effort::Off));
+        assert!(cfg.thinking.is_none());
+        let none = super::thinking_config("claude-opus-4-8", None);
+        assert!(none.thinking.is_none());
     }
 }

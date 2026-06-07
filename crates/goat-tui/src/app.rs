@@ -5,7 +5,10 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use goat_commands::{CommandEffect, CommandRegistry};
-use goat_protocol::{AccountEntry, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId};
+use goat_protocol::{
+    AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId,
+    TranscriptEntry,
+};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -15,11 +18,16 @@ use crate::{
     config::{Config, ConfigOutcome},
     highlight::SyntectHighlighter,
     keymap,
-    picker::{Picker, PickerOutcome},
+    picker::{EffortOutcome, EffortPicker, Picker, PickerOutcome, ThreadOutcome, ThreadPicker},
     theme::Theme,
     transcript::Transcript,
     tui, view,
 };
+
+enum ResumeIntent {
+    Picker,
+    Index(usize),
+}
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK: Duration = Duration::from_millis(120);
@@ -50,6 +58,9 @@ pub struct App {
     models: Vec<ModelEntry>,
     model: Option<ModelTarget>,
     picker: Option<Picker>,
+    effort_picker: Option<EffortPicker>,
+    thread_picker: Option<ThreadPicker>,
+    pending_resume: Option<ResumeIntent>,
     config: Option<Config>,
     account_entries: Vec<AccountEntry>,
     mouse_capture: bool,
@@ -82,6 +93,9 @@ impl App {
             models: Vec::new(),
             model: None,
             picker: None,
+            effort_picker: None,
+            thread_picker: None,
+            pending_resume: None,
             config: None,
             account_entries: Vec::new(),
             mouse_capture: true,
@@ -152,9 +166,9 @@ impl App {
             }
             AppEvent::Input(_) => Vec::new(),
             AppEvent::Engine(event) => {
-                self.on_engine(event);
+                let ops = self.on_engine(event);
                 self.dirty = true;
-                Vec::new()
+                ops
             }
             AppEvent::EngineClosed => {
                 self.should_quit = true;
@@ -167,6 +181,12 @@ impl App {
         tracing::trace!(code = ?key.code, modifiers = ?key.modifiers, "key");
         if self.picker.is_some() {
             return self.on_picker_key(key);
+        }
+        if self.effort_picker.is_some() {
+            return self.on_effort_picker_key(key);
+        }
+        if self.thread_picker.is_some() {
+            return self.on_thread_picker_key(key);
         }
         if self.config.is_some() {
             return self.on_config_key(key);
@@ -262,6 +282,54 @@ impl App {
             CommandEffect::OpenModelPicker => {
                 self.picker = Some(Picker::new(self.models.clone(), self.model.clone()));
                 Vec::new()
+            }
+            CommandEffect::SelectModelNamed(query) => self.select_model_named(&query),
+            CommandEffect::OpenEffortPicker => {
+                let efforts = self.current_efforts();
+                if efforts.is_empty() {
+                    self.transcript
+                        .push_notice("current model has no reasoning effort options".to_owned());
+                    return Vec::new();
+                }
+                let label = self
+                    .model
+                    .as_ref()
+                    .map(|m| format!("{}/{}", m.provider, m.model))
+                    .unwrap_or_default();
+                let current = self.model.as_ref().and_then(|m| m.effort);
+                self.effort_picker = Some(EffortPicker::new(label, efforts, current));
+                Vec::new()
+            }
+            CommandEffect::SelectEffort(level) => {
+                let Some(effort) = Effort::parse(&level) else {
+                    self.transcript
+                        .push_error(format!("unknown effort: {level}"));
+                    return Vec::new();
+                };
+                if !self.current_efforts().contains(&effort) {
+                    self.transcript
+                        .push_error(format!("current model does not support effort: {level}"));
+                    return Vec::new();
+                }
+                self.apply_effort(effort)
+            }
+            CommandEffect::OpenThreadPicker => {
+                if self.active.is_some() {
+                    self.transcript
+                        .push_notice("finish the current task before resuming".to_owned());
+                    return Vec::new();
+                }
+                self.pending_resume = Some(ResumeIntent::Picker);
+                vec![Op::ListThreads]
+            }
+            CommandEffect::ResumeIndex(index) => {
+                if self.active.is_some() {
+                    self.transcript
+                        .push_notice("finish the current task before resuming".to_owned());
+                    return Vec::new();
+                }
+                self.pending_resume = Some(ResumeIntent::Index(index));
+                vec![Op::ListThreads]
             }
             CommandEffect::OpenConfig => {
                 self.config = Some(Config::new(
@@ -452,6 +520,119 @@ impl App {
         Vec::new()
     }
 
+    fn on_effort_picker_key(&mut self, key: KeyEvent) -> Vec<Op> {
+        self.dirty = true;
+        if let Some(ch) = keymap::ctrl_key(&key) {
+            if ch == 'c' {
+                self.effort_picker = None;
+            }
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Esc => self.effort_picker = None,
+            KeyCode::Up => {
+                if let Some(picker) = &mut self.effort_picker {
+                    picker.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(picker) = &mut self.effort_picker {
+                    picker.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(picker) = &self.effort_picker
+                    && let EffortOutcome::Selected(effort) = picker.choose()
+                {
+                    self.effort_picker = None;
+                    return self.apply_effort(effort);
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn on_thread_picker_key(&mut self, key: KeyEvent) -> Vec<Op> {
+        self.dirty = true;
+        if let Some(ch) = keymap::ctrl_key(&key) {
+            if ch == 'c' {
+                self.thread_picker = None;
+            }
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Esc => self.thread_picker = None,
+            KeyCode::Up => {
+                if let Some(picker) = &mut self.thread_picker {
+                    picker.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(picker) = &mut self.thread_picker {
+                    picker.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(picker) = &self.thread_picker
+                    && let ThreadOutcome::Selected(thread_id) = picker.choose()
+                {
+                    self.thread_picker = None;
+                    return vec![Op::Resume { thread_id }];
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn current_efforts(&self) -> Vec<Effort> {
+        let Some(model) = &self.model else {
+            return Vec::new();
+        };
+        self.models
+            .iter()
+            .find(|entry| entry.provider == model.provider && entry.model == model.model)
+            .map(|entry| entry.efforts.clone())
+            .unwrap_or_default()
+    }
+
+    fn apply_effort(&mut self, effort: Effort) -> Vec<Op> {
+        let Some(current) = &self.model else {
+            self.transcript
+                .push_error("select a model first".to_owned());
+            return Vec::new();
+        };
+        let mut target = current.clone();
+        target.effort = Some(effort);
+        vec![Op::SelectModel { target }]
+    }
+
+    fn select_model_named(&mut self, query: &str) -> Vec<Op> {
+        let needle = query.trim().to_lowercase();
+        let exact: Vec<&ModelEntry> = self
+            .models
+            .iter()
+            .filter(|entry| {
+                entry.model.to_lowercase() == needle
+                    || format!("{}/{}", entry.provider, entry.model).to_lowercase() == needle
+            })
+            .collect();
+        if let [entry] = exact.as_slice()
+            && let [account] = entry.accounts.as_slice()
+        {
+            return vec![Op::SelectModel {
+                target: account.target.clone(),
+            }];
+        }
+        let mut picker = Picker::new(self.models.clone(), self.model.clone());
+        for ch in query.trim().chars() {
+            picker.on_char(ch);
+        }
+        self.picker = Some(picker);
+        Vec::new()
+    }
+
     fn on_config_key(&mut self, key: KeyEvent) -> Vec<Op> {
         self.dirty = true;
         if let Some(ch) = keymap::ctrl_key(&key) {
@@ -589,7 +770,8 @@ impl App {
         vec![Op::SubmitMessage { id, text }]
     }
 
-    fn on_engine(&mut self, event: EngineEvent) {
+    fn on_engine(&mut self, event: EngineEvent) -> Vec<Op> {
+        let mut ops = Vec::new();
         match event {
             EngineEvent::TaskStarted { .. } => {
                 self.task_start = Some(std::time::Instant::now());
@@ -601,7 +783,41 @@ impl App {
                 self.models = entries;
             }
             EngineEvent::ModelSelected { target } => self.model = Some(target),
-            EngineEvent::LoginProviders { .. } => {}
+            EngineEvent::ThreadsListed { threads } => match self.pending_resume.take() {
+                Some(ResumeIntent::Picker) => {
+                    self.thread_picker = Some(ThreadPicker::new(threads));
+                }
+                Some(ResumeIntent::Index(index)) => match threads.get(index) {
+                    Some(thread) => ops.push(Op::Resume {
+                        thread_id: thread.id,
+                    }),
+                    None => self
+                        .transcript
+                        .push_error(format!("no conversation #{}", index + 1)),
+                },
+                None => {}
+            },
+            EngineEvent::ConversationRestored { target, entries } => {
+                self.transcript.clear();
+                self.scroll = 0;
+                self.follow = true;
+                for entry in entries {
+                    match entry {
+                        TranscriptEntry::User(text) => self.transcript.push_user(text),
+                        TranscriptEntry::Assistant(text) => {
+                            self.transcript
+                                .commit_text(&text, &self.highlighter, self.theme);
+                        }
+                        TranscriptEntry::Tool { call, outcome } => {
+                            let id = call.id;
+                            self.transcript.push_tool(call);
+                            self.transcript.finish_tool(id, outcome);
+                        }
+                    }
+                }
+                self.model = Some(target);
+            }
+            EngineEvent::ThinkingDelta { .. } | EngineEvent::LoginProviders { .. } => {}
             EngineEvent::AccountsChanged { providers } => {
                 if let Some(config) = &mut self.config {
                     config.set_providers(providers.clone());
@@ -650,6 +866,7 @@ impl App {
         if self.follow {
             self.scroll = u16::MAX;
         }
+        ops
     }
 
     pub(crate) fn clamp_scroll(&mut self, viewport_height: u16, content_width: u16) {
@@ -703,6 +920,12 @@ impl App {
     }
     pub(crate) fn picker(&self) -> Option<&Picker> {
         self.picker.as_ref()
+    }
+    pub(crate) fn effort_picker(&self) -> Option<&EffortPicker> {
+        self.effort_picker.as_ref()
+    }
+    pub(crate) fn thread_picker(&self) -> Option<&ThreadPicker> {
+        self.thread_picker.as_ref()
     }
     pub(crate) fn follow(&self) -> bool {
         self.follow
@@ -800,9 +1023,11 @@ mod tests {
                     provider: provider.to_owned(),
                     model: model.to_owned(),
                     account: "default".to_owned(),
+                    effort: None,
                 },
             }],
             context_window: None,
+            efforts: Vec::new(),
         }
     }
 
@@ -1010,5 +1235,188 @@ mod tests {
             &app.transcript.items[0],
             crate::transcript::Item::Error(_)
         ));
+    }
+
+    fn entry_with_efforts(
+        provider: &str,
+        model: &str,
+        efforts: Vec<goat_protocol::Effort>,
+    ) -> ModelEntry {
+        let mut entry = single_entry(provider, model);
+        entry.efforts = efforts;
+        entry
+    }
+
+    fn select_model(app: &mut App, provider: &str, model: &str) {
+        app.on_engine(EngineEvent::ModelSelected {
+            target: ModelTarget {
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+                account: "default".to_owned(),
+                effort: None,
+            },
+        });
+    }
+
+    #[test]
+    fn effort_without_model_notices() {
+        let mut app = App::new(Theme::dark());
+        let ops = app.dispatch_slash_command("/effort");
+        assert!(ops.is_empty());
+        assert!(app.effort_picker.is_none());
+        assert!(matches!(
+            app.transcript.items.last(),
+            Some(crate::transcript::Item::Notice(_))
+        ));
+    }
+
+    #[test]
+    fn effort_picker_opens_and_selects() {
+        use goat_protocol::Effort;
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ModelListChanged {
+            entries: vec![entry_with_efforts(
+                "openai",
+                "gpt",
+                vec![Effort::Low, Effort::High],
+            )],
+        });
+        select_model(&mut app, "openai", "gpt");
+        let ops = app.dispatch_slash_command("/effort");
+        assert!(ops.is_empty());
+        assert!(app.effort_picker.is_some());
+        app.on_key(press(KeyCode::Down, KeyModifiers::NONE));
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(ops.as_slice(), [Op::SelectModel { target }] if target.effort == Some(Effort::High))
+        );
+        assert!(app.effort_picker.is_none());
+    }
+
+    #[test]
+    fn effort_arg_sets_supported_level() {
+        use goat_protocol::Effort;
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ModelListChanged {
+            entries: vec![entry_with_efforts(
+                "openai",
+                "gpt",
+                vec![Effort::Low, Effort::Medium, Effort::High],
+            )],
+        });
+        select_model(&mut app, "openai", "gpt");
+        let ops = app.dispatch_slash_command("/effort high");
+        assert!(
+            matches!(ops.as_slice(), [Op::SelectModel { target }] if target.effort == Some(Effort::High))
+        );
+    }
+
+    #[test]
+    fn effort_arg_rejects_unsupported_level() {
+        use goat_protocol::Effort;
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ModelListChanged {
+            entries: vec![entry_with_efforts("openai", "gpt", vec![Effort::Low])],
+        });
+        select_model(&mut app, "openai", "gpt");
+        let ops = app.dispatch_slash_command("/effort max");
+        assert!(ops.is_empty());
+        assert!(matches!(
+            app.transcript.items.last(),
+            Some(crate::transcript::Item::Error(_))
+        ));
+    }
+
+    #[test]
+    fn model_arg_selects_unique_match() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ModelListChanged {
+            entries: vec![
+                single_entry("openai", "gpt"),
+                single_entry("anthropic", "claude"),
+            ],
+        });
+        let ops = app.dispatch_slash_command("/model claude");
+        assert!(matches!(ops.as_slice(), [Op::SelectModel { target }] if target.model == "claude"));
+        assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn resume_requests_list_then_opens_picker() {
+        use goat_protocol::ThreadSummary;
+        let mut app = App::new(Theme::dark());
+        let ops = app.dispatch_slash_command("/resume");
+        assert!(matches!(ops.as_slice(), [Op::ListThreads]));
+        let ops = app.on_engine(EngineEvent::ThreadsListed {
+            threads: vec![ThreadSummary {
+                id: 7,
+                title: "first chat".to_owned(),
+                model: "openai/gpt".to_owned(),
+                updated_at: 1,
+            }],
+        });
+        assert!(ops.is_empty());
+        assert!(app.thread_picker.is_some());
+    }
+
+    #[test]
+    fn resume_index_resolves_to_resume_op() {
+        use goat_protocol::ThreadSummary;
+        let mut app = App::new(Theme::dark());
+        let ops = app.dispatch_slash_command("/resume 1");
+        assert!(matches!(ops.as_slice(), [Op::ListThreads]));
+        let ops = app.on_engine(EngineEvent::ThreadsListed {
+            threads: vec![ThreadSummary {
+                id: 42,
+                title: "chat".to_owned(),
+                model: "openai/gpt".to_owned(),
+                updated_at: 1,
+            }],
+        });
+        assert!(matches!(ops.as_slice(), [Op::Resume { thread_id: 42 }]));
+        assert!(app.thread_picker.is_none());
+    }
+
+    #[test]
+    fn conversation_restored_rebuilds_transcript() {
+        use goat_protocol::{ToolCall, ToolCallId, ToolOutcome, TranscriptEntry};
+        let mut app = App::new(Theme::dark());
+        app.transcript.push_user("stale");
+        app.on_engine(EngineEvent::ConversationRestored {
+            target: ModelTarget {
+                provider: "anthropic".to_owned(),
+                model: "claude".to_owned(),
+                account: "default".to_owned(),
+                effort: Some(goat_protocol::Effort::High),
+            },
+            entries: vec![
+                TranscriptEntry::User("hello".to_owned()),
+                TranscriptEntry::Assistant("hi there".to_owned()),
+                TranscriptEntry::Tool {
+                    call: ToolCall {
+                        id: ToolCallId(1),
+                        name: "Read".to_owned(),
+                        input: "f.rs".to_owned(),
+                    },
+                    outcome: ToolOutcome {
+                        ok: true,
+                        summary: Some("done".to_owned()),
+                    },
+                },
+            ],
+        });
+        assert_eq!(app.transcript.items.len(), 3);
+        assert!(matches!(
+            &app.transcript.items[0],
+            crate::transcript::Item::User(_)
+        ));
+        assert!(matches!(
+            &app.transcript.items[2],
+            crate::transcript::Item::Tool { .. }
+        ));
+        assert_eq!(
+            app.current_model().and_then(|m| m.effort),
+            Some(goat_protocol::Effort::High)
+        );
     }
 }

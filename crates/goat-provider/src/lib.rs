@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinHandle};
 
-pub use goat_protocol::AuthMethod;
+pub use goat_protocol::{AuthMethod, Effort};
 
 pub fn now_secs() -> i64 {
     SystemTime::now()
@@ -51,6 +51,13 @@ pub struct ToolDefinition {
 pub enum ContentBlock {
     Text {
         text: String,
+    },
+    Thinking {
+        text: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
     },
     ToolUse {
         id: String,
@@ -101,6 +108,8 @@ pub struct ModelRequest {
     pub messages: Vec<ProviderMessage>,
     #[serde(default)]
     pub tools: Vec<ToolDefinition>,
+    #[serde(default)]
+    pub effort: Option<Effort>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +122,15 @@ pub struct ProviderCapabilities {
 pub enum ModelEvent {
     TextDelta {
         text: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
+    ThinkingSignature {
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
     },
     ToolCall {
         id: String,
@@ -132,6 +150,9 @@ pub trait ModelProvider: Send + Sync + 'static {
     fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()>;
     fn catalog(&self) -> &'static [&'static str] {
         &[]
+    }
+    fn efforts(&self, _model: &str) -> Vec<Effort> {
+        Vec::new()
     }
     fn authenticated(&self) -> bool {
         true
@@ -195,6 +216,7 @@ mod tests {
                 model: "mock-1".into(),
                 messages: vec![ProviderMessage::text(MessageRole::User, "hi")],
                 tools: vec![],
+                effort: None,
             },
             tx,
         );

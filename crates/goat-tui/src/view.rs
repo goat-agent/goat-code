@@ -49,7 +49,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    if app.config().is_some() || app.picker().is_some() {
+    if app.config().is_some()
+        || app.picker().is_some()
+        || app.effort_picker().is_some()
+        || app.thread_picker().is_some()
+    {
         let [header, body, composer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
@@ -65,6 +69,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             config.render(frame, body, theme);
         }
         if let Some(picker) = app.picker() {
+            picker.render(frame, body, theme);
+        }
+        if let Some(picker) = app.effort_picker() {
+            picker.render(frame, body, theme);
+        }
+        if let Some(picker) = app.thread_picker() {
             picker.render(frame, body, theme);
         }
         app.composer().render(frame, composer, theme, false);
@@ -119,9 +129,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     if let Some(model) = app.current_model() {
         spans.push(Span::styled("  \u{00b7}  ", theme.muted()));
         spans.push(Span::styled(
-            format!("{}/{}", model.provider, model.model),
+            format!("{}:{}/{}", model.provider, model.account, model.model),
             theme.key(),
         ));
+        if let Some(effort) = model.effort {
+            spans.push(Span::styled(format!(":{effort}"), theme.accent()));
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
