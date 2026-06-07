@@ -98,6 +98,7 @@ pub enum Op {
     Interrupt {
         id: TaskId,
     },
+    Clear,
     SelectModel {
         target: ModelTarget,
     },

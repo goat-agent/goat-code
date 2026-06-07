@@ -24,6 +24,10 @@ pub static COMMANDS: &[SlashCommand] = &[
         desc: "configure providers and settings",
     },
     SlashCommand {
+        name: "/clear",
+        desc: "start a new conversation",
+    },
+    SlashCommand {
         name: "/help",
         desc: "show keybindings and commands",
     },

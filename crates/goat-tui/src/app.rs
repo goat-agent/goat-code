@@ -270,6 +270,16 @@ impl App {
                 self.dirty = true;
                 Vec::new()
             }
+            "clear" => {
+                if self.active.is_some() {
+                    return Vec::new();
+                }
+                self.transcript.clear();
+                self.scroll = 0;
+                self.follow = true;
+                self.dirty = true;
+                vec![Op::Clear]
+            }
             _ => {
                 self.transcript
                     .push_error(format!("unknown command: {raw}"));
@@ -755,7 +765,7 @@ async fn event_loop(
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use goat_protocol::{AccountChoice, Event as EngineEvent, ModelEntry, ModelTarget, Op};
+    use goat_protocol::{AccountChoice, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId};
 
     use super::App;
     use crate::theme::Theme;
@@ -839,6 +849,30 @@ mod tests {
         app.composer.insert_str("hello");
         app.submit();
         assert!(app.follow);
+    }
+
+    #[test]
+    fn clear_command_empties_transcript_and_emits_clear() {
+        let mut app = App::new(Theme::dark());
+        app.transcript.push_user("earlier message");
+        app.scroll = 9;
+        app.follow = false;
+        app.composer.insert_str("/clear");
+        let ops = app.submit();
+        assert!(matches!(ops.as_slice(), [Op::Clear]));
+        assert!(app.transcript.items.is_empty());
+        assert_eq!(app.scroll, 0);
+        assert!(app.follow);
+    }
+
+    #[test]
+    fn clear_command_ignored_while_active() {
+        let mut app = App::new(Theme::dark());
+        app.active = Some(TaskId(1));
+        app.transcript.push_user("in flight");
+        let ops = app.dispatch_slash_command("/clear");
+        assert!(ops.is_empty());
+        assert!(!app.transcript.items.is_empty());
     }
 
     #[test]
