@@ -236,9 +236,10 @@ async fn handle_login(
     };
     let stored = match credential {
         LoginCredential::ApiKey(secret) => {
-            redaction.insert(&secret);
+            let resolved = ResolvedCredential::ApiKey(SecretString::from(secret));
+            redaction.insert_credential(&resolved);
             credentials
-                .store(&key, ResolvedCredential::ApiKey(SecretString::from(secret)))
+                .store(&key, resolved)
                 .map_err(|err| err.to_string())
         }
         LoginCredential::OAuth => {
@@ -262,12 +263,10 @@ async fn handle_login(
             let _ = forwarder.await;
             match result {
                 Ok(tokens) => {
-                    redaction.insert(tokens.access_token.expose());
-                    if let Some(refresh) = &tokens.refresh_token {
-                        redaction.insert(refresh.expose());
-                    }
+                    let resolved = ResolvedCredential::OAuth(tokens);
+                    redaction.insert_credential(&resolved);
                     credentials
-                        .store(&key, ResolvedCredential::OAuth(tokens))
+                        .store(&key, resolved)
                         .map_err(|err| err.to_string())
                 }
                 Err(err) => Err(err),

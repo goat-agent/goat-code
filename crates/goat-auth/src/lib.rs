@@ -226,11 +226,8 @@ impl CredentialStore {
             .credentials
             .into_iter()
             .map(|entry| {
-                let kind = match entry.value {
-                    StoredValue::ApiKey { .. } => CredentialKind::ApiKey,
-                    StoredValue::OAuth { .. } => CredentialKind::OAuth,
-                };
-                (entry.key, kind)
+                let resolved: ResolvedCredential = entry.value.into();
+                (entry.key, resolved.kind())
             })
             .collect()
     }
