@@ -1,15 +1,19 @@
+use std::str::FromStr;
+
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use syntect::{
     easy::HighlightLines,
-    highlighting::{FontStyle, ThemeSet},
+    highlighting::{
+        FontStyle, ScopeSelectors, StyleModifier, Theme as SyntectTheme, ThemeItem, ThemeSettings,
+    },
     parsing::SyntaxSet,
     util::LinesWithEndings,
 };
 
-use crate::theme::Theme;
+use crate::theme::{CodePalette, Theme};
 
 pub trait Highlighter: Send + Sync {
     fn highlight(&self, lang: &str, code: &str, theme: Theme) -> Vec<Line<'static>>;
@@ -27,37 +31,12 @@ impl Highlighter for PlainHighlighter {
 
 pub struct SyntectHighlighter {
     syntax_set: SyntaxSet,
-    dark_theme: syntect::highlighting::Theme,
-    light_theme: syntect::highlighting::Theme,
 }
 
 impl SyntectHighlighter {
     pub fn new() -> Self {
-        let theme_set = ThemeSet::load_defaults();
-        let dark_theme = theme_set
-            .themes
-            .get("base16-ocean.dark")
-            .or_else(|| theme_set.themes.values().next())
-            .expect("syntect ships built-in themes")
-            .clone();
-        let light_theme = theme_set
-            .themes
-            .get("InspiredGitHub")
-            .or_else(|| theme_set.themes.values().next())
-            .expect("syntect ships built-in themes")
-            .clone();
         Self {
             syntax_set: SyntaxSet::load_defaults_newlines(),
-            dark_theme,
-            light_theme,
-        }
-    }
-
-    fn pick_syntect_theme(&self, theme: Theme) -> &syntect::highlighting::Theme {
-        if is_dark_bg(theme) {
-            &self.dark_theme
-        } else {
-            &self.light_theme
         }
     }
 }
@@ -65,6 +44,58 @@ impl SyntectHighlighter {
 impl Default for SyntectHighlighter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn to_syntect(color: Color) -> syntect::highlighting::Color {
+    match color {
+        Color::Rgb(r, g, b) => syntect::highlighting::Color { r, g, b, a: 0xff },
+        _ => syntect::highlighting::Color {
+            r: 0xcc,
+            g: 0xcc,
+            b: 0xcc,
+            a: 0xff,
+        },
+    }
+}
+
+fn make_scope_item(selectors: &str, fg: Color) -> ThemeItem {
+    ThemeItem {
+        scope: ScopeSelectors::from_str(selectors).unwrap_or_default(),
+        style: StyleModifier {
+            foreground: Some(to_syntect(fg)),
+            background: None,
+            font_style: None,
+        },
+    }
+}
+
+fn palette_to_syntect_theme(code: &CodePalette, fg: Color, bg: Color) -> SyntectTheme {
+    SyntectTheme {
+        name: None,
+        author: None,
+        settings: ThemeSettings {
+            foreground: Some(to_syntect(fg)),
+            background: Some(to_syntect(bg)),
+            ..ThemeSettings::default()
+        },
+        scopes: vec![
+            make_scope_item(
+                "keyword, keyword.control, keyword.operator, storage.modifier",
+                code.keyword,
+            ),
+            make_scope_item("string, string.quoted, constant.character", code.string),
+            make_scope_item("comment, comment.line, comment.block", code.comment),
+            make_scope_item("constant.numeric, constant.other.color", code.number),
+            make_scope_item(
+                "entity.name.type, support.type, storage.type, support.class, entity.name.class",
+                code.type_,
+            ),
+            make_scope_item(
+                "entity.name.function, support.function, variable.function, meta.function-call",
+                code.function,
+            ),
+        ],
     }
 }
 
@@ -76,13 +107,13 @@ impl Highlighter for SyntectHighlighter {
             .or_else(|| self.syntax_set.find_syntax_by_extension(lang))
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
 
-        let syntect_theme = self.pick_syntect_theme(theme);
-        let mut highlighter = HighlightLines::new(syntax, syntect_theme);
+        let syntect_theme = palette_to_syntect_theme(&theme.code, theme.fg_color(), theme.code.bg);
+        let mut hl = HighlightLines::new(syntax, &syntect_theme);
         let code_bg = theme.code.bg;
         let mut result = Vec::new();
 
         for raw_line in LinesWithEndings::from(code) {
-            let ranges = highlighter
+            let ranges = hl
                 .highlight_line(raw_line, &self.syntax_set)
                 .unwrap_or_default();
 
@@ -113,14 +144,6 @@ impl Highlighter for SyntectHighlighter {
         }
 
         result
-    }
-}
-
-fn is_dark_bg(theme: Theme) -> bool {
-    if let Color::Rgb(r, g, b) = theme.code.bg {
-        (u32::from(r) + u32::from(g) + u32::from(b)) < 384
-    } else {
-        true
     }
 }
 

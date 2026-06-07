@@ -124,4 +124,8 @@ impl Theme {
     pub fn code_plain(self) -> Style {
         Style::new().fg(self.fg).bg(self.code.bg)
     }
+
+    pub fn fg_color(self) -> Color {
+        self.fg
+    }
 }
