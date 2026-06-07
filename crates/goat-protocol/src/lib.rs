@@ -90,6 +90,12 @@ pub enum LoginCredential {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     SubmitMessage {
         id: TaskId,
@@ -172,6 +178,9 @@ pub enum Event {
     },
     AccountsChanged {
         providers: Vec<AccountEntry>,
+    },
+    SkillsChanged {
+        skills: Vec<SkillInfo>,
     },
     Error {
         id: Option<TaskId>,

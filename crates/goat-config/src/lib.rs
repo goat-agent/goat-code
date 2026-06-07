@@ -71,6 +71,12 @@ pub fn log_dir() -> Option<PathBuf> {
     app_home().map(|home| home.join("logs"))
 }
 
+pub fn skills_dir() -> Option<PathBuf> {
+    app_home().map(|home| home.join("skills"))
+}
+
+pub const PROJECT_SKILLS_SUBDIR: &str = ".goat/skills";
+
 #[cfg(test)]
 mod tests {
     use super::{Config, ThemeChoice};

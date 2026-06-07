@@ -4,6 +4,8 @@ use goat_protocol::ToolOutcome;
 pub enum ToolError {
     #[error("unknown tool: {name}")]
     UnknownTool { name: String },
+    #[error("unknown skill: {name}")]
+    UnknownSkill { name: String },
     #[error("invalid tool input: {source}")]
     InvalidInput {
         #[from]

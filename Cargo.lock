@@ -1072,6 +1072,7 @@ dependencies = [
  "goat-protocol",
  "goat-provider",
  "goat-providers",
+ "goat-skill",
  "goat-store",
  "goat-tool",
  "goat-tools",
@@ -1111,6 +1112,42 @@ dependencies = [
  "tokio",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "goat-command"
+version = "0.1.0"
+
+[[package]]
+name = "goat-command-conversation"
+version = "0.1.0"
+dependencies = [
+ "goat-command",
+]
+
+[[package]]
+name = "goat-command-help"
+version = "0.1.0"
+dependencies = [
+ "goat-command",
+]
+
+[[package]]
+name = "goat-command-settings"
+version = "0.1.0"
+dependencies = [
+ "goat-command",
+]
+
+[[package]]
+name = "goat-commands"
+version = "0.1.0"
+dependencies = [
+ "goat-command",
+ "goat-command-conversation",
+ "goat-command-help",
+ "goat-command-settings",
+ "goat-protocol",
 ]
 
 [[package]]
@@ -1237,6 +1274,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "goat-skill"
+version = "0.1.0"
+dependencies = [
+ "goat-config",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "goat-store"
 version = "0.1.0"
 dependencies = [
@@ -1292,6 +1338,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "goat-tool-skill"
+version = "0.1.0"
+dependencies = [
+ "goat-config",
+ "goat-skill",
+ "goat-tool",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "goat-tools"
 version = "0.1.0"
 dependencies = [
@@ -1299,6 +1358,7 @@ dependencies = [
  "goat-tool-fs",
  "goat-tool-search",
  "goat-tool-shell",
+ "goat-tool-skill",
 ]
 
 [[package]]
@@ -1308,6 +1368,7 @@ dependencies = [
  "color-eyre",
  "crossterm",
  "futures",
+ "goat-commands",
  "goat-protocol",
  "pulldown-cmark",
  "ratatui",

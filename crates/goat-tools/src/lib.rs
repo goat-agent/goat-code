@@ -38,6 +38,7 @@ fn builtin_tools() -> Vec<Box<dyn Tool>> {
     let mut tools = goat_tool_fs::all();
     tools.extend(goat_tool_shell::all());
     tools.extend(goat_tool_search::all());
+    tools.extend(goat_tool_skill::all());
     tools
 }
 
@@ -48,7 +49,7 @@ mod tests {
     #[test]
     fn builtin_registers_all_tools() {
         let registry = ToolRegistry::builtin();
-        for name in ["Read", "Write", "Edit", "Bash", "Grep", "Glob"] {
+        for name in ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Skill"] {
             assert!(registry.get(name).is_some(), "missing tool: {name}");
         }
     }
@@ -61,7 +62,7 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted);
-        assert_eq!(specs.len(), 6);
+        assert_eq!(specs.len(), 7);
     }
 
     #[test]
