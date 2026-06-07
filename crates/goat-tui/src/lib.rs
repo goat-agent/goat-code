@@ -1,4 +1,5 @@
 mod app;
+mod command;
 mod composer;
 pub mod highlight;
 mod keymap;

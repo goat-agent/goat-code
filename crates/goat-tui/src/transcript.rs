@@ -11,13 +11,13 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{highlight::Highlighter, markdown, theme::Theme};
 
 #[derive(Debug)]
-enum ToolStatus {
+pub(crate) enum ToolStatus {
     Running,
     Done(ToolOutcome),
 }
 
 #[derive(Debug)]
-enum Item {
+pub(crate) enum Item {
     User(String),
     Agent(Vec<Line<'static>>),
     Tool {
@@ -32,7 +32,7 @@ enum Item {
 
 #[derive(Default)]
 pub struct Transcript {
-    items: Vec<Item>,
+    pub(crate) items: Vec<Item>,
     streaming: Option<String>,
 }
 
@@ -108,7 +108,7 @@ impl Transcript {
     }
 
     pub fn content_height(&self, width: u16, theme: Theme) -> u16 {
-        let lines = self.build_lines(theme, width);
+        let lines = self.build_lines(theme, width, "⠋ ");
         if width == 0 {
             return u16::try_from(lines.len()).unwrap_or(u16::MAX);
         }
@@ -127,8 +127,15 @@ impl Transcript {
             .sum::<u16>()
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, scroll: u16) {
-        let mut lines = self.build_lines(theme, area.width);
+    pub fn render(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: Theme,
+        scroll: u16,
+        spinner: &'static str,
+    ) {
+        let mut lines = self.build_lines(theme, area.width, spinner);
         if let Some(buffer) = &self.streaming {
             let mut streamed = labelled(buffer, "● ", theme.role_agent(), theme);
             if let Some(last) = streamed.last_mut() {
@@ -144,10 +151,10 @@ impl Transcript {
         );
     }
 
-    fn build_lines(&self, theme: Theme, width: u16) -> Vec<Line<'_>> {
+    fn build_lines(&self, theme: Theme, width: u16, spinner: &'static str) -> Vec<Line<'_>> {
         let mut lines: Vec<Line<'_>> = Vec::new();
         for (i, item) in self.items.iter().enumerate() {
-            lines.extend(item_lines(item, theme, width));
+            lines.extend(item_lines(item, theme, width, spinner));
             let next_is_tool = matches!(self.items.get(i + 1), Some(Item::Tool { .. }));
             if !(matches!(item, Item::Tool { .. }) && next_is_tool) {
                 lines.push(Line::default());
@@ -157,7 +164,12 @@ impl Transcript {
     }
 }
 
-fn item_lines(item: &Item, theme: Theme, width: u16) -> Vec<Line<'_>> {
+fn item_lines<'a>(
+    item: &'a Item,
+    theme: Theme,
+    width: u16,
+    spinner: &'static str,
+) -> Vec<Line<'a>> {
     match item {
         Item::User(text) => labelled(text, "› ", theme.role_user(), theme),
         Item::Agent(rendered) => {
@@ -182,8 +194,8 @@ fn item_lines(item: &Item, theme: Theme, width: u16) -> Vec<Line<'_>> {
             status,
             ..
         } => {
-            let (marker, marker_style) = match status {
-                ToolStatus::Running => ("◐ ", theme.accent()),
+            let (marker, marker_style): (&str, _) = match status {
+                ToolStatus::Running => (spinner, theme.accent()),
                 ToolStatus::Done(ToolOutcome { ok: true, .. }) => ("✓ ", theme.role_tool()),
                 ToolStatus::Done(ToolOutcome { ok: false, .. }) => ("✗ ", theme.error()),
             };
