@@ -95,7 +95,7 @@ fn search(
 
     let mut out = String::new();
     let mut count = 0usize;
-    let mut capped = false;
+    let mut truncated = false;
 
     'walk: for entry in builder.build() {
         let Ok(entry) = entry else { continue };
@@ -111,12 +111,22 @@ fn search(
         let display = relative_display(cwd, entry.path());
         for (lineno, line) in text.lines().enumerate() {
             if regex.is_match(line) {
-                if count >= max_results || out.len() >= max_output_bytes {
-                    capped = true;
+                if count >= max_results {
+                    truncated = true;
                     break 'walk;
                 }
-                let _ = writeln!(out, "{display}:{}: {line}", lineno + 1);
+                let line_display = if line.len() > 1024 {
+                    let b = line.floor_char_boundary(1024);
+                    format!("{}\u{2026}", &line[..b])
+                } else {
+                    line.to_owned()
+                };
+                let _ = writeln!(out, "{display}:{}: {line_display}", lineno + 1);
                 count += 1;
+                if out.len() >= max_output_bytes {
+                    truncated = true;
+                    break 'walk;
+                }
             }
         }
     }
@@ -124,7 +134,7 @@ fn search(
     if count == 0 {
         return Ok("no matches".to_owned());
     }
-    if capped {
+    if truncated {
         out.push_str("\n[output truncated]");
     }
     Ok(out)

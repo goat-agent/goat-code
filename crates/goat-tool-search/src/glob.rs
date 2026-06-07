@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use goat_tool::{
     Tool, ToolContext, ToolError, ToolFuture,
     path::{relative_display, resolve_in_cwd},
@@ -54,6 +56,8 @@ impl Tool for GlobTool {
     }
 }
 
+const MAX_GLOB_RESULTS: usize = 1000;
+
 fn walk(cwd: &std::path::Path, root: &std::path::Path, pattern: &str) -> Result<String, ToolError> {
     let mut overrides = OverrideBuilder::new(root);
     overrides.add(pattern).map_err(|err| ignore_error(&err))?;
@@ -67,15 +71,24 @@ fn walk(cwd: &std::path::Path, root: &std::path::Path, pattern: &str) -> Result<
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
-        let display = relative_display(cwd, entry.path());
-        matches.push(display);
+        matches.push(relative_display(cwd, entry.path()));
     }
 
     if matches.is_empty() {
         return Ok("no files".to_owned());
     }
     matches.sort();
-    Ok(matches.join("\n"))
+    let total = matches.len();
+    matches.truncate(MAX_GLOB_RESULTS);
+    let mut out = matches.join("\n");
+    if total > MAX_GLOB_RESULTS {
+        let _ = write!(
+            out,
+            "\n[{} more files truncated]\n",
+            total - MAX_GLOB_RESULTS
+        );
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
