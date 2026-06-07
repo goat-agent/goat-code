@@ -1,4 +1,31 @@
-pub fn run() {
-    println!("goat update self-updates from GitHub Releases.");
-    println!("It activates once goat is installed from a published release.");
+use axoupdater::{AxoUpdater, AxoupdateError};
+
+pub async fn run() -> color_eyre::Result<()> {
+    let mut updater = AxoUpdater::new_for("goat");
+
+    match updater.load_receipt() {
+        Ok(_) => {}
+        Err(AxoupdateError::NoReceipt { .. } | AxoupdateError::ReceiptLoadFailed { .. }) => {
+            println!(
+                "No install receipt found. To use self-update, install goat via the official installer:"
+            );
+            println!(
+                "  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jbj338033/goat-code/releases/latest/download/goat-installer.sh | sh"
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(color_eyre::eyre::eyre!("{e}")),
+    }
+
+    match updater.run().await {
+        Ok(Some(result)) => {
+            println!("Updated to {}.", result.new_version);
+        }
+        Ok(None) => {
+            println!("Already up to date.");
+        }
+        Err(e) => return Err(color_eyre::eyre::eyre!("{e}")),
+    }
+
+    Ok(())
 }

@@ -19,10 +19,7 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     match cli.command {
-        Some(Command::Update) => {
-            update::run();
-            Ok(())
-        }
+        Some(Command::Update) => update::run().await,
         Some(Command::Auth(command)) => auth::run(command).await,
         None => run_tui().await,
     }
