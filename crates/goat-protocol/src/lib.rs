@@ -33,11 +33,57 @@ pub struct ToolOutcome {
     pub summary: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    Off,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Effort {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Effort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelTarget {
     pub provider: String,
     pub model: String,
     pub account: String,
+    #[serde(default)]
+    pub effort: Option<Effort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +99,26 @@ pub struct ModelEntry {
     pub model: String,
     pub accounts: Vec<AccountChoice>,
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub efforts: Vec<Effort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadSummary {
+    pub id: i64,
+    pub title: String,
+    pub model: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TranscriptEntry {
+    User(String),
+    Assistant(String),
+    Tool {
+        call: ToolCall,
+        outcome: ToolOutcome,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +190,10 @@ pub enum Op {
     SetTheme {
         dark: bool,
     },
+    ListThreads,
+    Resume {
+        thread_id: i64,
+    },
     Shutdown,
 }
 
@@ -166,6 +236,17 @@ pub enum Event {
     },
     ModelSelected {
         target: ModelTarget,
+    },
+    ThreadsListed {
+        threads: Vec<ThreadSummary>,
+    },
+    ConversationRestored {
+        target: ModelTarget,
+        entries: Vec<TranscriptEntry>,
+    },
+    ThinkingDelta {
+        id: TaskId,
+        chunk: String,
     },
     LoginProviders {
         providers: Vec<LoginProvider>,

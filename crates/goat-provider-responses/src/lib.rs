@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
-    AuthMethod, ContentBlock, MessageRole, ModelEvent, ModelInfo, ModelProvider, ModelRequest,
-    ProviderCapabilities, ProviderId, ProviderMessage, ToolDefinition,
+    AuthMethod, ContentBlock, Effort, MessageRole, ModelEvent, ModelInfo, ModelProvider,
+    ModelRequest, ProviderCapabilities, ProviderId, ProviderMessage, ToolDefinition,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -22,8 +22,35 @@ struct ResponsesRequest<'a> {
     tool_choice: Option<&'a str>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<serde_json::Value>,
     store: bool,
     stream: bool,
+}
+
+fn effort_wire(effort: Effort) -> &'static str {
+    match effort {
+        Effort::Off => "none",
+        other => other.as_str(),
+    }
+}
+
+#[must_use]
+pub fn responses_efforts(model: &str) -> Vec<Effort> {
+    let id = model.to_ascii_lowercase();
+    if id.starts_with("gpt-5") {
+        vec![
+            Effort::Off,
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+        ]
+    } else if id.starts_with("o3") || id.starts_with("o4") {
+        vec![Effort::Low, Effort::Medium, Effort::High]
+    } else {
+        Vec::new()
+    }
 }
 
 fn text_item(role: &str, content_kind: &str, text: &str) -> serde_json::Value {
@@ -72,6 +99,7 @@ fn append_message_items(
                     "output": content,
                 }));
             }
+            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
         }
     }
     if !text.is_empty() {
@@ -85,6 +113,7 @@ pub fn build_body(
     tools: &[ToolDefinition],
     default_instructions: Option<&str>,
     store: bool,
+    effort: Option<Effort>,
 ) -> serde_json::Value {
     let mut instructions = String::new();
     let mut input: Vec<serde_json::Value> = Vec::new();
@@ -119,6 +148,7 @@ pub fn build_body(
         })
         .collect();
     let has_tools = !tools.is_empty();
+    let reasoning = effort.map(|effort| json!({ "effort": effort_wire(effort) }));
     let request = ResponsesRequest {
         model,
         instructions,
@@ -126,6 +156,7 @@ pub fn build_body(
         tools,
         tool_choice: if has_tools { Some("auto") } else { None },
         parallel_tool_calls: has_tools,
+        reasoning,
         store,
         stream: true,
     };
@@ -411,12 +442,23 @@ impl ModelProvider for ResponsesProvider {
         self.catalog
     }
 
+    fn efforts(&self, model: &str) -> Vec<Effort> {
+        responses_efforts(model)
+    }
+
     fn request(&self, req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()> {
         let client = self.client.clone();
         let url = format!("{}/responses", self.base_url);
         let bearer = self.bearer.clone();
         tokio::spawn(async move {
-            let body = build_body(&req.model, &req.messages, &req.tools, None, false);
+            let body = build_body(
+                &req.model,
+                &req.messages,
+                &req.tools,
+                None,
+                false,
+                req.effort,
+            );
             run_request(&client, &url, bearer.as_deref(), None, &body, &events).await;
         })
     }
@@ -469,7 +511,7 @@ mod tests {
     #[test]
     fn default_instructions_used_when_no_system_message() {
         let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
-        let body = build_body("gpt-5.5", &messages, &[], Some("base"), false);
+        let body = build_body("gpt-5.5", &messages, &[], Some("base"), false, None);
         assert_eq!(body["instructions"], "base");
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
@@ -481,14 +523,14 @@ mod tests {
             ProviderMessage::text(MessageRole::System, "be terse"),
             ProviderMessage::text(MessageRole::User, "hi"),
         ];
-        let body = build_body("gpt-5.5", &messages, &[], Some("base"), false);
+        let body = build_body("gpt-5.5", &messages, &[], Some("base"), false, None);
         assert_eq!(body["instructions"], "be terse");
     }
 
     #[test]
     fn instructions_omitted_when_empty_and_no_default() {
         let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
-        let body = build_body("gpt-5.5", &messages, &[], None, false);
+        let body = build_body("gpt-5.5", &messages, &[], None, false, None);
         assert!(body.get("instructions").is_none());
     }
 
@@ -500,7 +542,7 @@ mod tests {
             input_schema: json!({ "type": "object" }),
         }];
         let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
-        let body = build_body("gpt-5.5", &messages, &tools, None, false);
+        let body = build_body("gpt-5.5", &messages, &tools, None, false, None);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "read_file");
         assert_eq!(body["tools"][0]["parameters"]["type"], "object");
@@ -524,7 +566,7 @@ mod tests {
                 is_error: false,
             }],
         };
-        let body = build_body("gpt-5.5", &[assistant, result], &[], None, false);
+        let body = build_body("gpt-5.5", &[assistant, result], &[], None, false, None);
         assert_eq!(body["input"][0]["type"], "function_call");
         assert_eq!(body["input"][0]["call_id"], "call_1");
         assert_eq!(body["input"][0]["name"], "read_file");
@@ -532,6 +574,31 @@ mod tests {
         assert_eq!(body["input"][1]["type"], "function_call_output");
         assert_eq!(body["input"][1]["call_id"], "call_1");
         assert_eq!(body["input"][1]["output"], "file body");
+    }
+
+    #[test]
+    fn reasoning_included_only_when_effort_present() {
+        let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
+        let plain = build_body("gpt-5.5", &messages, &[], None, false, None);
+        assert!(plain.get("reasoning").is_none());
+        let high = build_body(
+            "gpt-5.5",
+            &messages,
+            &[],
+            None,
+            false,
+            Some(goat_provider::Effort::High),
+        );
+        assert_eq!(high["reasoning"]["effort"], "high");
+        let off = build_body(
+            "gpt-5.5",
+            &messages,
+            &[],
+            None,
+            false,
+            Some(goat_provider::Effort::Off),
+        );
+        assert_eq!(off["reasoning"]["effort"], "none");
     }
 
     #[test]

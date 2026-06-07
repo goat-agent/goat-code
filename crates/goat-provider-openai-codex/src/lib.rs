@@ -393,6 +393,7 @@ impl ModelProvider for CodexProvider {
                 &req.tools,
                 Some(DEFAULT_INSTRUCTIONS),
                 false,
+                req.effort,
             );
             goat_provider_responses::run_request(
                 &client,
@@ -408,6 +409,10 @@ impl ModelProvider for CodexProvider {
 
     fn catalog(&self) -> &'static [&'static str] {
         CATALOG
+    }
+
+    fn efforts(&self, model: &str) -> Vec<goat_provider::Effort> {
+        goat_provider_responses::responses_efforts(model)
     }
 
     fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()> {

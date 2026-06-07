@@ -55,6 +55,8 @@ struct ChatRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
 }
 
 fn role_label(role: MessageRole) -> &'static str {
@@ -315,6 +317,7 @@ impl ModelProvider for OpenAiCompatProvider {
                 messages: to_chat_messages(&req.messages),
                 stream: true,
                 tools: to_chat_tools(&req),
+                reasoning_effort: req.effort.map(goat_provider::Effort::as_str),
             };
             let mut builder = client.post(&url).json(&body);
             if let Some(token) = &bearer {

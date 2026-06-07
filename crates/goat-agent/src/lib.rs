@@ -7,8 +7,9 @@ use std::{
 use goat_auth::{CredentialKey, CredentialKind, CredentialStore, ResolvedCredential, SecretString};
 use goat_core::Engine;
 use goat_protocol::{
-    AccountChoice, AccountEntry, AccountInfo, AuthMethod, Event, LoginCredential, LoginProvider,
-    ModelEntry, ModelTarget, NotifyKind, Op, SkillInfo, TaskId, ToolCallId,
+    AccountChoice, AccountEntry, AccountInfo, AuthMethod, Effort, Event, LoginCredential,
+    LoginProvider, ModelEntry, ModelTarget, NotifyKind, Op, SkillInfo, TaskId, ThreadSummary,
+    ToolCall, ToolCallId, ToolOutcome, TranscriptEntry,
 };
 use goat_provider::{
     ContentBlock, MessageRole, ModelEvent, ModelRequest, ProviderMessage, ToolDefinition,
@@ -101,6 +102,8 @@ enum RoundEnd {
 struct RoundResult {
     end: RoundEnd,
     raw: String,
+    thinking: Option<(String, String)>,
+    redacted: Vec<String>,
     pending_calls: Vec<(String, String, String)>,
 }
 
@@ -173,6 +176,19 @@ async fn restore_target(store: &Store, credentials: &CredentialStore) -> Option<
         provider: thread.provider,
         model: thread.model,
         account: thread.account,
+        effort: thread.effort.as_deref().and_then(Effort::parse),
+    })
+}
+
+fn effort_string(effort: Option<Effort>) -> Option<String> {
+    effort.map(|e| e.as_str().to_owned())
+}
+
+fn parse_content_blocks(body: &str) -> Vec<ContentBlock> {
+    serde_json::from_str::<Vec<ContentBlock>>(body).unwrap_or_else(|_| {
+        vec![ContentBlock::Text {
+            text: body.to_owned(),
+        }]
     })
 }
 
@@ -289,6 +305,21 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
             }
             Op::RemoveAccount { provider, name } => {
                 handle_remove_account(provider, name, &credentials, &mut registry, &events).await;
+            }
+            Op::ListThreads => {
+                handle_list_threads(&store, &events).await;
+            }
+            Op::Resume { thread_id: tid } => {
+                handle_resume(
+                    &store,
+                    &skills,
+                    tid,
+                    &mut target,
+                    &mut history,
+                    &mut thread_id,
+                    &events,
+                )
+                .await;
             }
             Op::Shutdown => break,
         }
@@ -527,11 +558,17 @@ fn accounts_for_provider(
     None
 }
 
-fn model_entry(provider_id: &str, model: &str, accounts: &[String]) -> ModelEntry {
+fn model_entry(
+    provider_id: &str,
+    model: &str,
+    accounts: &[String],
+    efforts: Vec<Effort>,
+) -> ModelEntry {
     ModelEntry {
         provider: provider_id.to_owned(),
         model: model.to_owned(),
         context_window: None,
+        efforts,
         accounts: accounts
             .iter()
             .map(|account| AccountChoice {
@@ -541,6 +578,7 @@ fn model_entry(provider_id: &str, model: &str, accounts: &[String]) -> ModelEntr
                     provider: provider_id.to_owned(),
                     model: model.to_owned(),
                     account: account.clone(),
+                    effort: None,
                 },
             })
             .collect(),
@@ -555,7 +593,12 @@ fn catalog_only(registry: &Registry, credentials: &CredentialStore) -> Vec<Model
         };
         let provider_id = provider.id().to_string();
         for &id in provider.catalog() {
-            entries.push(model_entry(&provider_id, id, &accounts));
+            entries.push(model_entry(
+                &provider_id,
+                id,
+                &accounts,
+                provider.efforts(id),
+            ));
         }
     }
     entries
@@ -583,14 +626,20 @@ async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> V
         let catalog_ids: HashSet<&str> = catalog.iter().copied().collect();
 
         for &id in catalog {
-            entries.push(model_entry(&provider_id, id, &accounts));
+            entries.push(model_entry(
+                &provider_id,
+                id,
+                &accounts,
+                provider.efforts(id),
+            ));
         }
 
         for info in discovered {
             if catalog_ids.contains(info.id.as_str()) {
                 continue;
             }
-            entries.push(model_entry(&provider_id, &info.id, &accounts));
+            let efforts = provider.efforts(&info.id);
+            entries.push(model_entry(&provider_id, &info.id, &accounts, efforts));
         }
     }
     entries
@@ -607,6 +656,9 @@ async fn run_round(
     let (mev_tx, mut mev_rx) = mpsc::channel(64);
     let handle = provider.request(request, mev_tx);
     let mut raw = String::new();
+    let mut thinking = String::new();
+    let mut signature = String::new();
+    let mut redacted: Vec<String> = Vec::new();
     let mut pending_calls: Vec<(String, String, String)> = Vec::new();
     let end = loop {
         tokio::select! {
@@ -627,6 +679,19 @@ async fn run_round(
                         break RoundEnd::ShuttingDown;
                     }
                 }
+                Some(ModelEvent::ThinkingDelta { text }) => {
+                    thinking.push_str(&text);
+                    if events.send(Event::ThinkingDelta { id, chunk: text }).await.is_err() {
+                        handle.abort();
+                        break RoundEnd::ShuttingDown;
+                    }
+                }
+                Some(ModelEvent::ThinkingSignature { signature: sig }) => {
+                    signature.push_str(&sig);
+                }
+                Some(ModelEvent::RedactedThinking { data }) => {
+                    redacted.push(data);
+                }
                 Some(ModelEvent::ToolCall { id: vendor_id, name, input }) => {
                     pending_calls.push((vendor_id, name, input));
                 }
@@ -635,9 +700,12 @@ async fn run_round(
             }
         }
     };
+    let thinking = (!thinking.is_empty()).then_some((thinking, signature));
     RoundResult {
         end,
         raw,
+        thinking,
+        redacted,
         pending_calls,
     }
 }
@@ -876,10 +944,20 @@ async fn run_tool_batch(
     }
 }
 
+fn thread_title(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let title: String = trimmed.chars().take(60).collect();
+    Some(title)
+}
+
 async fn ensure_thread(
     store: &Store,
     thread_id: &mut Option<i64>,
     target: &ModelTarget,
+    title: Option<String>,
 ) -> Option<i64> {
     if let Some(tid) = thread_id {
         return Some(*tid);
@@ -892,10 +970,11 @@ async fn ensure_thread(
     match store
         .create_thread(NewThread {
             cwd,
-            title: None,
+            title,
             provider: target.provider.clone(),
             model: target.model.clone(),
             account: target.account.clone(),
+            effort: effort_string(target.effort),
             created_at: timestamp,
             updated_at: timestamp,
         })
@@ -919,15 +998,19 @@ async fn init_db_turn(
     target: &ModelTarget,
     thread_id: &mut Option<i64>,
 ) -> TurnIds {
-    let stored_thread = ensure_thread(ctx.store, thread_id, target).await;
+    let stored_thread = ensure_thread(ctx.store, thread_id, target, thread_title(text)).await;
     let turn_db_id = if let Some(tid) = stored_thread {
+        let body = serde_json::to_string(&vec![ContentBlock::Text {
+            text: text.to_owned(),
+        }])
+        .unwrap_or_else(|_| text.to_owned());
         if let Err(err) = ctx
             .store
             .create_message(NewMessage {
                 thread_id: tid,
                 turn_id: None,
                 role: "user".to_owned(),
-                body: text.to_owned(),
+                body,
                 created_at: now_ms(),
             })
             .await
@@ -941,6 +1024,7 @@ async fn init_db_turn(
                 provider: target.provider.clone(),
                 model: target.model.clone(),
                 account: target.account.clone(),
+                effort: effort_string(target.effort),
                 status: "running".to_owned(),
                 started_at: now_ms(),
             })
@@ -955,26 +1039,31 @@ async fn init_db_turn(
     }
 }
 
-async fn persist_assistant_text(ctx: &Ctx<'_>, raw: &str, ids: &TurnIds) -> Option<String> {
-    if raw.is_empty() {
-        return None;
-    }
-    let shown = raw.to_owned();
-    if let (Some(tid), Some(turn)) = (ids.stored_thread, ids.turn_db_id)
-        && let Err(err) = ctx
-            .store
-            .create_message(NewMessage {
-                thread_id: tid,
-                turn_id: Some(turn),
-                role: "assistant".to_owned(),
-                body: shown.clone(),
-                created_at: now_ms(),
-            })
-            .await
+async fn persist_message(ctx: &Ctx<'_>, ids: &TurnIds, message: &ProviderMessage) {
+    let role = match message.role {
+        MessageRole::System => return,
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+    };
+    let Some(tid) = ids.stored_thread else {
+        return;
+    };
+    let Ok(body) = serde_json::to_string(&message.content) else {
+        return;
+    };
+    if let Err(err) = ctx
+        .store
+        .create_message(NewMessage {
+            thread_id: tid,
+            turn_id: ids.turn_db_id,
+            role: role.to_owned(),
+            body,
+            created_at: now_ms(),
+        })
+        .await
     {
-        tracing::warn!(%err, "failed to persist assistant message");
+        tracing::warn!(%err, "failed to persist message");
     }
-    Some(shown)
 }
 
 async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &RoundEnd, ids: &TurnIds) {
@@ -1051,8 +1140,22 @@ async fn process_round_output(
 ) -> RoundOutcome {
     let raw = round.raw;
     let pending_calls = round.pending_calls;
-    if !raw.is_empty() || !pending_calls.is_empty() {
+    let shown_text = (!raw.is_empty()).then(|| raw.clone());
+    if !raw.is_empty()
+        || !pending_calls.is_empty()
+        || round.thinking.is_some()
+        || !round.redacted.is_empty()
+    {
         let mut content = Vec::new();
+        if let Some((text, signature)) = &round.thinking {
+            content.push(ContentBlock::Thinking {
+                text: text.clone(),
+                signature: signature.clone(),
+            });
+        }
+        for data in &round.redacted {
+            content.push(ContentBlock::RedactedThinking { data: data.clone() });
+        }
         if !raw.is_empty() {
             content.push(ContentBlock::Text { text: raw.clone() });
         }
@@ -1064,12 +1167,13 @@ async fn process_round_output(
                 input: input_val,
             });
         }
-        history.push(ProviderMessage {
+        let message = ProviderMessage {
             role: MessageRole::Assistant,
             content,
-        });
+        };
+        persist_message(ctx, state.ids, &message).await;
+        history.push(message);
     }
-    let shown_text = persist_assistant_text(ctx, &raw, state.ids).await;
     if pending_calls.is_empty() {
         if let Some(shown) = shown_text {
             let _ = ctx.events.send(Event::TextDone { id, text: shown }).await;
@@ -1086,10 +1190,12 @@ async fn process_round_output(
                 is_error: true,
             })
             .collect();
-        history.push(ProviderMessage {
+        let message = ProviderMessage {
             role: MessageRole::User,
             content: synthetic,
-        });
+        };
+        persist_message(ctx, state.ids, &message).await;
+        history.push(message);
         if let Some(shown) = shown_text {
             let _ = ctx.events.send(Event::TextDone { id, text: shown }).await;
         }
@@ -1103,10 +1209,12 @@ async fn process_round_output(
     if batch.shutting_down {
         return RoundOutcome::Shutdown;
     }
-    history.push(ProviderMessage {
+    let message = ProviderMessage {
         role: MessageRole::User,
         content: batch.tool_results,
-    });
+    };
+    persist_message(ctx, state.ids, &message).await;
+    history.push(message);
     if batch.interrupted_at.is_some() {
         RoundOutcome::Done(RoundEnd::Interrupted)
     } else {
@@ -1188,6 +1296,7 @@ async fn handle_idle_op(
                     chosen.provider.clone(),
                     chosen.model.clone(),
                     chosen.account.clone(),
+                    effort_string(chosen.effort),
                     now_ms(),
                 )
                 .await
@@ -1197,6 +1306,122 @@ async fn handle_idle_op(
         *target = Some(chosen.clone());
         let _ = events.send(Event::ModelSelected { target: chosen }).await;
     }
+}
+
+async fn handle_list_threads(store: &Store, events: &mpsc::Sender<Event>) {
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let threads = store.list_threads_in(cwd, 50).await.unwrap_or_default();
+    let summaries = threads
+        .into_iter()
+        .map(|thread| ThreadSummary {
+            model: format!("{}/{}", thread.provider, thread.model),
+            title: thread
+                .title
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| format!("{}/{}", thread.provider, thread.model)),
+            id: thread.id,
+            updated_at: thread.updated_at,
+        })
+        .collect();
+    let _ = events
+        .send(Event::ThreadsListed { threads: summaries })
+        .await;
+}
+
+fn tool_summary(content: &str) -> String {
+    content
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(200)
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_resume(
+    store: &Store,
+    skills: &[SkillInfo],
+    tid: i64,
+    target: &mut Option<ModelTarget>,
+    history: &mut Vec<ProviderMessage>,
+    thread_id: &mut Option<i64>,
+    events: &mpsc::Sender<Event>,
+) {
+    let Some(thread) = store.get_thread(tid).await.ok().flatten() else {
+        return;
+    };
+    let new_target = ModelTarget {
+        provider: thread.provider.clone(),
+        model: thread.model.clone(),
+        account: thread.account.clone(),
+        effort: thread.effort.as_deref().and_then(Effort::parse),
+    };
+    let messages = store.get_messages(tid).await.unwrap_or_default();
+    let mut new_history = vec![ProviderMessage::text(
+        MessageRole::System,
+        build_system_prompt(skills),
+    )];
+    let mut entries: Vec<TranscriptEntry> = Vec::new();
+    let mut tool_uses: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    let mut tool_seq: u64 = 0;
+    for stored in messages {
+        let role = match stored.role.as_str() {
+            "user" => MessageRole::User,
+            "assistant" => MessageRole::Assistant,
+            _ => continue,
+        };
+        let content = parse_content_blocks(&stored.body);
+        for block in &content {
+            match block {
+                ContentBlock::Text { text } => match role {
+                    MessageRole::User => entries.push(TranscriptEntry::User(text.clone())),
+                    MessageRole::Assistant => {
+                        entries.push(TranscriptEntry::Assistant(text.clone()));
+                    }
+                    MessageRole::System => {}
+                },
+                ContentBlock::ToolUse { id, name, input } => {
+                    tool_uses.insert(id.clone(), (name.clone(), input.to_string()));
+                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    if let Some((name, input)) = tool_uses.remove(tool_use_id) {
+                        tool_seq += 1;
+                        entries.push(TranscriptEntry::Tool {
+                            call: ToolCall {
+                                id: ToolCallId(tool_seq),
+                                name,
+                                input,
+                            },
+                            outcome: ToolOutcome {
+                                ok: !is_error,
+                                summary: Some(tool_summary(content)),
+                            },
+                        });
+                    }
+                }
+                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
+            }
+        }
+        new_history.push(ProviderMessage { role, content });
+    }
+    *history = new_history;
+    *thread_id = Some(tid);
+    *target = Some(new_target.clone());
+    let _ = events
+        .send(Event::ConversationRestored {
+            target: new_target,
+            entries,
+        })
+        .await;
 }
 
 async fn handle_turn(
@@ -1237,6 +1462,7 @@ async fn handle_turn(
     }
 
     let turn_model = resolved.model.clone();
+    let turn_effort = resolved.effort;
     let tool_defs = build_tool_defs(ctx, provider.as_ref());
     let cwd = resolve_thread_cwd(ctx, ids.stored_thread).await;
     let mut call_seq: u64 = 0;
@@ -1248,6 +1474,7 @@ async fn handle_turn(
             model: turn_model.clone(),
             messages: history.clone(),
             tools: tool_defs.clone(),
+            effort: turn_effort,
         };
         let round = run_round(
             id,
@@ -1352,6 +1579,7 @@ mod tests {
             provider: provider.to_owned(),
             model: "m".to_owned(),
             account: "default".to_owned(),
+            effort: None,
         }
     }
 
