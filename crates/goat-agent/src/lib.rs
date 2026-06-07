@@ -6,12 +6,12 @@ use std::{
 use goat_auth::{CredentialKey, CredentialStore, RedactionSet, ResolvedCredential, SecretString};
 use goat_core::Engine;
 use goat_protocol::{
-    AccountChoice, Event, LoginCredential, LoginProvider, ModelEntry, ModelTarget, Op, Severity,
-    TaskId, ToolCallId,
+    AccountChoice, Event, LoginCredential, LoginProvider, ModelEntry, ModelTarget, Op, TaskId,
+    ToolCallId,
 };
 use goat_provider::{
     ContentBlock, MessageRole, ModelEvent, ModelRequest, ProviderId, ProviderMessage,
-    ToolDefinition,
+    ToolDefinition, now_secs,
 };
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use goat_store::{NewMessage, NewThread, NewTurn, Store};
@@ -71,12 +71,48 @@ enum RoundEnd {
     Failed(String),
 }
 
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-        .unwrap_or(0)
+struct RoundResult {
+    end: RoundEnd,
+    raw: String,
+    pending_calls: Vec<(String, String, String)>,
+}
+
+struct ToolExecResult {
+    result_content: ContentBlock,
+    interrupted: bool,
+    flow_shutdown: bool,
+}
+
+struct ToolBatchResult {
+    tool_results: Vec<ContentBlock>,
+    interrupted_at: Option<usize>,
+    flow_shutdown: bool,
+}
+
+struct ToolCallSpec<'a> {
+    vendor_id: &'a str,
+    name: &'a str,
+    input_json: &'a str,
+    tui_id: u64,
+    db_id: Option<i64>,
+}
+
+struct TurnIds {
+    stored_thread: Option<i64>,
+    turn_db_id: Option<i64>,
+}
+
+enum RoundOutcome {
+    Done(RoundEnd),
+    Continue,
+    Shutdown,
+}
+
+struct RoundState<'a> {
+    ids: &'a TurnIds,
+    rounds: usize,
+    cwd: &'a std::path::Path,
+    call_seq: &'a mut u64,
 }
 
 fn now_ms() -> i64 {
@@ -159,16 +195,12 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                             chosen.provider.clone(),
                             chosen.model.clone(),
                             chosen.account.clone(),
-                            now(),
+                            now_secs(),
                         )
                         .await;
                 }
                 target = Some(chosen.clone());
                 let _ = events.send(Event::ModelSelected { target: chosen }).await;
-            }
-            Op::RefreshModels => {
-                let entries = discover_ready(&registry).await;
-                let _ = events.send(Event::ModelListChanged { entries }).await;
             }
             Op::Login {
                 provider,
@@ -403,6 +435,261 @@ async fn discover_ready(registry: &Registry) -> Vec<ModelEntry> {
     entries
 }
 
+async fn run_round(
+    id: TaskId,
+    provider: &dyn goat_provider::ModelProvider,
+    request: ModelRequest,
+    ops: &mut mpsc::Receiver<Op>,
+    events: &mpsc::Sender<Event>,
+    redaction: &RedactionSet,
+) -> RoundResult {
+    let (mev_tx, mut mev_rx) = mpsc::channel(64);
+    let handle = provider.request(request, mev_tx);
+    let mut raw = String::new();
+    let mut pending_calls: Vec<(String, String, String)> = Vec::new();
+    let end = loop {
+        tokio::select! {
+            biased;
+            maybe_op = ops.recv() => match maybe_op {
+                Some(Op::Interrupt { .. }) => { handle.abort(); break RoundEnd::Interrupted; }
+                Some(Op::Shutdown) | None => {
+                    handle.abort();
+                    break RoundEnd::Failed("__shutdown__".to_owned());
+                }
+                Some(_) => {}
+            },
+            maybe_event = mev_rx.recv() => match maybe_event {
+                Some(ModelEvent::TextDelta { text }) => {
+                    raw.push_str(&text);
+                    let shown = redaction.redact(&text);
+                    if events.send(Event::TextDelta { id, chunk: shown }).await.is_err() {
+                        handle.abort();
+                        break RoundEnd::Failed("__shutdown__".to_owned());
+                    }
+                }
+                Some(ModelEvent::ToolCall { id: vendor_id, name, input }) => {
+                    pending_calls.push((vendor_id, name, input));
+                }
+                Some(ModelEvent::Completed) | None => break RoundEnd::Completed,
+                Some(ModelEvent::Failed { message }) => break RoundEnd::Failed(message),
+            }
+        }
+    };
+    RoundResult {
+        end,
+        raw,
+        pending_calls,
+    }
+}
+
+async fn finish_tool_interrupted(
+    ctx: &Ctx<'_>,
+    id: TaskId,
+    vendor_id: &str,
+    tui_id: u64,
+    db_id: Option<i64>,
+) -> ContentBlock {
+    if let Some(db) = db_id {
+        let _ = ctx
+            .store
+            .finish_tool_call(
+                db,
+                "interrupted".to_owned(),
+                Some("interrupted".to_owned()),
+                now_ms(),
+            )
+            .await;
+    }
+    let _ = ctx
+        .events
+        .send(Event::ToolDone {
+            id,
+            call: ToolCallId(tui_id),
+            outcome: goat_protocol::ToolOutcome {
+                ok: false,
+                summary: Some("interrupted".to_owned()),
+            },
+        })
+        .await;
+    ContentBlock::ToolResult {
+        tool_use_id: vendor_id.to_owned(),
+        content: "interrupted".to_owned(),
+        is_error: true,
+    }
+}
+
+async fn finish_tool_success(
+    ctx: &Ctx<'_>,
+    id: TaskId,
+    vendor_id: &str,
+    tui_id: u64,
+    db_id: Option<i64>,
+    result: &Result<String, goat_tool::ToolError>,
+) -> ContentBlock {
+    let (outcome, result_text) = outcome_from(result);
+    if let Some(db) = db_id {
+        let status = if outcome.ok { "done" } else { "error" }.to_owned();
+        let _ = ctx
+            .store
+            .finish_tool_call(db, status, outcome.summary.clone(), now_ms())
+            .await;
+    }
+    let is_error = !outcome.ok;
+    let _ = ctx
+        .events
+        .send(Event::ToolDone {
+            id,
+            call: ToolCallId(tui_id),
+            outcome,
+        })
+        .await;
+    ContentBlock::ToolResult {
+        tool_use_id: vendor_id.to_owned(),
+        content: ctx.redaction.redact(&result_text),
+        is_error,
+    }
+}
+
+async fn execute_tool(
+    ctx: &Ctx<'_>,
+    id: TaskId,
+    spec: ToolCallSpec<'_>,
+    tool_ctx: &ToolContext,
+    ops: &mut mpsc::Receiver<Op>,
+) -> ToolExecResult {
+    let ToolCallSpec {
+        vendor_id,
+        name,
+        input_json,
+        tui_id,
+        db_id,
+    } = spec;
+    let run_fut = async {
+        match ctx.tools.get(name) {
+            Some(tool) => tool.run(input_json, tool_ctx).await,
+            None => Err(goat_tool::ToolError::UnknownTool {
+                name: name.to_owned(),
+            }),
+        }
+    };
+    let mut run_fut = std::pin::pin!(run_fut);
+    let result = loop {
+        tokio::select! {
+            biased;
+            maybe_op = ops.recv() => match maybe_op {
+                Some(Op::Interrupt { id: task_id }) if task_id == id => break Ok(String::new()),
+                Some(Op::Shutdown) | None => {
+                    return ToolExecResult {
+                        result_content: ContentBlock::ToolResult {
+                            tool_use_id: vendor_id.to_owned(),
+                            content: "shutdown".to_owned(),
+                            is_error: true,
+                        },
+                        interrupted: false,
+                        flow_shutdown: true,
+                    };
+                }
+                Some(_) => {}
+            },
+            r = &mut run_fut => break r,
+        }
+    };
+    let interrupted = matches!(&result, Ok(s) if s.is_empty());
+    if interrupted {
+        let block = finish_tool_interrupted(ctx, id, vendor_id, tui_id, db_id).await;
+        return ToolExecResult {
+            result_content: block,
+            interrupted: true,
+            flow_shutdown: false,
+        };
+    }
+    let block = finish_tool_success(ctx, id, vendor_id, tui_id, db_id, &result).await;
+    ToolExecResult {
+        result_content: block,
+        interrupted: false,
+        flow_shutdown: false,
+    }
+}
+
+async fn run_tool_batch(
+    ctx: &Ctx<'_>,
+    id: TaskId,
+    pending_calls: &[(String, String, String)],
+    ids: &TurnIds,
+    tool_ctx: &ToolContext,
+    call_seq: &mut u64,
+    ops: &mut mpsc::Receiver<Op>,
+) -> ToolBatchResult {
+    let mut tool_results: Vec<ContentBlock> = Vec::new();
+    let mut interrupted_at: Option<usize> = None;
+    for (index, (vendor_id, name, input_json)) in pending_calls.iter().enumerate() {
+        *call_seq += 1;
+        let tui_id = *call_seq;
+        let _ = ctx
+            .events
+            .send(Event::ToolStarted {
+                id,
+                call: goat_protocol::ToolCall {
+                    id: ToolCallId(tui_id),
+                    name: name.clone(),
+                    input: input_json.clone(),
+                },
+            })
+            .await;
+        let db_id = if let (Some(tid), Some(turn)) = (ids.stored_thread, ids.turn_db_id) {
+            ctx.store
+                .create_tool_call(goat_store::NewToolCall {
+                    thread_id: tid,
+                    turn_id: turn,
+                    call_id: vendor_id.clone(),
+                    name: name.clone(),
+                    input: input_json.clone(),
+                    status: "running".to_owned(),
+                    started_at: now_ms(),
+                })
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let spec = ToolCallSpec {
+            vendor_id,
+            name,
+            input_json,
+            tui_id,
+            db_id,
+        };
+        let exec = execute_tool(ctx, id, spec, tool_ctx, ops).await;
+        if exec.flow_shutdown {
+            return ToolBatchResult {
+                tool_results,
+                interrupted_at,
+                flow_shutdown: true,
+            };
+        }
+        if exec.interrupted {
+            interrupted_at = Some(index);
+            tool_results.push(exec.result_content);
+            break;
+        }
+        tool_results.push(exec.result_content);
+    }
+    if let Some(index) = interrupted_at {
+        for (vendor_id, _, _) in pending_calls.iter().skip(index + 1) {
+            tool_results.push(ContentBlock::ToolResult {
+                tool_use_id: vendor_id.clone(),
+                content: "interrupted".to_owned(),
+                is_error: true,
+            });
+        }
+    }
+    ToolBatchResult {
+        tool_results,
+        interrupted_at,
+        flow_shutdown: false,
+    }
+}
+
 async fn ensure_thread(
     store: &Store,
     thread_id: &mut Option<i64>,
@@ -411,7 +698,7 @@ async fn ensure_thread(
     if let Some(tid) = thread_id {
         return Some(*tid);
     }
-    let timestamp = now();
+    let timestamp = now_secs();
     let cwd = std::env::current_dir()
         .ok()
         .map(|path| path.display().to_string())
@@ -439,58 +726,13 @@ async fn ensure_thread(
     }
 }
 
-#[allow(clippy::too_many_lines)]
-async fn handle_turn(
+async fn init_db_turn(
     ctx: &Ctx<'_>,
     id: TaskId,
-    text: String,
-    target: Option<&ModelTarget>,
-    history: &mut Vec<ProviderMessage>,
+    text: &str,
+    target: &ModelTarget,
     thread_id: &mut Option<i64>,
-    ops: &mut mpsc::Receiver<Op>,
-) -> Flow {
-    let Some(target) = target else {
-        let _ = ctx
-            .events
-            .send(Event::Error {
-                id: Some(id),
-                severity: Severity::Recoverable,
-                message: "no model selected".to_owned(),
-            })
-            .await;
-        let _ = ctx
-            .events
-            .send(Event::TaskDone {
-                id,
-                interrupted: true,
-            })
-            .await;
-        return Flow::Continue;
-    };
-    let Some(provider) = ctx
-        .registry
-        .get(&ProviderId::from(target.provider.as_str()))
-    else {
-        let _ = ctx
-            .events
-            .send(Event::Error {
-                id: Some(id),
-                severity: Severity::Recoverable,
-                message: format!("unknown provider: {}", target.provider),
-            })
-            .await;
-        let _ = ctx
-            .events
-            .send(Event::TaskDone {
-                id,
-                interrupted: true,
-            })
-            .await;
-        return Flow::Continue;
-    };
-
-    history.push(ProviderMessage::text(MessageRole::User, text.clone()));
-
+) -> TurnIds {
     let stored_thread = ensure_thread(ctx.store, thread_id, target).await;
     let turn_db_id = if let Some(tid) = stored_thread {
         let _ = ctx
@@ -499,8 +741,8 @@ async fn handle_turn(
                 thread_id: tid,
                 turn_id: None,
                 role: "user".to_owned(),
-                body: text,
-                created_at: now(),
+                body: text.to_owned(),
+                created_at: now_secs(),
             })
             .await;
         ctx.store
@@ -511,315 +753,47 @@ async fn handle_turn(
                 model: target.model.clone(),
                 account: target.account.clone(),
                 status: "running".to_owned(),
-                started_at: now(),
+                started_at: now_secs(),
             })
             .await
             .ok()
     } else {
         None
     };
-
-    if ctx.events.send(Event::TaskStarted { id }).await.is_err() {
-        return Flow::Shutdown;
+    TurnIds {
+        stored_thread,
+        turn_db_id,
     }
+}
 
-    let supports_tools = provider.capabilities().tools;
-    let tool_defs = if supports_tools {
-        ctx.tools
-            .specs()
-            .into_iter()
-            .map(|spec| ToolDefinition {
-                name: spec.name.to_owned(),
-                description: spec.description.to_owned(),
-                input_schema: spec.parameters,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let cwd = match stored_thread {
-        Some(tid) => ctx
+async fn persist_assistant_text(ctx: &Ctx<'_>, raw: &str, ids: &TurnIds) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+    let shown = ctx.redaction.redact(raw);
+    if let (Some(tid), Some(turn)) = (ids.stored_thread, ids.turn_db_id) {
+        let _ = ctx
             .store
-            .get_thread(tid)
-            .await
-            .ok()
-            .flatten()
-            .map(|thread| thread.cwd)
-            .filter(|cwd| !cwd.is_empty())
-            .map_or_else(
-                || std::env::current_dir().unwrap_or_default(),
-                std::path::PathBuf::from,
-            ),
-        None => std::env::current_dir().unwrap_or_default(),
-    };
+            .create_message(NewMessage {
+                thread_id: tid,
+                turn_id: Some(turn),
+                role: "assistant".to_owned(),
+                body: shown.clone(),
+                created_at: now_secs(),
+            })
+            .await;
+    }
+    Some(shown)
+}
 
-    let mut call_seq: u64 = 0;
-    let mut rounds = 0usize;
-
-    let outcome = loop {
-        rounds += 1;
-
-        let request = ModelRequest {
-            model: target.model.clone(),
-            messages: history.clone(),
-            tools: tool_defs.clone(),
-        };
-        let (mev_tx, mut mev_rx) = mpsc::channel(64);
-        let handle = provider.request(request, mev_tx);
-
-        let mut raw = String::new();
-        let mut pending_calls: Vec<(String, String, String)> = Vec::new();
-
-        let round_end = loop {
-            tokio::select! {
-                biased;
-                maybe_op = ops.recv() => match maybe_op {
-                    Some(Op::Interrupt { .. }) => {
-                        handle.abort();
-                        break RoundEnd::Interrupted;
-                    }
-                    Some(Op::Shutdown) | None => {
-                        handle.abort();
-                        return Flow::Shutdown;
-                    }
-                    Some(_) => {}
-                },
-                maybe_event = mev_rx.recv() => match maybe_event {
-                    Some(ModelEvent::TextDelta { text }) => {
-                        raw.push_str(&text);
-                        let shown = ctx.redaction.redact(&text);
-                        if ctx.events.send(Event::TextDelta { id, chunk: shown }).await.is_err() {
-                            handle.abort();
-                            return Flow::Shutdown;
-                        }
-                    }
-                    Some(ModelEvent::ToolCall { id: vendor_id, name, input }) => {
-                        pending_calls.push((vendor_id, name, input));
-                    }
-                    Some(ModelEvent::Completed) | None => break RoundEnd::Completed,
-                    Some(ModelEvent::Failed { message }) => break RoundEnd::Failed(message),
-                }
-            }
-        };
-
-        match round_end {
-            RoundEnd::Interrupted => break RoundEnd::Interrupted,
-            RoundEnd::Failed(message) => break RoundEnd::Failed(message),
-            RoundEnd::Completed => {}
-        }
-
-        if !raw.is_empty() || !pending_calls.is_empty() {
-            let mut content = Vec::new();
-            if !raw.is_empty() {
-                content.push(ContentBlock::Text {
-                    text: ctx.redaction.redact(&raw),
-                });
-            }
-            for (vendor_id, name, input_json) in &pending_calls {
-                let input_val = serde_json::from_str(input_json).unwrap_or(serde_json::Value::Null);
-                content.push(ContentBlock::ToolUse {
-                    id: vendor_id.clone(),
-                    name: name.clone(),
-                    input: input_val,
-                });
-            }
-            history.push(ProviderMessage {
-                role: MessageRole::Assistant,
-                content,
-            });
-        }
-
-        let shown_text = if raw.is_empty() {
-            None
-        } else {
-            let shown = ctx.redaction.redact(&raw);
-            if let (Some(tid), Some(turn)) = (stored_thread, turn_db_id) {
-                let _ = ctx
-                    .store
-                    .create_message(NewMessage {
-                        thread_id: tid,
-                        turn_id: Some(turn),
-                        role: "assistant".to_owned(),
-                        body: shown.clone(),
-                        created_at: now(),
-                    })
-                    .await;
-            }
-            Some(shown)
-        };
-
-        if pending_calls.is_empty() {
-            if let Some(shown) = shown_text {
-                let _ = ctx.events.send(Event::TextDone { id, text: shown }).await;
-            }
-            break RoundEnd::Completed;
-        }
-
-        if rounds >= MAX_TOOL_ROUNDS {
-            tracing::warn!(rounds, "tool round cap reached; ending turn");
-            let synthetic: Vec<ContentBlock> = pending_calls
-                .iter()
-                .map(|(vendor_id, _, _)| ContentBlock::ToolResult {
-                    tool_use_id: vendor_id.clone(),
-                    content: "tool round limit reached".to_owned(),
-                    is_error: true,
-                })
-                .collect();
-            history.push(ProviderMessage {
-                role: MessageRole::User,
-                content: synthetic,
-            });
-            if let Some(shown) = shown_text {
-                let _ = ctx.events.send(Event::TextDone { id, text: shown }).await;
-            }
-            break RoundEnd::Completed;
-        }
-
-        let tool_ctx = match ToolContext::new(&cwd) {
-            Ok(tool_ctx) => tool_ctx,
-            Err(err) => break RoundEnd::Failed(err.to_string()),
-        };
-
-        let mut tool_results: Vec<ContentBlock> = Vec::new();
-        let mut interrupted_at: Option<usize> = None;
-        for (index, (vendor_id, name, input_json)) in pending_calls.iter().enumerate() {
-            call_seq += 1;
-            let tui_id = call_seq;
-
-            let _ = ctx
-                .events
-                .send(Event::ToolStarted {
-                    id,
-                    call: goat_protocol::ToolCall {
-                        id: ToolCallId(tui_id),
-                        name: name.clone(),
-                        input: input_json.clone(),
-                    },
-                })
-                .await;
-
-            let db_id = if let (Some(tid), Some(turn)) = (stored_thread, turn_db_id) {
-                ctx.store
-                    .create_tool_call(goat_store::NewToolCall {
-                        thread_id: tid,
-                        turn_id: turn,
-                        call_id: vendor_id.clone(),
-                        name: name.clone(),
-                        input: input_json.clone(),
-                        status: "running".to_owned(),
-                        started_at: now_ms(),
-                    })
-                    .await
-                    .ok()
-            } else {
-                None
-            };
-
-            let run_fut = async {
-                match ctx.tools.get(name) {
-                    Some(tool) => tool.run(input_json, &tool_ctx).await,
-                    None => Err(goat_tool::ToolError::UnknownTool { name: name.clone() }),
-                }
-            };
-            let mut run_fut = std::pin::pin!(run_fut);
-            let result = loop {
-                tokio::select! {
-                    biased;
-                    maybe_op = ops.recv() => match maybe_op {
-                        Some(Op::Interrupt { id: task_id }) if task_id == id => {
-                            interrupted_at = Some(index);
-                            break Ok(String::new());
-                        }
-                        Some(Op::Shutdown) | None => return Flow::Shutdown,
-                        Some(_) => {}
-                    },
-                    r = &mut run_fut => break r,
-                }
-            };
-
-            if interrupted_at == Some(index) {
-                if let Some(db) = db_id {
-                    let _ = ctx
-                        .store
-                        .finish_tool_call(
-                            db,
-                            "interrupted".to_owned(),
-                            Some("interrupted".to_owned()),
-                            now_ms(),
-                        )
-                        .await;
-                }
-                let _ = ctx
-                    .events
-                    .send(Event::ToolDone {
-                        id,
-                        call: ToolCallId(tui_id),
-                        outcome: goat_protocol::ToolOutcome {
-                            ok: false,
-                            summary: Some("interrupted".to_owned()),
-                        },
-                    })
-                    .await;
-                tool_results.push(ContentBlock::ToolResult {
-                    tool_use_id: vendor_id.clone(),
-                    content: "interrupted".to_owned(),
-                    is_error: true,
-                });
-                break;
-            }
-
-            let (outcome, result_text) = outcome_from(&result);
-
-            if let Some(db) = db_id {
-                let status = if outcome.ok { "done" } else { "error" }.to_owned();
-                let _ = ctx
-                    .store
-                    .finish_tool_call(db, status, outcome.summary.clone(), now_ms())
-                    .await;
-            }
-
-            let is_error = !outcome.ok;
-            let _ = ctx
-                .events
-                .send(Event::ToolDone {
-                    id,
-                    call: ToolCallId(tui_id),
-                    outcome,
-                })
-                .await;
-
-            tool_results.push(ContentBlock::ToolResult {
-                tool_use_id: vendor_id.clone(),
-                content: ctx.redaction.redact(&result_text),
-                is_error,
-            });
-        }
-
-        if let Some(index) = interrupted_at {
-            for (vendor_id, _, _) in pending_calls.iter().skip(index + 1) {
-                tool_results.push(ContentBlock::ToolResult {
-                    tool_use_id: vendor_id.clone(),
-                    content: "interrupted".to_owned(),
-                    is_error: true,
-                });
-            }
-        }
-
-        history.push(ProviderMessage {
-            role: MessageRole::User,
-            content: tool_results,
-        });
-
-        if interrupted_at.is_some() {
-            break RoundEnd::Interrupted;
-        }
-    };
-
+async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &RoundEnd, ids: &TurnIds) {
     match outcome {
         RoundEnd::Completed => {
-            if let Some(turn) = turn_db_id {
-                let _ = ctx.store.finish_turn(turn, "done".to_owned(), now()).await;
+            if let Some(turn) = ids.turn_db_id {
+                let _ = ctx
+                    .store
+                    .finish_turn(turn, "done".to_owned(), now_secs())
+                    .await;
             }
             let _ = ctx
                 .events
@@ -830,10 +804,10 @@ async fn handle_turn(
                 .await;
         }
         RoundEnd::Interrupted => {
-            if let Some(turn) = turn_db_id {
+            if let Some(turn) = ids.turn_db_id {
                 let _ = ctx
                     .store
-                    .finish_turn(turn, "interrupted".to_owned(), now())
+                    .finish_turn(turn, "interrupted".to_owned(), now_secs())
                     .await;
             }
             let _ = ctx
@@ -849,12 +823,14 @@ async fn handle_turn(
                 .events
                 .send(Event::Error {
                     id: Some(id),
-                    severity: Severity::Recoverable,
-                    message: ctx.redaction.redact(&message),
+                    message: ctx.redaction.redact(message),
                 })
                 .await;
-            if let Some(turn) = turn_db_id {
-                let _ = ctx.store.finish_turn(turn, "error".to_owned(), now()).await;
+            if let Some(turn) = ids.turn_db_id {
+                let _ = ctx
+                    .store
+                    .finish_turn(turn, "error".to_owned(), now_secs())
+                    .await;
             }
             let _ = ctx
                 .events
@@ -865,6 +841,214 @@ async fn handle_turn(
                 .await;
         }
     }
+}
+
+async fn process_round_output(
+    ctx: &Ctx<'_>,
+    id: TaskId,
+    round: RoundResult,
+    history: &mut Vec<ProviderMessage>,
+    state: &mut RoundState<'_>,
+    ops: &mut mpsc::Receiver<Op>,
+) -> RoundOutcome {
+    let raw = round.raw;
+    let pending_calls = round.pending_calls;
+    if !raw.is_empty() || !pending_calls.is_empty() {
+        let mut content = Vec::new();
+        if !raw.is_empty() {
+            content.push(ContentBlock::Text {
+                text: ctx.redaction.redact(&raw),
+            });
+        }
+        for (vendor_id, name, input_json) in &pending_calls {
+            let input_val = serde_json::from_str(input_json).unwrap_or(serde_json::Value::Null);
+            content.push(ContentBlock::ToolUse {
+                id: vendor_id.clone(),
+                name: name.clone(),
+                input: input_val,
+            });
+        }
+        history.push(ProviderMessage {
+            role: MessageRole::Assistant,
+            content,
+        });
+    }
+    let shown_text = persist_assistant_text(ctx, &raw, state.ids).await;
+    if pending_calls.is_empty() {
+        if let Some(shown) = shown_text {
+            let _ = ctx.events.send(Event::TextDone { id, text: shown }).await;
+        }
+        return RoundOutcome::Done(RoundEnd::Completed);
+    }
+    if state.rounds >= MAX_TOOL_ROUNDS {
+        tracing::warn!(state.rounds, "tool round cap reached; ending turn");
+        let synthetic: Vec<ContentBlock> = pending_calls
+            .iter()
+            .map(|(vendor_id, _, _)| ContentBlock::ToolResult {
+                tool_use_id: vendor_id.clone(),
+                content: "tool round limit reached".to_owned(),
+                is_error: true,
+            })
+            .collect();
+        history.push(ProviderMessage {
+            role: MessageRole::User,
+            content: synthetic,
+        });
+        if let Some(shown) = shown_text {
+            let _ = ctx.events.send(Event::TextDone { id, text: shown }).await;
+        }
+        return RoundOutcome::Done(RoundEnd::Completed);
+    }
+    let tool_ctx = match ToolContext::new(state.cwd) {
+        Ok(tool_ctx) => tool_ctx,
+        Err(err) => return RoundOutcome::Done(RoundEnd::Failed(err.to_string())),
+    };
+    let batch = run_tool_batch(
+        ctx,
+        id,
+        &pending_calls,
+        state.ids,
+        &tool_ctx,
+        state.call_seq,
+        ops,
+    )
+    .await;
+    if batch.flow_shutdown {
+        return RoundOutcome::Shutdown;
+    }
+    history.push(ProviderMessage {
+        role: MessageRole::User,
+        content: batch.tool_results,
+    });
+    if batch.interrupted_at.is_some() {
+        RoundOutcome::Done(RoundEnd::Interrupted)
+    } else {
+        RoundOutcome::Continue
+    }
+}
+
+fn build_tool_defs(
+    ctx: &Ctx<'_>,
+    provider: &dyn goat_provider::ModelProvider,
+) -> Vec<ToolDefinition> {
+    if !provider.capabilities().tools {
+        return Vec::new();
+    }
+    ctx.tools
+        .specs()
+        .into_iter()
+        .map(|spec| ToolDefinition {
+            name: spec.name.to_owned(),
+            description: spec.description.to_owned(),
+            input_schema: spec.parameters,
+        })
+        .collect()
+}
+
+async fn resolve_thread_cwd(ctx: &Ctx<'_>, stored_thread: Option<i64>) -> std::path::PathBuf {
+    match stored_thread {
+        Some(tid) => ctx
+            .store
+            .get_thread(tid)
+            .await
+            .ok()
+            .flatten()
+            .map(|thread| thread.cwd)
+            .filter(|cwd| !cwd.is_empty())
+            .map_or_else(
+                || std::env::current_dir().unwrap_or_default(),
+                std::path::PathBuf::from,
+            ),
+        None => std::env::current_dir().unwrap_or_default(),
+    }
+}
+
+async fn emit_task_error(ctx: &Ctx<'_>, id: TaskId, message: String) {
+    let _ = ctx
+        .events
+        .send(Event::Error {
+            id: Some(id),
+            message,
+        })
+        .await;
+    let _ = ctx
+        .events
+        .send(Event::TaskDone {
+            id,
+            interrupted: true,
+        })
+        .await;
+}
+
+async fn handle_turn(
+    ctx: &Ctx<'_>,
+    id: TaskId,
+    text: String,
+    target: Option<&ModelTarget>,
+    history: &mut Vec<ProviderMessage>,
+    thread_id: &mut Option<i64>,
+    ops: &mut mpsc::Receiver<Op>,
+) -> Flow {
+    let Some(target) = target else {
+        emit_task_error(ctx, id, "no model selected".to_owned()).await;
+        return Flow::Continue;
+    };
+    let Some(provider) = ctx
+        .registry
+        .get(&ProviderId::from(target.provider.as_str()))
+    else {
+        emit_task_error(ctx, id, format!("unknown provider: {}", target.provider)).await;
+        return Flow::Continue;
+    };
+
+    history.push(ProviderMessage::text(MessageRole::User, text.clone()));
+    let ids = init_db_turn(ctx, id, &text, target, thread_id).await;
+    if ctx.events.send(Event::TaskStarted { id }).await.is_err() {
+        return Flow::Shutdown;
+    }
+
+    let tool_defs = build_tool_defs(ctx, provider.as_ref());
+    let cwd = resolve_thread_cwd(ctx, ids.stored_thread).await;
+    let mut call_seq: u64 = 0;
+    let mut rounds = 0usize;
+    let outcome = loop {
+        rounds += 1;
+        let request = ModelRequest {
+            model: target.model.clone(),
+            messages: history.clone(),
+            tools: tool_defs.clone(),
+        };
+        let round = run_round(
+            id,
+            provider.as_ref(),
+            request,
+            ops,
+            ctx.events,
+            ctx.redaction,
+        )
+        .await;
+        if matches!(round.end, RoundEnd::Failed(ref m) if m == "__shutdown__") {
+            return Flow::Shutdown;
+        }
+        match round.end {
+            RoundEnd::Interrupted => break RoundEnd::Interrupted,
+            RoundEnd::Failed(message) => break RoundEnd::Failed(message),
+            RoundEnd::Completed => {}
+        }
+        let mut state = RoundState {
+            ids: &ids,
+            rounds,
+            cwd: &cwd,
+            call_seq: &mut call_seq,
+        };
+        match process_round_output(ctx, id, round, history, &mut state, ops).await {
+            RoundOutcome::Done(end) => break end,
+            RoundOutcome::Shutdown => return Flow::Shutdown,
+            RoundOutcome::Continue => {}
+        }
+    };
+
+    finalize_turn(ctx, id, &outcome, &ids).await;
     Flow::Continue
 }
 
