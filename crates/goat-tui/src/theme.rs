@@ -86,6 +86,10 @@ impl Theme {
         Style::new().fg(self.muted)
     }
 
+    pub fn key(self) -> Style {
+        Style::new().fg(self.fg).add_modifier(Modifier::BOLD)
+    }
+
     pub fn accent(self) -> Style {
         Style::new().fg(self.accent).add_modifier(Modifier::BOLD)
     }

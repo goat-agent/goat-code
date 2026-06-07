@@ -11,6 +11,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
+    command::CommandMenu,
     composer::Composer,
     highlight::SyntectHighlighter,
     keymap,
@@ -51,6 +52,8 @@ pub struct App {
     picker: Option<Picker>,
     login: Option<Login>,
     login_providers: Vec<LoginProvider>,
+    command_menu: Option<CommandMenu>,
+    task_start: Option<std::time::Instant>,
 }
 
 impl App {
@@ -78,6 +81,8 @@ impl App {
             picker: None,
             login: None,
             login_providers: Vec::new(),
+            command_menu: None,
+            task_start: None,
         }
     }
 
@@ -388,7 +393,9 @@ impl App {
 
     fn on_engine(&mut self, event: EngineEvent) {
         match event {
-            EngineEvent::TaskStarted { .. } => {}
+            EngineEvent::TaskStarted { .. } => {
+                self.task_start = Some(std::time::Instant::now());
+            }
             EngineEvent::ModelListChanged { entries } => {
                 if let Some(picker) = &mut self.picker {
                     picker.set_entries(entries.clone());
@@ -424,10 +431,12 @@ impl App {
                 self.transcript
                     .complete(interrupted, &self.highlighter, self.theme);
                 self.active = None;
+                self.task_start = None;
             }
             EngineEvent::Error { message, .. } => {
                 self.transcript.push_error(message);
                 self.active = None;
+                self.task_start = None;
             }
         }
         if self.follow {
@@ -457,8 +466,12 @@ impl App {
     pub(crate) fn composer(&self) -> &Composer {
         &self.composer
     }
-    pub(crate) fn composer_height(&self) -> u16 {
-        self.composer.desired_height()
+    pub(crate) fn composer_height(&self, available_width: u16) -> u16 {
+        self.composer.desired_height(available_width)
+    }
+
+    pub(crate) fn elapsed_secs(&self) -> Option<u64> {
+        self.task_start.map(|t| t.elapsed().as_secs())
     }
     pub(crate) fn is_busy(&self) -> bool {
         self.active.is_some()
@@ -472,6 +485,10 @@ impl App {
     pub(crate) fn spinner_frame(&self) -> &'static str {
         SPINNER[self.spinner % SPINNER.len()]
     }
+
+    pub(crate) fn content_height(&self, width: u16) -> u16 {
+        self.transcript.content_height(width, self.theme)
+    }
     pub(crate) fn scroll(&self) -> u16 {
         self.scroll
     }
@@ -480,6 +497,9 @@ impl App {
     }
     pub(crate) fn login(&self) -> Option<&Login> {
         self.login.as_ref()
+    }
+    pub(crate) fn command_menu(&self) -> Option<&CommandMenu> {
+        self.command_menu.as_ref()
     }
     pub(crate) fn current_model(&self) -> Option<&ModelTarget> {
         self.model.as_ref()
