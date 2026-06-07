@@ -270,6 +270,10 @@ impl Composer {
         }
     }
 
+    pub fn peek_text(&self) -> String {
+        self.text()
+    }
+
     fn text(&self) -> String {
         self.lines
             .iter()
