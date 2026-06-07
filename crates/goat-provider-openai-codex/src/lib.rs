@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use base64::Engine;
 use goat_auth::{
@@ -7,7 +7,7 @@ use goat_auth::{
 };
 use goat_provider::{
     AuthMethod, ModelEvent, ModelInfo, ModelProvider, ModelRequest, ProviderCapabilities,
-    ProviderId,
+    ProviderId, now_secs,
 };
 use serde::Deserialize;
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -44,14 +44,6 @@ pub enum CodexError {
     Token(String),
     #[error("no browser available")]
     NoBrowser,
-}
-
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-        .unwrap_or(0)
 }
 
 fn authorize_url(challenge: &str, state: &str) -> Result<String, CodexError> {
@@ -108,7 +100,7 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OAuthTokenSet, Code
         return Err(CodexError::Token(err.to_string()));
     }
     let tokens: TokenResponse = response.json().await?;
-    let expires_at = tokens.expires_in.map(|seconds| now() + seconds);
+    let expires_at = tokens.expires_in.map(|seconds| now_secs() + seconds);
     Ok(OAuthTokenSet {
         access_token: SecretString::from(tokens.access_token),
         refresh_token: tokens.refresh_token.map(SecretString::from),
@@ -178,9 +170,9 @@ async fn login_device(status: &mpsc::Sender<String>) -> Result<OAuthTokenSet, Co
         .await;
 
     let interval = device.interval.unwrap_or(5).max(1);
-    let deadline = now() + 900;
+    let deadline = now_secs() + 900;
     loop {
-        if now() > deadline {
+        if now_secs() > deadline {
             return Err(CodexError::Token("device login timed out".to_owned()));
         }
         tokio::time::sleep(Duration::from_secs(interval)).await;
@@ -218,7 +210,7 @@ pub async fn refresh_tokens(refresh_token: &str) -> Result<OAuthTokenSet, CodexE
         return Err(CodexError::Token(err.to_string()));
     }
     let tokens: TokenResponse = response.json().await?;
-    let expires_at = tokens.expires_in.map(|seconds| now() + seconds);
+    let expires_at = tokens.expires_in.map(|seconds| now_secs() + seconds);
     Ok(OAuthTokenSet {
         access_token: SecretString::from(tokens.access_token),
         refresh_token: tokens
@@ -230,7 +222,7 @@ pub async fn refresh_tokens(refresh_token: &str) -> Result<OAuthTokenSet, CodexE
 }
 
 fn is_expired(tokens: &OAuthTokenSet) -> bool {
-    tokens.expires_at.is_some_and(|exp| exp <= now() + 60)
+    tokens.expires_at.is_some_and(|exp| exp <= now_secs() + 60)
 }
 
 async fn current_access(
