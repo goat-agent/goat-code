@@ -1,4 +1,7 @@
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, path::resolve_in_cwd};
+use goat_tool::{
+    Tool, ToolContext, ToolError, ToolFuture,
+    path::{relative_display, resolve_in_cwd},
+};
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
 use serde::Deserialize;
 
@@ -64,12 +67,7 @@ fn walk(cwd: &std::path::Path, root: &std::path::Path, pattern: &str) -> Result<
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
-        let display = entry
-            .path()
-            .strip_prefix(cwd)
-            .unwrap_or(entry.path())
-            .display()
-            .to_string();
+        let display = relative_display(cwd, entry.path());
         matches.push(display);
     }
 

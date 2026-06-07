@@ -1,6 +1,9 @@
 use std::fmt::Write as _;
 
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, path::resolve_in_cwd};
+use goat_tool::{
+    Tool, ToolContext, ToolError, ToolFuture,
+    path::{relative_display, resolve_in_cwd},
+};
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
 use regex::Regex;
 use serde::Deserialize;
@@ -50,6 +53,7 @@ impl Tool for GrepTool {
             };
             let cwd = ctx.cwd.clone();
             let max_results = args.max_results.unwrap_or(DEFAULT_MAX_RESULTS);
+            let max_output_bytes = ctx.max_output_bytes;
 
             let join = tokio::task::spawn_blocking(move || {
                 search(
@@ -58,6 +62,7 @@ impl Tool for GrepTool {
                     &args.pattern,
                     args.glob.as_deref(),
                     max_results,
+                    max_output_bytes,
                 )
             })
             .await;
@@ -76,6 +81,7 @@ fn search(
     pattern: &str,
     glob: Option<&str>,
     max_results: usize,
+    max_output_bytes: usize,
 ) -> Result<String, ToolError> {
     let regex = Regex::new(pattern)?;
     let mut builder = WalkBuilder::new(root);
@@ -102,15 +108,10 @@ fn search(
         let Ok(text) = std::str::from_utf8(&contents) else {
             continue;
         };
-        let display = entry
-            .path()
-            .strip_prefix(cwd)
-            .unwrap_or(entry.path())
-            .display()
-            .to_string();
+        let display = relative_display(cwd, entry.path());
         for (lineno, line) in text.lines().enumerate() {
             if regex.is_match(line) {
-                if count >= max_results {
+                if count >= max_results || out.len() >= max_output_bytes {
                     capped = true;
                     break 'walk;
                 }
@@ -124,7 +125,7 @@ fn search(
         return Ok("no matches".to_owned());
     }
     if capped {
-        let _ = write!(out, "\n(truncated at {max_results} results)");
+        out.push_str("\n[output truncated]");
     }
     Ok(out)
 }

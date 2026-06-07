@@ -2,6 +2,14 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::ToolError;
 
+pub fn relative_display(cwd: &Path, resolved: &Path) -> String {
+    resolved
+        .strip_prefix(cwd)
+        .unwrap_or(resolved)
+        .display()
+        .to_string()
+}
+
 pub fn resolve_in_cwd(cwd: &Path, raw: &str) -> Result<PathBuf, ToolError> {
     let candidate = Path::new(raw);
     let joined = if candidate.is_absolute() {
