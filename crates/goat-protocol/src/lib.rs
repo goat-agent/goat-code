@@ -231,6 +231,16 @@ pub enum Event {
         id: TaskId,
         interrupted: bool,
     },
+    AgentStarted {
+        id: TaskId,
+        parent: TaskId,
+        agent_type: String,
+        label: String,
+    },
+    AgentDone {
+        id: TaskId,
+        ok: bool,
+    },
     ModelListChanged {
         entries: Vec<ModelEntry>,
     },

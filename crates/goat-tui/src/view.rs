@@ -7,6 +7,7 @@ use ratatui::{
 
 use crate::{app::App, command::CommandMenu, theme::Theme};
 
+#[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
     let full = frame.area();
@@ -82,6 +83,28 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    if let Some(cursor) = app.agent_selector() {
+        let count = u16::try_from(app.agent_runs().len())
+            .unwrap_or(1)
+            .clamp(1, 8);
+        let [header, body, composer, panel] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(composer_h),
+            Constraint::Length(count),
+        ])
+        .areas(area);
+        render_header(frame, header, app, theme);
+        app.clamp_scroll(body.height, body.width);
+        app.transcript()
+            .render(frame, body, theme, app.scroll(), app.spinner_frame());
+        render_scrollbar(frame, body, app, theme);
+        render_agent_panel(frame, panel, app, theme, cursor);
+        app.composer().render(frame, composer, theme, false);
+        render_toasts(frame, area, app, theme);
+        return;
+    }
+
     let [header, body, composer, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
@@ -98,6 +121,36 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     app.composer().render(frame, composer, theme, true);
     render_footer(frame, footer, app, theme);
     render_toasts(frame, area, app, theme);
+}
+
+fn render_agent_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, cursor: usize) {
+    let spinner = app.spinner_frame();
+    let lines: Vec<Line> = app
+        .agent_runs()
+        .iter()
+        .enumerate()
+        .map(|(i, run)| {
+            let selected = i == cursor;
+            let (marker, marker_style) = match run.done {
+                None => (spinner, theme.accent()),
+                Some(true) => ("\u{2713}", theme.role_tool()),
+                Some(false) => ("\u{2717}", theme.error()),
+            };
+            let name_style = if selected { theme.key() } else { theme.muted() };
+            let mut spans = vec![
+                Span::styled(if selected { " \u{203a} " } else { "   " }, theme.accent()),
+                Span::styled(marker, marker_style),
+                Span::raw(" "),
+                Span::styled(run.agent_type.clone(), name_style),
+            ];
+            if !run.label.is_empty() {
+                spans.push(Span::styled("  ", theme.muted()));
+                spans.push(Span::styled(run.label.clone(), theme.muted()));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_toasts(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
@@ -141,12 +194,17 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let line = if app.is_busy() {
-        let mut spans = vec![
-            Span::styled(format!(" {} ", app.spinner_frame()), theme.accent()),
-            Span::styled("Working\u{2026}", theme.muted()),
-        ];
-        if let Some(secs) = app.elapsed_secs() {
-            spans.push(Span::styled(format!(" {secs}s"), theme.muted()));
+        let mut spans = vec![Span::styled(
+            format!(" {} ", app.spinner_frame()),
+            theme.accent(),
+        )];
+        if let Some(status) = app.agent_status() {
+            spans.push(Span::styled(status, theme.muted()));
+        } else {
+            spans.push(Span::styled("Working\u{2026}", theme.muted()));
+            if let Some(secs) = app.elapsed_secs() {
+                spans.push(Span::styled(format!(" {secs}s"), theme.muted()));
+            }
         }
         spans.push(Span::styled(" \u{00b7} ", theme.muted()));
         spans.push(Span::styled("\u{2303}c", theme.key()));
@@ -158,16 +216,22 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             Span::styled(" again to quit", theme.muted()),
         ])
     } else {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(" \u{21e7}\u{21b5}", theme.key()),
             Span::styled(" newline", theme.muted()),
             Span::styled(" \u{00b7} ", theme.muted()),
             Span::styled("\u{2191}\u{2193}", theme.key()),
             Span::styled(" history", theme.muted()),
-            Span::styled(" \u{00b7} ", theme.muted()),
-            Span::styled("\u{2303}c", theme.key()),
-            Span::styled(" quit", theme.muted()),
-        ])
+        ];
+        if !app.agent_runs().is_empty() {
+            spans.push(Span::styled(" \u{00b7} ", theme.muted()));
+            spans.push(Span::styled("\u{2193}", theme.key()));
+            spans.push(Span::styled(" agents", theme.muted()));
+        }
+        spans.push(Span::styled(" \u{00b7} ", theme.muted()));
+        spans.push(Span::styled("\u{2303}c", theme.key()));
+        spans.push(Span::styled(" quit", theme.muted()));
+        Line::from(spans)
     };
     frame.render_widget(Paragraph::new(line), area);
 }
