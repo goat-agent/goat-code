@@ -3,7 +3,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Clear, Paragraph},
 };
 
 use crate::theme::Theme;
@@ -120,10 +120,11 @@ impl Login {
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
         frame.render_widget(Clear, area);
-        let block = Block::new()
-            .borders(Borders::ALL)
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
             .border_style(theme.border())
-            .style(theme.base());
+            .style(theme.base())
+            .title_top(Line::from(Span::styled(" login ", theme.accent())).left_aligned());
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.width == 0 || inner.height == 0 {
@@ -137,7 +138,7 @@ impl Login {
         match self.stage {
             Stage::Select => {
                 lines.push(Line::from(Span::styled(
-                    " login — choose a provider",
+                    " choose a provider",
                     theme.accent(),
                 )));
                 for (index, provider) in self.providers.iter().take(rows).enumerate() {

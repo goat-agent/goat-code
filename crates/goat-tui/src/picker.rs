@@ -3,7 +3,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Clear, Paragraph},
 };
 
 use crate::theme::Theme;
@@ -134,10 +134,11 @@ impl Picker {
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
         frame.render_widget(Clear, area);
-        let block = Block::new()
-            .borders(Borders::ALL)
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
             .border_style(theme.border())
-            .style(theme.base());
+            .style(theme.base())
+            .title_top(Line::from(Span::styled(" model ", theme.accent())).left_aligned());
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.width == 0 || inner.height == 0 {
@@ -164,12 +165,11 @@ impl Picker {
             return;
         }
 
-        let label = " select model   ";
         let filter = "filter: ";
-        lines.push(Line::from(vec![
-            Span::styled(label, theme.accent()),
-            Span::styled(format!("{filter}{}", self.query), theme.muted()),
-        ]));
+        lines.push(Line::from(Span::styled(
+            format!("{filter}{}", self.query),
+            theme.muted(),
+        )));
         if self.matches.is_empty() {
             lines.push(Line::from(Span::styled("  no ready models", theme.muted())));
         } else {
@@ -198,7 +198,7 @@ impl Picker {
         }
         frame.render_widget(Paragraph::new(lines), inner);
 
-        let col = label.chars().count() + filter.chars().count() + self.query.chars().count();
+        let col = filter.chars().count() + self.query.chars().count();
         let x = inner.x + u16::try_from(col).unwrap_or(u16::MAX);
         frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
     }
