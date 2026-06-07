@@ -48,6 +48,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
 }
 
+pub const HOME_NOT_FOUND: &str = "could not resolve ~/.goat-code";
+
 pub fn app_home() -> Option<PathBuf> {
     std::env::home_dir().map(|home| home.join(".goat-code"))
 }

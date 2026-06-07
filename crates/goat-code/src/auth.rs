@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::cli::AuthCommand;
 
 pub async fn run(command: AuthCommand) -> color_eyre::Result<()> {
-    let path = goat_config::auth_path().ok_or_else(|| eyre!("could not resolve ~/.goat-code"))?;
+    let path = goat_config::auth_path().ok_or_else(|| eyre!(goat_config::HOME_NOT_FOUND))?;
     let store = CredentialStore::new(path);
     match command {
         AuthCommand::Login {

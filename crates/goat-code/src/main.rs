@@ -39,9 +39,9 @@ async fn run_tui() -> color_eyre::Result<()> {
     };
 
     let auth_path = goat_config::auth_path()
-        .ok_or_else(|| color_eyre::eyre::eyre!("could not resolve ~/.goat-code"))?;
+        .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
     let db_path = goat_config::db_path()
-        .ok_or_else(|| color_eyre::eyre::eyre!("could not resolve ~/.goat-code"))?;
+        .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
     let credentials = goat_auth::CredentialStore::new(auth_path);
     let store = goat_store::Store::open(&db_path)?;
     let registry = goat_providers::Registry::builtin(&credentials);
