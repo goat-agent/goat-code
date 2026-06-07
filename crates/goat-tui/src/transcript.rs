@@ -44,6 +44,12 @@ impl Transcript {
         self.cached_height.set(None);
     }
 
+    pub fn clear(&mut self) {
+        self.invalidate_height_cache();
+        self.items.clear();
+        self.streaming = None;
+    }
+
     pub fn push_user(&mut self, text: impl Into<String>) {
         self.invalidate_height_cache();
         self.items.push(Item::User(text.into()));

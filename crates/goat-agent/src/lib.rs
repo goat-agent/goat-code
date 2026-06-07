@@ -223,6 +223,10 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 }
             }
             Op::Interrupt { .. } | Op::SetTheme { .. } => {}
+            Op::Clear => {
+                history.clear();
+                thread_id = None;
+            }
             Op::SelectModel { .. } => {
                 handle_idle_op(op, &store, thread_id, &mut target, &events).await;
             }
@@ -1418,5 +1422,48 @@ mod tests {
             }
         }
         assert!(saw_error);
+    }
+
+    async fn drain_until_task_done(events: &mut mpsc::Receiver<Event>) {
+        while let Some(event) = events.recv().await {
+            if matches!(event, Event::TaskDone { .. }) {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_starts_new_thread() {
+        let provider = MockProvider {
+            id: "mock".to_owned(),
+            reply: "ok".to_owned(),
+            delay_ms: 0,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-clear.json"));
+        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "first".to_owned(),
+        })
+        .await
+        .unwrap();
+        drain_until_task_done(&mut events).await;
+
+        ops.send(Op::Clear).await.unwrap();
+
+        ops.send(Op::SubmitMessage {
+            id: TaskId(2),
+            text: "second".to_owned(),
+        })
+        .await
+        .unwrap();
+        drain_until_task_done(&mut events).await;
+
+        assert!(store.get_thread(2).await.unwrap().is_some());
     }
 }
