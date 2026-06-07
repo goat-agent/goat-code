@@ -4,3 +4,6 @@
 **/*.snap.new
 .env
 .DS_Store
+
+.claude/
+.claire/
