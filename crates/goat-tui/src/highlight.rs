@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{str::FromStr, sync::Mutex};
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -31,13 +31,28 @@ impl Highlighter for PlainHighlighter {
 
 pub struct SyntectHighlighter {
     syntax_set: SyntaxSet,
+    cached_syntect_theme: Mutex<Option<(bool, SyntectTheme)>>,
 }
 
 impl SyntectHighlighter {
     pub fn new() -> Self {
         Self {
             syntax_set: SyntaxSet::load_defaults_newlines(),
+            cached_syntect_theme: Mutex::new(None),
         }
+    }
+
+    fn get_or_build_syntect_theme(&self, theme: Theme) -> SyntectTheme {
+        let is_dark = theme.is_dark();
+        let mut guard = self.cached_syntect_theme.lock().unwrap();
+        if let Some((cached_dark, ref built)) = *guard
+            && cached_dark == is_dark
+        {
+            return built.clone();
+        }
+        let built = palette_to_syntect_theme(&theme.code, theme.fg_color(), theme.code.bg);
+        *guard = Some((is_dark, built.clone()));
+        built
     }
 }
 
@@ -107,7 +122,7 @@ impl Highlighter for SyntectHighlighter {
             .or_else(|| self.syntax_set.find_syntax_by_extension(lang))
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
 
-        let syntect_theme = palette_to_syntect_theme(&theme.code, theme.fg_color(), theme.code.bg);
+        let syntect_theme = self.get_or_build_syntect_theme(theme);
         let mut hl = HighlightLines::new(syntax, &syntect_theme);
         let code_bg = theme.code.bg;
         let mut result = Vec::new();

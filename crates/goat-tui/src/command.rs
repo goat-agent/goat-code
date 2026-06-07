@@ -4,7 +4,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Paragraph},
+    widgets::Paragraph,
 };
 
 use crate::theme::Theme;
@@ -20,8 +20,8 @@ pub static COMMANDS: &[SlashCommand] = &[
         desc: "switch model",
     },
     SlashCommand {
-        name: "/login",
-        desc: "authenticate provider",
+        name: "/config",
+        desc: "configure providers and settings",
     },
     SlashCommand {
         name: "/help",
@@ -29,9 +29,30 @@ pub static COMMANDS: &[SlashCommand] = &[
     },
 ];
 
+fn subsequence_match(query: &str, target: &str) -> Option<Vec<usize>> {
+    if query.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut positions = Vec::new();
+    let mut target_chars = target.char_indices();
+    for qc in query.chars() {
+        loop {
+            match target_chars.next() {
+                Some((i, tc)) if tc.eq_ignore_ascii_case(&qc) => {
+                    positions.push(i);
+                    break;
+                }
+                Some(_) => {}
+                None => return None,
+            }
+        }
+    }
+    Some(positions)
+}
+
 pub struct CommandMenu {
     cursor: usize,
-    matches: Vec<usize>,
+    matches: Vec<(usize, Vec<usize>)>,
 }
 
 impl CommandMenu {
@@ -40,13 +61,15 @@ impl CommandMenu {
         Self { cursor: 0, matches }
     }
 
-    fn compute_matches(prefix: &str) -> Vec<usize> {
-        let lower = prefix.to_lowercase();
+    fn compute_matches(prefix: &str) -> Vec<(usize, Vec<usize>)> {
+        let query = prefix.strip_prefix('/').unwrap_or(prefix).to_lowercase();
         COMMANDS
             .iter()
             .enumerate()
-            .filter(|(_, cmd)| cmd.name.contains(lower.as_str()))
-            .map(|(i, _)| i)
+            .filter_map(|(i, cmd)| {
+                let name = cmd.name.strip_prefix('/').unwrap_or(cmd.name);
+                subsequence_match(&query, name).map(|positions| (i, positions))
+            })
             .collect()
     }
 
@@ -68,50 +91,48 @@ impl CommandMenu {
     }
 
     pub fn selected_name(&self) -> Option<&'static str> {
-        self.matches.get(self.cursor).map(|&i| COMMANDS[i].name)
+        self.matches
+            .get(self.cursor)
+            .map(|&(i, _)| COMMANDS[i].name)
     }
 
     pub fn desired_height(&self) -> u16 {
         let rows = self.matches.len().max(1);
-        u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2)
+        u16::try_from(rows).unwrap_or(u16::MAX)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        frame.render_widget(Clear, area);
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(theme.border())
-            .style(theme.base());
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.width == 0 || inner.height == 0 {
-            return;
-        }
         let lines: Vec<Line> = self
             .matches
             .iter()
             .enumerate()
-            .map(|(pos, &idx)| {
+            .map(|(pos, &(idx, ref positions))| {
                 let cmd = &COMMANDS[idx];
-                let style = if pos == self.cursor {
-                    theme.selected()
-                } else {
-                    theme.base()
-                };
-                Line::from(vec![
-                    Span::styled(format!("  {} ", cmd.name), style),
-                    Span::styled(
-                        cmd.desc,
-                        if pos == self.cursor {
-                            style
-                        } else {
-                            theme.muted()
-                        },
-                    ),
-                ])
+                let selected = pos == self.cursor;
+                let name_no_slash = cmd.name.strip_prefix('/').unwrap_or(cmd.name);
+                let name_style = if selected { theme.key() } else { theme.muted() };
+                let mut spans: Vec<Span> = vec![Span::styled("  /", name_style)];
+                for (byte_i, ch) in name_no_slash.char_indices() {
+                    let style = if positions.contains(&byte_i) {
+                        theme.accent()
+                    } else {
+                        name_style
+                    };
+                    spans.push(Span::styled(ch.to_string(), style));
+                }
+                spans.push(Span::styled("   ", theme.base()));
+                spans.push(Span::styled(
+                    cmd.desc,
+                    if selected {
+                        theme.base()
+                    } else {
+                        theme.muted()
+                    },
+                ));
+                Line::from(spans)
             })
             .collect();
-        frame.render_widget(Paragraph::new(lines), inner);
+        frame.render_widget(Paragraph::new(lines), area);
     }
 }
 

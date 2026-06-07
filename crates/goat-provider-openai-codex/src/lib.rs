@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use goat_auth::{
-    CredentialKey, CredentialStore, OAuthTokenSet, Pkce, ResolvedCredential, SecretString,
-    capture_loopback_code, random_state,
+    BASE64URL, CredentialKey, CredentialStore, OAuthTokenSet, Pkce, ResolvedCredential,
+    SecretString, capture_loopback_code, random_state,
 };
 use goat_provider::{
     AuthMethod, ModelEvent, ModelInfo, ModelProvider, ModelRequest, ProviderCapabilities,
@@ -28,9 +28,6 @@ const DEVICE_USERCODE: &str = "https://auth.openai.com/deviceauth/usercode";
 const CATALOG: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 const DEVICE_TOKEN: &str = "https://auth.openai.com/deviceauth/token";
 const DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
-
-const B64URL: base64::engine::general_purpose::GeneralPurpose =
-    base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodexError {
@@ -68,7 +65,7 @@ fn authorize_url(challenge: &str, state: &str) -> Result<String, CodexError> {
 
 fn account_id(access_token: &str) -> Option<String> {
     let payload = access_token.split('.').nth(1)?;
-    let bytes = B64URL.decode(payload.trim_end_matches('=')).ok()?;
+    let bytes = BASE64URL.decode(payload.trim_end_matches('=')).ok()?;
     let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     claims
         .get("https://api.openai.com/auth")?
@@ -84,8 +81,16 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
+fn auth_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("reqwest client")
+}
+
 async fn exchange_code(code: &str, verifier: &str) -> Result<OAuthTokenSet, CodexError> {
-    let response = reqwest::Client::new()
+    let response = auth_client()
         .post(TOKEN)
         .form(&[
             ("grant_type", "authorization_code"),
@@ -150,8 +155,13 @@ struct DevicePollResponse {
     code_verifier: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct DevicePollError {
+    error: Option<String>,
+}
+
 async fn login_device(status: &mpsc::Sender<String>) -> Result<OAuthTokenSet, CodexError> {
-    let client = reqwest::Client::new();
+    let client = auth_client();
     let response = client
         .post(DEVICE_USERCODE)
         .json(&serde_json::json!({ "client_id": CLIENT_ID }))
@@ -185,6 +195,18 @@ async fn login_device(status: &mpsc::Sender<String>) -> Result<OAuthTokenSet, Co
             .send()
             .await?;
         if !poll.status().is_success() {
+            let bytes = poll.bytes().await.unwrap_or_default();
+            if let Ok(err_body) = serde_json::from_slice::<DevicePollError>(&bytes) {
+                match err_body.error.as_deref() {
+                    Some("access_denied") => {
+                        return Err(CodexError::Token("device login access denied".to_owned()));
+                    }
+                    Some("expired_token") => {
+                        return Err(CodexError::Token("device login code expired".to_owned()));
+                    }
+                    _ => {}
+                }
+            }
             continue;
         }
         let Ok(body) = poll.json::<DevicePollResponse>().await else {
@@ -197,7 +219,7 @@ async fn login_device(status: &mpsc::Sender<String>) -> Result<OAuthTokenSet, Co
 }
 
 pub async fn refresh_tokens(refresh_token: &str) -> Result<OAuthTokenSet, CodexError> {
-    let response = reqwest::Client::new()
+    let response = auth_client()
         .post(TOKEN)
         .form(&[
             ("grant_type", "refresh_token"),
@@ -241,10 +263,15 @@ async fn current_access(
         match tokens.refresh_token.as_ref() {
             Some(refresh) => match refresh_tokens(refresh.expose()).await {
                 Ok(fresh) => {
-                    let _ = store.store(key, ResolvedCredential::OAuth(fresh.clone()));
+                    if let Err(err) = store.store(key, ResolvedCredential::OAuth(fresh.clone())) {
+                        tracing::warn!(%err, "failed to persist refreshed oauth tokens");
+                    }
                     fresh
                 }
-                Err(_) => tokens,
+                Err(err) => {
+                    tracing::warn!(%err, "token refresh failed; treating as logged out");
+                    return None;
+                }
             },
             None => tokens,
         }
@@ -275,7 +302,11 @@ impl CodexProvider {
         Self {
             store,
             key,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_mins(5))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("reqwest client"),
         }
     }
 }
@@ -323,9 +354,20 @@ impl ModelProvider for CodexProvider {
         self.store.resolve(&self.key, None).is_some()
     }
 
+    fn validate(&self) -> JoinHandle<Result<(), String>> {
+        let store = self.store.clone();
+        let key = self.key.clone();
+        tokio::spawn(async move {
+            if current_access(&store, &key).await.is_some() {
+                Ok(())
+            } else {
+                Err("not logged in".to_owned())
+            }
+        })
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            streaming: true,
             tools: true,
             auth: AuthMethod::OAuth,
         }
@@ -405,7 +447,7 @@ mod tests {
     fn decodes_account_id_from_jwt() {
         use base64::Engine;
         let payload = r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-99"}}"#;
-        let encoded = super::B64URL.encode(payload.as_bytes());
+        let encoded = goat_auth::BASE64URL.encode(payload.as_bytes());
         let jwt = format!("header.{encoded}.sig");
         assert_eq!(account_id(&jwt).as_deref(), Some("acct-99"));
     }

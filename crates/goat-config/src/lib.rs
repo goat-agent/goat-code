@@ -24,6 +24,7 @@ impl Config {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub fn from_json(raw: &str) -> Result<Self, ConfigError> {
         Ok(serde_json::from_str(raw)?)
     }
@@ -50,7 +51,7 @@ pub enum ConfigError {
 
 pub const HOME_NOT_FOUND: &str = "could not resolve ~/.goat-code";
 
-pub fn app_home() -> Option<PathBuf> {
+fn app_home() -> Option<PathBuf> {
     std::env::home_dir().map(|home| home.join(".goat-code"))
 }
 

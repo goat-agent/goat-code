@@ -18,10 +18,10 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-23 crates organized into five layers, with `goat-protocol` at the bottom of the dependency DAG:
+22 crates organized into five layers, with `goat-protocol` at the bottom of the dependency DAG:
 
 **Infrastructure**
-- `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`, `Conversation`); serde only; leaf.
+- `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
 - `goat-config` — config, `ThemeChoice`, XDG paths, log directory; no TUI deps; leaf.
 - `goat-core` — `Session` and the `Engine` trait; depends on `goat-protocol` only.
 - `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol` only, not `goat-core`.
@@ -34,13 +34,11 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-provider-openai` — OpenAI Chat Completions provider.
 - `goat-provider-responses` — OpenAI Responses API provider.
 - `goat-provider-openai-codex` — OpenAI Codex provider.
-- `goat-provider-ollama` — Ollama local-inference provider.
-- `goat-provider-lmstudio` — LM Studio local-inference provider.
-- `goat-provider-llama-cpp` — llama.cpp local-inference provider.
+- `goat-provider-local` — table-driven local-inference provider (Ollama, LM Studio, llama.cpp).
 - `goat-providers` — provider registry; wires all provider crates.
 
 **Agent**
-- `goat-agent` — `GoatAgent`, the production `Engine` implementation; owns the LLM loop, tool dispatch, and `Conversation`.
+- `goat-agent` — `GoatAgent`, the production `Engine` implementation; owns the LLM loop, tool dispatch, and `Vec<ProviderMessage>` history.
 
 **Auth / Store**
 - `goat-auth` — credential store (provider API keys, OAuth tokens).
@@ -69,7 +67,7 @@ The UI and the engine communicate only through `goat-protocol` types over bounde
 
 - `goat-core` stays feature-free forever: it owns the session lifecycle and the `Op → Event` loop and nothing else. Real capability (LLM, tools) plugs in above core by implementing the `Engine` trait. `GoatAgent` is the production engine.
 - `Engine` is an object-safe actor: `fn spawn(self, ops, events) -> JoinHandle`. No `async_trait`, no `Stream`.
-- `GoatAgent` owns the `Conversation` (single source of truth); the TUI keeps an append-only render mirror built from `Event`s.
+- `GoatAgent` owns a `Vec<ProviderMessage>` history (single source of truth for the LLM context); the TUI keeps an append-only render mirror built from `Event`s.
 - The TUI normalizes three event sources into one `AppEvent`, runs a pure `App::update` reducer, and renders on a dirty flag — never on every tick.
 - The composer is a first-party widget. Do not add `tui-textarea`; it does not support ratatui 0.30.
 

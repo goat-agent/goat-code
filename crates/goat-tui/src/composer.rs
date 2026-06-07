@@ -217,11 +217,7 @@ impl Composer {
     }
 
     pub fn clear(&mut self) {
-        let text = self.text();
-        let mut history = std::mem::take(&mut self.history);
-        if !text.trim().is_empty() {
-            history.push(text);
-        }
+        let history = std::mem::take(&mut self.history);
         *self = Self {
             history,
             ..Self::default()
@@ -270,11 +266,7 @@ impl Composer {
         }
     }
 
-    pub fn peek_text(&self) -> String {
-        self.text()
-    }
-
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         self.lines
             .iter()
             .map(|line| line.iter().collect::<String>())
@@ -454,13 +446,13 @@ mod tests {
     }
 
     #[test]
-    fn clear_saves_draft_to_history() {
+    fn clear_does_not_pollute_history() {
         let mut composer = Composer::default();
         composer.insert_str("some draft");
         composer.clear();
         assert!(composer.is_empty());
         composer.history_prev();
-        assert_eq!(composer.text(), "some draft");
+        assert!(composer.is_empty());
     }
 
     #[test]

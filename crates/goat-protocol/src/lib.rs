@@ -52,6 +52,7 @@ pub struct ModelEntry {
     pub provider: String,
     pub model: String,
     pub accounts: Vec<AccountChoice>,
+    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +67,20 @@ pub enum AuthMethod {
 pub struct LoginProvider {
     pub id: String,
     pub method: AuthMethod,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountInfo {
+    pub name: String,
+    pub method: AuthMethod,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountEntry {
+    pub provider: String,
+    pub display_name: String,
+    pub accounts: Vec<AccountInfo>,
+    pub local: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +105,27 @@ pub enum Op {
         provider: String,
         credential: LoginCredential,
     },
+    AddAccount {
+        provider: String,
+        name: String,
+        credential: LoginCredential,
+    },
+    RemoveAccount {
+        provider: String,
+        name: String,
+    },
+    SetTheme {
+        dark: bool,
+    },
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyKind {
+    Info,
+    Success,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,8 +169,15 @@ pub enum Event {
         done: bool,
         ok: bool,
     },
+    AccountsChanged {
+        providers: Vec<AccountEntry>,
+    },
     Error {
         id: Option<TaskId>,
+        message: String,
+    },
+    Notify {
+        kind: NotifyKind,
         message: String,
     },
 }

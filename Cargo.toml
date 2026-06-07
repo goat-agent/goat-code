@@ -23,9 +23,7 @@ goat-provider-responses = { path = "crates/goat-provider-responses" }
 goat-provider-openai = { path = "crates/goat-provider-openai" }
 goat-provider-openai-codex = { path = "crates/goat-provider-openai-codex" }
 goat-provider-anthropic = { path = "crates/goat-provider-anthropic" }
-goat-provider-ollama = { path = "crates/goat-provider-ollama" }
-goat-provider-lmstudio = { path = "crates/goat-provider-lmstudio" }
-goat-provider-llama-cpp = { path = "crates/goat-provider-llama-cpp" }
+goat-provider-local = { path = "crates/goat-provider-local" }
 goat-providers = { path = "crates/goat-providers" }
 goat-agent = { path = "crates/goat-agent" }
 goat-tool = { path = "crates/goat-tool" }

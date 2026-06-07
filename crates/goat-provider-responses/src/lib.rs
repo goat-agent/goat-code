@@ -129,7 +129,7 @@ pub fn build_body(
         store,
         stream: true,
     };
-    serde_json::to_value(request).unwrap_or_default()
+    serde_json::to_value(request).expect("ResponsesRequest is always serializable")
 }
 
 pub async fn run_request(
@@ -304,11 +304,11 @@ fn parse_item_id(data: &str) -> Option<String> {
 
 #[derive(Deserialize)]
 struct ModelsResponse {
-    data: Vec<ModelEntry>,
+    data: Vec<ModelRow>,
 }
 
 #[derive(Deserialize)]
-struct ModelEntry {
+struct ModelRow {
     id: String,
 }
 
@@ -334,7 +334,11 @@ impl ResponsesProvider {
             base_url: base_url.into(),
             bearer,
             auth,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_mins(5))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("reqwest client"),
             model_filter: None,
             catalog: &[],
         }
@@ -365,9 +369,39 @@ impl ModelProvider for ResponsesProvider {
         }
     }
 
+    fn validate(&self) -> JoinHandle<Result<(), String>> {
+        let client = self.client.clone();
+        let url = format!("{}/models", self.base_url);
+        let bearer = self.bearer.clone();
+        let auth = self.auth;
+        tokio::spawn(async move {
+            if matches!(auth, AuthMethod::None) {
+                return Ok(());
+            }
+            let Some(token) = bearer else {
+                return Err("no credentials".to_owned());
+            };
+            let resp = client
+                .get(&url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| "could not reach provider".to_owned())?;
+            let status = resp.status();
+            if status.is_success() {
+                Ok(())
+            } else if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                Err("invalid credentials".to_owned())
+            } else {
+                Err(format!("could not reach provider: {status}"))
+            }
+        })
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            streaming: true,
             tools: true,
             auth: self.auth,
         }

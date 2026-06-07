@@ -68,12 +68,24 @@ impl Tool for BashTool {
             let result = time::timeout(timeout_dur, async {
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
-                if let Some(pipe) = stdout_pipe.as_mut() {
-                    let _ = pipe.read_to_end(&mut stdout).await;
-                }
-                if let Some(pipe) = stderr_pipe.as_mut() {
-                    let _ = pipe.read_to_end(&mut stderr).await;
-                }
+                let (stdout_result, stderr_result) = tokio::join!(
+                    async {
+                        if let Some(pipe) = stdout_pipe.as_mut() {
+                            pipe.read_to_end(&mut stdout).await
+                        } else {
+                            Ok(0)
+                        }
+                    },
+                    async {
+                        if let Some(pipe) = stderr_pipe.as_mut() {
+                            pipe.read_to_end(&mut stderr).await
+                        } else {
+                            Ok(0)
+                        }
+                    }
+                );
+                let _ = stdout_result;
+                let _ = stderr_result;
                 let status = guard.0.wait().await;
                 (stdout, stderr, status)
             })

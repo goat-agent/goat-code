@@ -6,6 +6,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinHandle};
 
+pub use goat_protocol::AuthMethod;
+
 pub fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -102,16 +104,7 @@ pub struct ModelRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthMethod {
-    None,
-    ApiKey,
-    OAuth,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCapabilities {
-    pub streaming: bool,
     pub tools: bool,
     pub auth: AuthMethod,
 }
@@ -143,6 +136,9 @@ pub trait ModelProvider: Send + Sync + 'static {
     fn authenticated(&self) -> bool {
         true
     }
+    fn validate(&self) -> JoinHandle<Result<(), String>> {
+        tokio::spawn(async { Ok(()) })
+    }
 }
 
 #[cfg(test)]
@@ -163,7 +159,6 @@ mod tests {
 
         fn capabilities(&self) -> ProviderCapabilities {
             ProviderCapabilities {
-                streaming: true,
                 tools: false,
                 auth: AuthMethod::None,
             }
@@ -193,7 +188,7 @@ mod tests {
     async fn mock_provider_streams_events() {
         let provider = MockProvider;
         assert_eq!(provider.id(), ProviderId::from("mock"));
-        assert!(provider.capabilities().streaming);
+        assert!(!provider.capabilities().tools);
         let (tx, mut rx) = mpsc::channel(8);
         let handle = provider.request(
             ModelRequest {

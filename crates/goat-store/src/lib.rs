@@ -52,10 +52,13 @@ CREATE TABLE tool_calls (
 
 fn migrate(conn: &Connection) -> Result<(), StoreError> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version > LATEST_VERSION {
+        return Err(StoreError::UnknownVersion(version));
+    }
     while version < LATEST_VERSION {
         match version {
             0 => conn.execute_batch(SCHEMA_V1)?,
-            _ => break,
+            _ => return Err(StoreError::UnknownVersion(version)),
         }
         version += 1;
         conn.execute_batch(&format!("PRAGMA user_version = {version};"))?;
@@ -67,6 +70,8 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
 pub enum StoreError {
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("database version {0} is newer than this binary supports")]
+    UnknownVersion(i64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,30 +109,7 @@ pub struct NewTurn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Turn {
-    pub id: i64,
-    pub thread_id: i64,
-    pub task_id: i64,
-    pub provider: String,
-    pub model: String,
-    pub account: String,
-    pub status: String,
-    pub started_at: i64,
-    pub finished_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewMessage {
-    pub thread_id: i64,
-    pub turn_id: Option<i64>,
-    pub role: String,
-    pub body: String,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Message {
-    pub id: i64,
     pub thread_id: i64,
     pub turn_id: Option<i64>,
     pub role: String,
@@ -144,20 +126,6 @@ pub struct NewToolCall {
     pub input: String,
     pub status: String,
     pub started_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolCall {
-    pub id: i64,
-    pub thread_id: i64,
-    pub turn_id: i64,
-    pub call_id: String,
-    pub name: String,
-    pub input: String,
-    pub status: String,
-    pub summary: Option<String>,
-    pub started_at: i64,
-    pub finished_at: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -266,33 +234,6 @@ impl Store {
         .await
     }
 
-    pub async fn list_threads(&self) -> Result<Vec<Thread>, StoreError> {
-        self.run(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, cwd, title, provider, model, account, created_at, updated_at
-                 FROM threads ORDER BY id",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(Thread {
-                    id: row.get(0)?,
-                    cwd: row.get(1)?,
-                    title: row.get(2)?,
-                    provider: row.get(3)?,
-                    model: row.get(4)?,
-                    account: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row?);
-            }
-            Ok(out)
-        })
-        .await
-    }
-
     pub async fn update_thread_model(
         &self,
         id: i64,
@@ -366,31 +307,6 @@ impl Store {
         .await
     }
 
-    pub async fn list_messages(&self, thread_id: i64) -> Result<Vec<Message>, StoreError> {
-        self.run(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, thread_id, turn_id, role, body, created_at
-                 FROM messages WHERE thread_id = ?1 ORDER BY id",
-            )?;
-            let rows = stmt.query_map(params![thread_id], |row| {
-                Ok(Message {
-                    id: row.get(0)?,
-                    thread_id: row.get(1)?,
-                    turn_id: row.get(2)?,
-                    role: row.get(3)?,
-                    body: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row?);
-            }
-            Ok(out)
-        })
-        .await
-    }
-
     pub async fn create_tool_call(&self, call: NewToolCall) -> Result<i64, StoreError> {
         self.run(move |conn| {
             conn.execute(
@@ -424,35 +340,6 @@ impl Store {
                 params![id, status, summary, finished_at],
             )?;
             Ok(())
-        })
-        .await
-    }
-
-    pub async fn list_tool_calls(&self, turn_id: i64) -> Result<Vec<ToolCall>, StoreError> {
-        self.run(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, thread_id, turn_id, call_id, name, input, status, summary, started_at, finished_at
-                 FROM tool_calls WHERE turn_id = ?1 ORDER BY id",
-            )?;
-            let rows = stmt.query_map(params![turn_id], |row| {
-                Ok(ToolCall {
-                    id: row.get(0)?,
-                    thread_id: row.get(1)?,
-                    turn_id: row.get(2)?,
-                    call_id: row.get(3)?,
-                    name: row.get(4)?,
-                    input: row.get(5)?,
-                    status: row.get(6)?,
-                    summary: row.get(7)?,
-                    started_at: row.get(8)?,
-                    finished_at: row.get(9)?,
-                })
-            })?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row?);
-            }
-            Ok(out)
         })
         .await
     }
@@ -573,27 +460,22 @@ mod tests {
             .await
             .unwrap();
 
-        let messages = store.list_messages(thread_id).await.unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].body, "hello");
-
-        let calls = store.list_tool_calls(turn_id).await.unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].summary.as_deref(), Some("ok"));
-        assert_eq!(calls[0].finished_at, Some(113));
+        let thread = store.get_thread(thread_id).await.unwrap().unwrap();
+        assert_eq!(thread.provider, "openai");
     }
 
     #[tokio::test]
     async fn reopen_file_is_idempotent() {
         let path = std::env::temp_dir().join("goat-store-reopen-test.db");
         let _ = std::fs::remove_file(&path);
+        let id;
         {
             let store = Store::open(&path).unwrap();
-            store.create_thread(sample_thread()).await.unwrap();
+            id = store.create_thread(sample_thread()).await.unwrap();
         }
         let store = Store::open(&path).unwrap();
-        let threads = store.list_threads().await.unwrap();
-        assert_eq!(threads.len(), 1);
+        let thread = store.get_thread(id).await.unwrap();
+        assert!(thread.is_some());
         let _ = std::fs::remove_file(&path);
     }
 }
