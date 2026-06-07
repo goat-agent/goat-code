@@ -68,10 +68,7 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
             }
 
             Event::Code(text) => {
-                current_spans.push(Span::styled(
-                    format!(" {text} "),
-                    theme.code_plain().bg(theme.code.bg),
-                ));
+                current_spans.push(Span::styled(format!(" {text} "), theme.code_plain()));
             }
 
             Event::Text(text) => {
@@ -127,7 +124,7 @@ fn render_code_block(
             hl_line
                 .spans
                 .into_iter()
-                .map(|s| Span::styled(s.content.into_owned(), s.style.bg(theme.code.bg))),
+                .map(|s| Span::styled(s.content.into_owned(), s.style)),
         );
         if i == 0 && !lang.is_empty() {
             spans.push(Span::styled(format!("  {lang}"), theme.muted()));
