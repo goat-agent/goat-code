@@ -4,6 +4,7 @@ use crossterm::event::{
     Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use futures::StreamExt;
+use goat_commands::{CommandEffect, CommandRegistry};
 use goat_protocol::{AccountEntry, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -52,6 +53,7 @@ pub struct App {
     config: Option<Config>,
     account_entries: Vec<AccountEntry>,
     mouse_capture: bool,
+    commands: CommandRegistry,
     command_menu: Option<CommandMenu>,
     task_start: Option<std::time::Instant>,
     toasts: Vec<crate::toast::Toast>,
@@ -83,6 +85,7 @@ impl App {
             config: None,
             account_entries: Vec::new(),
             mouse_capture: true,
+            commands: CommandRegistry::builtin(),
             command_menu: None,
             task_start: None,
             toasts: Vec::new(),
@@ -205,7 +208,7 @@ impl App {
                 if let Some(menu) = &self.command_menu
                     && let Some(name) = menu.selected_name()
                 {
-                    let completed = format!("{name} ");
+                    let completed = format!("/{name} ");
                     self.composer.clear();
                     self.composer.insert_str(&completed);
                 }
@@ -216,7 +219,7 @@ impl App {
                 if let Some(menu) = &self.command_menu
                     && let Some(name) = menu.selected_name()
                 {
-                    let completed = name.to_owned();
+                    let completed = format!("/{name}");
                     self.command_menu = None;
                     self.composer.clear();
                     return Some(self.dispatch_slash_command(&completed));
@@ -244,48 +247,54 @@ impl App {
     }
 
     fn dispatch_slash_command(&mut self, raw: &str) -> Vec<Op> {
-        let name = raw
-            .trim_start_matches('/')
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
-        match name.as_str() {
-            "model" => {
+        let rest = raw.trim().trim_start_matches('/');
+        let (name, args) = match rest.split_once(char::is_whitespace) {
+            Some((name, args)) => (name, args.trim()),
+            None => (rest, ""),
+        };
+        let effect = self.commands.resolve(name, args);
+        self.apply_command_effect(effect)
+    }
+
+    fn apply_command_effect(&mut self, effect: CommandEffect) -> Vec<Op> {
+        self.dirty = true;
+        match effect {
+            CommandEffect::OpenModelPicker => {
                 self.picker = Some(Picker::new(self.models.clone(), self.model.clone()));
-                self.dirty = true;
                 Vec::new()
             }
-            "help" => {
-                self.transcript.push_notice(crate::command::help_text());
-                self.dirty = true;
-                Vec::new()
-            }
-            "config" => {
+            CommandEffect::OpenConfig => {
                 self.config = Some(Config::new(
                     self.account_entries.clone(),
                     self.theme.is_dark(),
                     self.mouse_capture,
                 ));
-                self.dirty = true;
                 Vec::new()
             }
-            "clear" => {
+            CommandEffect::ShowHelp => {
+                self.transcript
+                    .push_notice(crate::command::help_text(&self.commands));
+                Vec::new()
+            }
+            CommandEffect::ClearConversation => {
                 if self.active.is_some() {
                     return Vec::new();
                 }
                 self.transcript.clear();
                 self.scroll = 0;
                 self.follow = true;
-                self.dirty = true;
                 vec![Op::Clear]
             }
-            _ => {
-                self.transcript
-                    .push_error(format!("unknown command: {raw}"));
-                self.dirty = true;
+            CommandEffect::Submit(text) => self.submit_text(text),
+            CommandEffect::Notice(message) => {
+                self.transcript.push_notice(message);
                 Vec::new()
             }
+            CommandEffect::Error(message) => {
+                self.transcript.push_error(message);
+                Vec::new()
+            }
+            CommandEffect::Noop => Vec::new(),
         }
     }
 
@@ -392,8 +401,8 @@ impl App {
         let trimmed = text.trim_start();
         if trimmed.starts_with('/') && !trimmed.contains(' ') {
             match &mut self.command_menu {
-                Some(menu) => menu.update(trimmed),
-                None => self.command_menu = Some(CommandMenu::new(trimmed)),
+                Some(menu) => menu.update(&self.commands, trimmed),
+                None => self.command_menu = Some(CommandMenu::new(&self.commands, trimmed)),
             }
         } else {
             self.command_menu = None;
@@ -565,6 +574,13 @@ impl App {
             let cmd = trimmed.to_owned();
             return self.dispatch_slash_command(&cmd);
         }
+        self.submit_text(text)
+    }
+
+    fn submit_text(&mut self, text: String) -> Vec<Op> {
+        if self.active.is_some() {
+            return Vec::new();
+        }
         let id = TaskId(self.next_task);
         self.next_task += 1;
         self.active = Some(id);
@@ -591,6 +607,9 @@ impl App {
                     config.set_providers(providers.clone());
                 }
                 self.account_entries = providers;
+            }
+            EngineEvent::SkillsChanged { skills } => {
+                self.commands.set_skills(&skills);
             }
             EngineEvent::LoginStatus {
                 message, done, ok, ..
@@ -962,6 +981,34 @@ mod tests {
         assert!(matches!(
             &app.transcript.items[0],
             crate::transcript::Item::Notice(_)
+        ));
+    }
+
+    #[test]
+    fn skills_changed_registers_invokable_command() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::SkillsChanged {
+            skills: vec![goat_protocol::SkillInfo {
+                name: "demo".to_owned(),
+                description: "a demo".to_owned(),
+            }],
+        });
+        app.composer.insert_str("/demo");
+        let ops = app.submit();
+        assert!(matches!(ops.as_slice(), [Op::SubmitMessage { .. }]));
+        assert!(app.active.is_some());
+    }
+
+    #[test]
+    fn unknown_skill_command_pushes_error() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("/demo");
+        let ops = app.submit();
+        assert!(ops.is_empty());
+        assert_eq!(app.transcript.items.len(), 1);
+        assert!(matches!(
+            &app.transcript.items[0],
+            crate::transcript::Item::Error(_)
         ));
     }
 }

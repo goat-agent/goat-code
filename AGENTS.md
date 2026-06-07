@@ -18,13 +18,13 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-22 crates organized into five layers, with `goat-protocol` at the bottom of the dependency DAG:
+28 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
 
 **Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
 - `goat-config` — config, `ThemeChoice`, XDG paths, log directory; no TUI deps; leaf.
 - `goat-core` — `Session` and the `Engine` trait; depends on `goat-protocol` only.
-- `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol` only, not `goat-core`.
+- `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol` and `goat-commands`, not `goat-core` or any engine crate.
 - `goat-code` — the `goat` binary; wires the channels, logging, and CLI; depends on all.
 
 **Providers**
@@ -49,7 +49,16 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-tool-fs` — filesystem tools (read, write, list, search).
 - `goat-tool-shell` — shell execution tool.
 - `goat-tool-search` — web/code search tools.
+- `goat-tool-skill` — the `Skill` tool; loads a skill's instructions on demand from the cwd.
 - `goat-tools` — tool registry; wires all tool crates.
+- `goat-skill` — SKILL.md (agentskills.io) parser and loader; reads global `~/.goat-code/skills` and project `.goat/skills` (project overrides global); depends on `goat-config` only.
+
+**Commands**
+- `goat-command` — the `Command` trait (`&'static str` name/description, `run → CommandEffect`) and `CommandEffect`/`CommandSpec`; leaf, mirrors `goat-tool`.
+- `goat-command-settings` — `/model`, `/config` commands (one module per command).
+- `goat-command-conversation` — `/clear` command.
+- `goat-command-help` — `/help` command.
+- `goat-commands` — command registry; wires the per-category command crates and surfaces loaded skills as `/name` commands via `set_skills`; mirrors `goat-tools`.
 
 The UI and the engine communicate only through `goat-protocol` types over bounded
 `tokio::mpsc` channels. The binary owns both channels and connects them.

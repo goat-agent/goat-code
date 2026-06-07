@@ -16,6 +16,7 @@ goat-auth = { workspace = true }
 goat-store = { workspace = true }
 goat-tool = { workspace = true }
 goat-tools = { workspace = true }
+goat-skill = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -30,7 +30,14 @@ goat-tool = { path = "crates/goat-tool" }
 goat-tool-fs = { path = "crates/goat-tool-fs" }
 goat-tool-shell = { path = "crates/goat-tool-shell" }
 goat-tool-search = { path = "crates/goat-tool-search" }
+goat-tool-skill = { path = "crates/goat-tool-skill" }
 goat-tools = { path = "crates/goat-tools" }
+goat-skill = { path = "crates/goat-skill" }
+goat-command = { path = "crates/goat-command" }
+goat-command-settings = { path = "crates/goat-command-settings" }
+goat-command-conversation = { path = "crates/goat-command-conversation" }
+goat-command-help = { path = "crates/goat-command-help" }
+goat-commands = { path = "crates/goat-commands" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
 futures = "0.3"

@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    fmt::Write as _,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -7,7 +8,7 @@ use goat_auth::{CredentialKey, CredentialKind, CredentialStore, ResolvedCredenti
 use goat_core::Engine;
 use goat_protocol::{
     AccountChoice, AccountEntry, AccountInfo, AuthMethod, Event, LoginCredential, LoginProvider,
-    ModelEntry, ModelTarget, NotifyKind, Op, TaskId, ToolCallId,
+    ModelEntry, ModelTarget, NotifyKind, Op, SkillInfo, TaskId, ToolCallId,
 };
 use goat_provider::{
     ContentBlock, MessageRole, ModelEvent, ModelRequest, ProviderMessage, ToolDefinition,
@@ -20,6 +21,30 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 const MAX_TOOL_ROUNDS: usize = 20;
 const SYSTEM_PROMPT: &str = "You are Goat, an expert software engineering assistant. You help users understand, build, and improve software by reading code, running tools, and providing accurate, actionable guidance. When using tools, prefer targeted reads and searches over broad exploration. Always verify your understanding before making changes.";
+
+fn build_system_prompt(skills: &[SkillInfo]) -> String {
+    if skills.is_empty() {
+        return SYSTEM_PROMPT.to_owned();
+    }
+    let mut prompt = String::from(SYSTEM_PROMPT);
+    prompt.push_str(
+        "\n\nAvailable skills. Call the Skill tool with a skill's name to load its full instructions before following it:",
+    );
+    for skill in skills {
+        let _ = write!(prompt, "\n- {}: {}", skill.name, skill.description);
+    }
+    prompt
+}
+
+fn load_skill_infos(cwd: &std::path::Path) -> Vec<SkillInfo> {
+    goat_skill::load(cwd)
+        .iter()
+        .map(|skill| SkillInfo {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+        })
+        .collect()
+}
 
 pub struct GoatAgent {
     registry: Registry,
@@ -58,6 +83,7 @@ struct Ctx<'a> {
     tools: &'a ToolRegistry,
     store: &'a Store,
     events: &'a mpsc::Sender<Event>,
+    skills: &'a [SkillInfo],
 }
 
 enum Flow {
@@ -198,6 +224,13 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     }
     announce_startup(&events, &registry, &credentials, target.as_ref()).await;
 
+    let skills = load_skill_infos(&std::env::current_dir().unwrap_or_default());
+    let _ = events
+        .send(Event::SkillsChanged {
+            skills: skills.clone(),
+        })
+        .await;
+
     while let Some(op) = ops.recv().await {
         match op {
             Op::SubmitMessage { id, text } => {
@@ -207,6 +240,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     tools: &tools,
                     store: &store,
                     events: &events,
+                    skills: &skills,
                 };
                 if let Flow::Shutdown = handle_turn(
                     &ctx,
@@ -1192,7 +1226,7 @@ async fn handle_turn(
     if history.is_empty() {
         history.push(ProviderMessage::text(
             MessageRole::System,
-            SYSTEM_PROMPT.to_owned(),
+            build_system_prompt(ctx.skills),
         ));
     }
     history.push(ProviderMessage::text(MessageRole::User, text.clone()));
@@ -1354,6 +1388,7 @@ mod tests {
                 | Event::LoginProviders { .. }
                 | Event::LoginStatus { .. }
                 | Event::AccountsChanged { .. }
+                | Event::SkillsChanged { .. }
                 | Event::TextDone { .. } => {}
                 Event::TaskStarted { .. } => started = true,
                 Event::TextDelta { chunk, .. } => deltas.push_str(&chunk),
@@ -1368,6 +1403,22 @@ mod tests {
         assert!(started);
         assert_eq!(deltas, "hello");
         assert!(done);
+    }
+
+    #[test]
+    fn system_prompt_without_skills_is_base() {
+        assert_eq!(super::build_system_prompt(&[]), super::SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn system_prompt_lists_skills() {
+        let prompt = super::build_system_prompt(&[goat_protocol::SkillInfo {
+            name: "demo".to_owned(),
+            description: "does the demo".to_owned(),
+        }]);
+        assert!(prompt.contains("demo"));
+        assert!(prompt.contains("does the demo"));
+        assert!(prompt.contains("Skill tool"));
     }
 
     #[tokio::test]

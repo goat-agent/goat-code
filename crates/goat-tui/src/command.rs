@@ -1,5 +1,6 @@
 use std::fmt::Write;
 
+use goat_commands::CommandRegistry;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -8,30 +9,6 @@ use ratatui::{
 };
 
 use crate::theme::Theme;
-
-pub struct SlashCommand {
-    pub name: &'static str,
-    pub desc: &'static str,
-}
-
-pub static COMMANDS: &[SlashCommand] = &[
-    SlashCommand {
-        name: "/model",
-        desc: "switch model",
-    },
-    SlashCommand {
-        name: "/config",
-        desc: "configure providers and settings",
-    },
-    SlashCommand {
-        name: "/clear",
-        desc: "start a new conversation",
-    },
-    SlashCommand {
-        name: "/help",
-        desc: "show keybindings and commands",
-    },
-];
 
 fn subsequence_match(query: &str, target: &str) -> Option<Vec<usize>> {
     if query.is_empty() {
@@ -54,31 +31,42 @@ fn subsequence_match(query: &str, target: &str) -> Option<Vec<usize>> {
     Some(positions)
 }
 
+struct Match {
+    name: String,
+    description: String,
+    positions: Vec<usize>,
+}
+
 pub struct CommandMenu {
     cursor: usize,
-    matches: Vec<(usize, Vec<usize>)>,
+    matches: Vec<Match>,
 }
 
 impl CommandMenu {
-    pub fn new(prefix: &str) -> Self {
-        let matches = Self::compute_matches(prefix);
-        Self { cursor: 0, matches }
+    pub fn new(registry: &CommandRegistry, prefix: &str) -> Self {
+        Self {
+            cursor: 0,
+            matches: Self::compute_matches(registry, prefix),
+        }
     }
 
-    fn compute_matches(prefix: &str) -> Vec<(usize, Vec<usize>)> {
+    fn compute_matches(registry: &CommandRegistry, prefix: &str) -> Vec<Match> {
         let query = prefix.strip_prefix('/').unwrap_or(prefix).to_lowercase();
-        COMMANDS
-            .iter()
-            .enumerate()
-            .filter_map(|(i, cmd)| {
-                let name = cmd.name.strip_prefix('/').unwrap_or(cmd.name);
-                subsequence_match(&query, name).map(|positions| (i, positions))
+        registry
+            .specs()
+            .into_iter()
+            .filter_map(|spec| {
+                subsequence_match(&query, spec.name).map(|positions| Match {
+                    name: spec.name.to_owned(),
+                    description: spec.description.to_owned(),
+                    positions,
+                })
             })
             .collect()
     }
 
-    pub fn update(&mut self, prefix: &str) {
-        self.matches = Self::compute_matches(prefix);
+    pub fn update(&mut self, registry: &CommandRegistry, prefix: &str) {
+        self.matches = Self::compute_matches(registry, prefix);
         if self.cursor >= self.matches.len() {
             self.cursor = self.matches.len().saturating_sub(1);
         }
@@ -94,10 +82,8 @@ impl CommandMenu {
         }
     }
 
-    pub fn selected_name(&self) -> Option<&'static str> {
-        self.matches
-            .get(self.cursor)
-            .map(|&(i, _)| COMMANDS[i].name)
+    pub fn selected_name(&self) -> Option<String> {
+        self.matches.get(self.cursor).map(|m| m.name.clone())
     }
 
     pub fn desired_height(&self) -> u16 {
@@ -110,14 +96,12 @@ impl CommandMenu {
             .matches
             .iter()
             .enumerate()
-            .map(|(pos, &(idx, ref positions))| {
-                let cmd = &COMMANDS[idx];
+            .map(|(pos, entry)| {
                 let selected = pos == self.cursor;
-                let name_no_slash = cmd.name.strip_prefix('/').unwrap_or(cmd.name);
                 let name_style = if selected { theme.key() } else { theme.muted() };
                 let mut spans: Vec<Span> = vec![Span::styled("  /", name_style)];
-                for (byte_i, ch) in name_no_slash.char_indices() {
-                    let style = if positions.contains(&byte_i) {
+                for (byte_i, ch) in entry.name.char_indices() {
+                    let style = if entry.positions.contains(&byte_i) {
                         theme.accent()
                     } else {
                         name_style
@@ -126,7 +110,7 @@ impl CommandMenu {
                 }
                 spans.push(Span::styled("   ", theme.base()));
                 spans.push(Span::styled(
-                    cmd.desc,
+                    entry.description.clone(),
                     if selected {
                         theme.base()
                     } else {
@@ -140,10 +124,10 @@ impl CommandMenu {
     }
 }
 
-pub fn help_text() -> String {
+pub fn help_text(registry: &CommandRegistry) -> String {
     let mut out = String::from("Commands:\n");
-    for cmd in COMMANDS {
-        let _ = writeln!(out, "  {}  {}", cmd.name, cmd.desc);
+    for spec in registry.specs() {
+        let _ = writeln!(out, "  /{}  {}", spec.name, spec.description);
     }
     out.push_str("\nKeybindings:\n");
     out.push_str("  Enter       send message\n");

@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 goat-protocol = { workspace = true }
+goat-commands = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 ratatui = { workspace = true }
