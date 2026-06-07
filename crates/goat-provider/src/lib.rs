@@ -1,7 +1,18 @@
-use std::fmt;
+use std::{
+    fmt,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinHandle};
+
+pub fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProviderId(pub String);
@@ -119,20 +130,6 @@ pub enum ModelEvent {
     Failed {
         message: String,
     },
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ProviderError {
-    #[error("http error: {0}")]
-    Http(String),
-    #[error("decode error: {0}")]
-    Decode(String),
-    #[error("auth error: {0}")]
-    Auth(String),
-    #[error("provider unavailable")]
-    Unavailable,
-    #[error("{0}")]
-    Other(String),
 }
 
 pub trait ModelProvider: Send + Sync + 'static {

@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, BorderType, Paragraph},
+    widgets::{Block, BorderType, Paragraph, Wrap},
 };
 use unicode_normalization::UnicodeNormalization;
 use unicode_width::UnicodeWidthChar;
@@ -32,14 +32,31 @@ impl Default for Composer {
     }
 }
 
+fn word_boundary(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn line_display_width(chars: &[char]) -> u16 {
+    let w: usize = chars.iter().filter_map(|c| c.width()).sum();
+    u16::try_from(w).unwrap_or(u16::MAX)
+}
+
 impl Composer {
     pub fn is_empty(&self) -> bool {
         self.lines.iter().all(Vec::is_empty)
     }
 
-    pub fn desired_height(&self) -> u16 {
-        let lines = u16::try_from(self.lines.len()).unwrap_or(u16::MAX);
-        lines.saturating_add(2).clamp(3, 8)
+    pub fn desired_height(&self, width: u16) -> u16 {
+        let wrap_width = width.saturating_sub(PROMPT_COLS).max(1);
+        let total: u16 = self
+            .lines
+            .iter()
+            .map(|line| {
+                let dw = line_display_width(line);
+                dw.div_ceil(wrap_width).max(1)
+            })
+            .fold(0u16, u16::saturating_add);
+        total.saturating_add(2).clamp(3, 8)
     }
 
     pub fn on_first_row(&self) -> bool {
@@ -98,78 +115,113 @@ impl Composer {
     }
 
     pub fn delete_word_before(&mut self) {
-        while self.col > 0 && self.lines[self.row][self.col - 1] == ' ' {
+        while self.col > 0 && !word_boundary(self.lines[self.row][self.col - 1]) {
             self.lines[self.row].remove(self.col - 1);
             self.col -= 1;
         }
-        while self.col > 0 && self.lines[self.row][self.col - 1] != ' ' {
+        while self.col > 0 && word_boundary(self.lines[self.row][self.col - 1]) {
             self.lines[self.row].remove(self.col - 1);
             self.col -= 1;
         }
         self.hist_cursor = None;
     }
 
-    pub fn move_left(&mut self) {
+    pub fn move_left(&mut self) -> bool {
         if self.col > 0 {
             self.col -= 1;
+            true
         } else if self.row > 0 {
             self.row -= 1;
             self.col = self.lines[self.row].len();
+            true
+        } else {
+            false
         }
     }
 
-    pub fn move_right(&mut self) {
+    pub fn move_right(&mut self) -> bool {
         if self.col < self.lines[self.row].len() {
             self.col += 1;
+            true
         } else if self.row + 1 < self.lines.len() {
             self.row += 1;
             self.col = 0;
+            true
+        } else {
+            false
         }
     }
 
-    pub fn move_up(&mut self) {
+    pub fn move_up(&mut self) -> bool {
         if self.row > 0 {
             self.row -= 1;
             self.col = self.col.min(self.lines[self.row].len());
+            true
+        } else {
+            false
         }
     }
 
-    pub fn move_down(&mut self) {
+    pub fn move_down(&mut self) -> bool {
         if self.row + 1 < self.lines.len() {
             self.row += 1;
             self.col = self.col.min(self.lines[self.row].len());
+            true
+        } else {
+            false
         }
     }
 
-    pub fn move_home(&mut self) {
-        self.col = 0;
+    pub fn move_home(&mut self) -> bool {
+        if self.col != 0 {
+            self.col = 0;
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn move_end(&mut self) {
-        self.col = self.lines[self.row].len();
+    pub fn move_end(&mut self) -> bool {
+        let end = self.lines[self.row].len();
+        if self.col == end {
+            false
+        } else {
+            self.col = end;
+            true
+        }
     }
 
-    pub fn move_word_left(&mut self) {
-        while self.col > 0 && self.lines[self.row][self.col - 1] == ' ' {
+    pub fn move_word_left(&mut self) -> bool {
+        let start_col = self.col;
+        let start_row = self.row;
+        while self.col > 0 && !word_boundary(self.lines[self.row][self.col - 1]) {
             self.col -= 1;
         }
-        while self.col > 0 && self.lines[self.row][self.col - 1] != ' ' {
+        while self.col > 0 && word_boundary(self.lines[self.row][self.col - 1]) {
             self.col -= 1;
         }
+        self.col != start_col || self.row != start_row
     }
 
-    pub fn move_word_right(&mut self) {
+    pub fn move_word_right(&mut self) -> bool {
+        let start_col = self.col;
+        let start_row = self.row;
         let len = self.lines[self.row].len();
-        while self.col < len && self.lines[self.row][self.col] != ' ' {
+        while self.col < len && !word_boundary(self.lines[self.row][self.col]) {
             self.col += 1;
         }
-        while self.col < len && self.lines[self.row][self.col] == ' ' {
+        while self.col < len && word_boundary(self.lines[self.row][self.col]) {
             self.col += 1;
         }
+        self.col != start_col || self.row != start_row
     }
 
     pub fn clear(&mut self) {
-        let history = std::mem::take(&mut self.history);
+        let text = self.text();
+        let mut history = std::mem::take(&mut self.history);
+        if !text.trim().is_empty() {
+            history.push(text);
+        }
         *self = Self {
             history,
             ..Self::default()
@@ -218,6 +270,10 @@ impl Composer {
         }
     }
 
+    pub fn peek_text(&self) -> String {
+        self.text()
+    }
+
     fn text(&self) -> String {
         self.lines
             .iter()
@@ -238,12 +294,12 @@ impl Composer {
         self.col = self.lines[self.row].len();
     }
 
-    fn cursor_col(&self) -> u16 {
+    fn cursor_display_col(&self) -> u16 {
         let width: usize = self.lines[self.row][..self.col]
             .iter()
             .filter_map(|c| c.width())
             .sum();
-        PROMPT_COLS.saturating_add(u16::try_from(width).unwrap_or(u16::MAX))
+        u16::try_from(width).unwrap_or(u16::MAX)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool) {
@@ -269,9 +325,6 @@ impl Composer {
             return;
         }
 
-        let cursor_col = self.cursor_col();
-        let scroll = cursor_col.saturating_sub(inner.width.saturating_sub(1));
-
         let lines: Vec<Line> = self
             .lines
             .iter()
@@ -285,12 +338,29 @@ impl Composer {
                 ])
             })
             .collect();
-        frame.render_widget(Paragraph::new(lines).scroll((0, scroll)), inner);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 
         if focused {
-            let x = inner.x + cursor_col.saturating_sub(scroll);
-            let y = inner.y + u16::try_from(self.row).unwrap_or(u16::MAX);
-            frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), y));
+            let wrap_width = inner.width.saturating_sub(PROMPT_COLS).max(1);
+            let cursor_char_col = self.cursor_display_col();
+
+            let visual_row_offset: u16 = self.lines[..self.row]
+                .iter()
+                .map(|line| {
+                    let dw = line_display_width(line);
+                    dw.div_ceil(wrap_width).max(1)
+                })
+                .fold(0u16, u16::saturating_add);
+
+            let visual_row_within = cursor_char_col / wrap_width;
+            let visual_col = PROMPT_COLS + (cursor_char_col % wrap_width);
+
+            let x = inner.x + visual_col;
+            let y = inner.y + visual_row_offset + visual_row_within;
+            frame.set_cursor_position((
+                x.min(inner.right().saturating_sub(1)),
+                y.min(inner.bottom().saturating_sub(1)),
+            ));
         }
     }
 }
@@ -303,16 +373,16 @@ mod tests {
     fn cursor_column_counts_wide_chars() {
         let mut composer = Composer::default();
         composer.insert_str("한글");
-        assert_eq!(composer.cursor_col(), 2 + 4);
+        assert_eq!(composer.cursor_display_col(), 4);
         composer.move_left();
-        assert_eq!(composer.cursor_col(), 2 + 2);
+        assert_eq!(composer.cursor_display_col(), 2);
     }
 
     #[test]
     fn paste_normalizes_to_nfc() {
         let mut composer = Composer::default();
         composer.insert_str("\u{1100}\u{1161}");
-        assert_eq!(composer.cursor_col(), 2 + 2);
+        assert_eq!(composer.cursor_display_col(), 2);
     }
 
     #[test]
@@ -341,7 +411,8 @@ mod tests {
         assert_eq!(composer.row, 1);
         composer.move_down();
         assert_eq!(composer.row, 2);
-        composer.move_down();
+        let changed = composer.move_down();
+        assert!(!changed);
         assert_eq!(composer.row, 2);
     }
 
@@ -369,5 +440,46 @@ mod tests {
     fn placeholder_shows_when_empty() {
         let composer = Composer::default();
         assert!(composer.is_empty());
+    }
+
+    #[test]
+    fn move_returns_false_at_boundary() {
+        let mut composer = Composer::default();
+        assert!(!composer.move_left());
+        assert!(!composer.move_right());
+        assert!(!composer.move_up());
+        assert!(!composer.move_down());
+        assert!(!composer.move_home());
+        assert!(!composer.move_end());
+    }
+
+    #[test]
+    fn clear_saves_draft_to_history() {
+        let mut composer = Composer::default();
+        composer.insert_str("some draft");
+        composer.clear();
+        assert!(composer.is_empty());
+        composer.history_prev();
+        assert_eq!(composer.text(), "some draft");
+    }
+
+    #[test]
+    fn word_boundary_movement_skips_non_alnum() {
+        let mut composer = Composer::default();
+        composer.insert_str("hello_world foo");
+        composer.move_word_left();
+        assert_eq!(composer.col, 12);
+        composer.move_word_left();
+        assert_eq!(composer.col, 0);
+    }
+
+    #[test]
+    fn desired_height_wraps_long_line() {
+        let mut composer = Composer::default();
+        let long: String = "a".repeat(40);
+        composer.insert_str(&long);
+        let h_narrow = composer.desired_height(22);
+        let h_wide = composer.desired_height(80);
+        assert!(h_narrow > h_wide);
     }
 }

@@ -86,6 +86,10 @@ impl Theme {
         Style::new().fg(self.muted)
     }
 
+    pub fn key(self) -> Style {
+        Style::new().fg(self.fg).add_modifier(Modifier::BOLD)
+    }
+
     pub fn accent(self) -> Style {
         Style::new().fg(self.accent).add_modifier(Modifier::BOLD)
     }
@@ -117,15 +121,11 @@ impl Theme {
         Style::new().fg(self.error).add_modifier(Modifier::BOLD)
     }
 
-    pub fn code_bg(self) -> Style {
-        Style::new().bg(self.code.bg)
-    }
-
-    pub fn code_token(self, color: Color) -> Style {
-        Style::new().fg(color).bg(self.code.bg)
-    }
-
     pub fn code_plain(self) -> Style {
         Style::new().fg(self.fg).bg(self.code.bg)
+    }
+
+    pub fn fg_color(self) -> Color {
+        self.fg
     }
 }

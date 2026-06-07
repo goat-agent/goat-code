@@ -3,8 +3,6 @@ use std::fmt::Write as _;
 use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, path::resolve_in_cwd};
 use serde::Deserialize;
 
-const MAX_BYTES: usize = 256 * 1024;
-
 pub struct ReadTool;
 
 #[derive(Deserialize)]
@@ -48,9 +46,10 @@ impl Tool for ReadTool {
                     path: args.path.clone(),
                     source,
                 })?;
-            let truncated = bytes.len() > MAX_BYTES;
+            let max_bytes = ctx.max_output_bytes;
+            let truncated = bytes.len() > max_bytes;
             let slice = if truncated {
-                &bytes[..MAX_BYTES]
+                &bytes[..max_bytes]
             } else {
                 &bytes
             };
@@ -75,7 +74,7 @@ impl Tool for ReadTool {
             }
 
             if truncated {
-                out.push_str("\n[output truncated at 256 KiB]\n");
+                out.push_str("\n[output truncated]\n");
             }
             Ok(out)
         })
@@ -124,7 +123,7 @@ mod tests {
         std::fs::write(dir.path().join("big.txt"), &big).unwrap();
         let ctx = ctx(dir.path());
         let out = ReadTool.run(r#"{"path":"big.txt"}"#, &ctx).await.unwrap();
-        assert!(out.contains("[output truncated at 256 KiB]"));
+        assert!(out.contains("[output truncated]"));
     }
 
     #[tokio::test]

@@ -2,10 +2,10 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 
-use crate::{app::App, login::Login, picker::Picker, theme::Theme};
+use crate::{app::App, command::CommandMenu, login::Login, picker::Picker, theme::Theme};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
@@ -19,8 +19,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let [header, body, composer, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(app.composer_height()),
-        Constraint::Length(2),
+        Constraint::Length(app.composer_height(area.width)),
+        Constraint::Length(1),
     ])
     .areas(area);
 
@@ -29,29 +29,58 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let overlay_height = app
         .picker()
         .map(Picker::desired_height)
-        .or_else(|| app.login().map(Login::desired_height));
+        .or_else(|| app.login().map(Login::desired_height))
+        .or_else(|| app.command_menu().map(CommandMenu::desired_height));
 
     if let Some(height) = overlay_height {
         let height = height.min(body.height.saturating_sub(1)).max(1);
         let [transcript_area, panel] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).areas(body);
         app.clamp_scroll(transcript_area.height, transcript_area.width);
-        app.transcript()
-            .render(frame, transcript_area, theme, app.scroll());
+        app.transcript().render(
+            frame,
+            transcript_area,
+            theme,
+            app.scroll(),
+            app.spinner_frame(),
+        );
+        render_scrollbar(frame, transcript_area, app, theme);
         if let Some(picker) = app.picker() {
             picker.render(frame, panel, theme);
         }
         if let Some(login) = app.login() {
             login.render(frame, panel, theme);
         }
+        if let Some(menu) = app.command_menu() {
+            menu.render(frame, panel, theme);
+        }
         app.composer().render(frame, composer, theme, false);
     } else {
         app.clamp_scroll(body.height, body.width);
-        app.transcript().render(frame, body, theme, app.scroll());
+        app.transcript()
+            .render(frame, body, theme, app.scroll(), app.spinner_frame());
+        render_scrollbar(frame, body, app, theme);
         app.composer().render(frame, composer, theme, true);
     }
 
     render_footer(frame, footer, app, theme);
+}
+
+fn render_scrollbar(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+    let content_len = app.content_height(area.width);
+    if content_len <= area.height {
+        return;
+    }
+    let mut state = ScrollbarState::new(content_len as usize)
+        .position(app.scroll() as usize)
+        .viewport_content_length(area.height as usize);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_style(theme.muted())
+            .thumb_style(theme.accent()),
+        area,
+        &mut state,
+    );
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
@@ -60,7 +89,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         spans.push(Span::styled("  ·  ", theme.muted()));
         spans.push(Span::styled(
             format!("{}/{}", model.provider, model.model),
-            theme.muted(),
+            theme.key(),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -68,27 +97,33 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let line = if app.is_busy() {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(format!(" {} ", app.spinner_frame()), theme.accent()),
             Span::styled("Working…", theme.muted()),
-            Span::styled(" · ", theme.muted()),
-            Span::styled("⌃c", theme.muted()),
-            Span::styled(" interrupt", theme.muted()),
-        ])
+        ];
+        if let Some(secs) = app.elapsed_secs() {
+            spans.push(Span::styled(format!(" {secs}s"), theme.muted()));
+        }
+        spans.push(Span::styled(" · ", theme.muted()));
+        spans.push(Span::styled("⌃c", theme.key()));
+        spans.push(Span::styled(" interrupt", theme.muted()));
+        Line::from(spans)
     } else if app.quit_armed() {
-        Line::from(Span::styled(" ⌃c again to quit", theme.muted()))
+        Line::from(vec![
+            Span::styled(" ⌃c", theme.key()),
+            Span::styled(" again to quit", theme.muted()),
+        ])
     } else {
         Line::from(vec![
-            Span::styled(" ⇧↵", theme.muted()),
+            Span::styled(" ⇧↵", theme.key()),
             Span::styled(" newline", theme.muted()),
             Span::styled(" · ", theme.muted()),
-            Span::styled("↑↓", theme.muted()),
+            Span::styled("↑↓", theme.key()),
             Span::styled(" history", theme.muted()),
             Span::styled(" · ", theme.muted()),
-            Span::styled("⌃c", theme.muted()),
+            Span::styled("⌃c", theme.key()),
             Span::styled(" quit", theme.muted()),
         ])
     };
-    let row = Rect { height: 1, ..area };
-    frame.render_widget(Paragraph::new(line), row);
+    frame.render_widget(Paragraph::new(line), area);
 }

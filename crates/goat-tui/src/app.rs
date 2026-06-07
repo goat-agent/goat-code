@@ -11,6 +11,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
+    command::CommandMenu,
     composer::Composer,
     highlight::SyntectHighlighter,
     keymap,
@@ -51,6 +52,8 @@ pub struct App {
     picker: Option<Picker>,
     login: Option<Login>,
     login_providers: Vec<LoginProvider>,
+    command_menu: Option<CommandMenu>,
+    task_start: Option<std::time::Instant>,
 }
 
 impl App {
@@ -78,6 +81,8 @@ impl App {
             picker: None,
             login: None,
             login_providers: Vec::new(),
+            command_menu: None,
+            task_start: None,
         }
     }
 
@@ -109,6 +114,7 @@ impl App {
                     login.insert_str(&text);
                 } else {
                     self.composer.insert_str(&text);
+                    self.update_command_menu();
                 }
                 self.dirty = true;
                 Vec::new()
@@ -153,30 +159,81 @@ impl App {
         if self.login.is_some() {
             return self.on_login_key(key);
         }
+        if self.command_menu.is_some()
+            && let Some(result) = self.on_command_menu_key(key)
+        {
+            return result;
+        }
         if let Some(ch) = keymap::ctrl_key(&key) {
             if ch == 'c' {
                 return self.on_ctrl_c();
             }
             self.quit_arm = None;
-            self.dirty = true;
             match ch {
-                'a' => self.composer.move_home(),
-                'e' => self.composer.move_end(),
-                'w' => self.composer.delete_word_before(),
+                'a' => {
+                    self.dirty |= self.composer.move_home();
+                }
+                'e' => {
+                    self.dirty |= self.composer.move_end();
+                }
+                'w' => {
+                    self.composer.delete_word_before();
+                    self.update_command_menu();
+                    self.dirty = true;
+                }
                 _ => {}
             }
             return Vec::new();
         }
         self.quit_arm = None;
+        self.on_normal_key(key)
+    }
+
+    fn on_command_menu_key(&mut self, key: KeyEvent) -> Option<Vec<Op>> {
         self.dirty = true;
+        match key.code {
+            KeyCode::Tab => {
+                if let Some(menu) = &self.command_menu
+                    && let Some(name) = menu.selected_name()
+                {
+                    let completed = format!("{name} ");
+                    self.composer.clear();
+                    self.composer.insert_str(&completed);
+                }
+                self.command_menu = None;
+                Some(Vec::new())
+            }
+            KeyCode::Esc => {
+                self.command_menu = None;
+                Some(Vec::new())
+            }
+            KeyCode::Up if self.composer.on_first_row() => {
+                if let Some(menu) = &mut self.command_menu {
+                    menu.move_up();
+                }
+                Some(Vec::new())
+            }
+            KeyCode::Down if self.composer.on_last_row() => {
+                if let Some(menu) = &mut self.command_menu {
+                    menu.move_down();
+                }
+                Some(Vec::new())
+            }
+            _ => None,
+        }
+    }
+
+    fn on_normal_key(&mut self, key: KeyEvent) -> Vec<Op> {
         match key.code {
             KeyCode::PageUp => {
                 self.follow = false;
                 self.scroll = self.scroll.saturating_sub(10);
+                self.dirty = true;
                 Vec::new()
             }
             KeyCode::PageDown => {
                 self.scroll = self.scroll.saturating_add(10);
+                self.dirty = true;
                 Vec::new()
             }
             KeyCode::Enter
@@ -185,66 +242,96 @@ impl App {
                     .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
             {
                 self.composer.newline();
+                self.dirty = true;
                 Vec::new()
             }
-            KeyCode::Enter => self.submit(),
+            KeyCode::Enter => {
+                self.command_menu = None;
+                self.dirty = true;
+                self.submit()
+            }
             KeyCode::Backspace => {
                 self.composer.backspace();
+                self.update_command_menu();
+                self.dirty = true;
                 Vec::new()
             }
             KeyCode::Delete => {
                 self.composer.delete_forward();
+                self.update_command_menu();
+                self.dirty = true;
                 Vec::new()
             }
             KeyCode::Left => {
-                if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.composer.move_word_left();
+                let changed = if key.modifiers.contains(KeyModifiers::ALT) {
+                    self.composer.move_word_left()
                 } else {
-                    self.composer.move_left();
-                }
+                    self.composer.move_left()
+                };
+                self.dirty |= changed;
                 Vec::new()
             }
             KeyCode::Right => {
-                if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.composer.move_word_right();
+                let changed = if key.modifiers.contains(KeyModifiers::ALT) {
+                    self.composer.move_word_right()
                 } else {
-                    self.composer.move_right();
-                }
+                    self.composer.move_right()
+                };
+                self.dirty |= changed;
                 Vec::new()
             }
             KeyCode::Home => {
-                self.composer.move_home();
+                self.dirty |= self.composer.move_home();
                 Vec::new()
             }
             KeyCode::End => {
-                self.composer.move_end();
+                self.dirty |= self.composer.move_end();
                 Vec::new()
             }
             KeyCode::Up => {
                 if self.composer.on_first_row() {
                     self.composer.history_prev();
+                    self.dirty = true;
                 } else {
-                    self.composer.move_up();
+                    self.dirty |= self.composer.move_up();
                 }
                 Vec::new()
             }
             KeyCode::Down => {
                 if self.composer.on_last_row() {
                     self.composer.history_next();
+                    self.dirty = true;
                 } else {
-                    self.composer.move_down();
+                    self.dirty |= self.composer.move_down();
                 }
                 Vec::new()
             }
             KeyCode::Esc => {
+                self.command_menu = None;
                 self.composer.clear();
+                self.dirty = true;
                 Vec::new()
             }
             KeyCode::Char(c) => {
                 self.composer.insert_char(c);
+                self.update_command_menu();
+                self.dirty = true;
                 Vec::new()
             }
             _ => Vec::new(),
+        }
+    }
+
+    fn update_command_menu(&mut self) {
+        let text = self.composer.peek_text();
+        let trimmed = text.trim_start();
+        if trimmed.starts_with('/') && !trimmed.contains(' ') {
+            match &mut self.command_menu {
+                Some(menu) => menu.update(trimmed),
+                None => self.command_menu = Some(CommandMenu::new(trimmed)),
+            }
+        } else {
+            self.command_menu = None;
         }
     }
 
@@ -364,19 +451,30 @@ impl App {
         if trimmed.is_empty() {
             return Vec::new();
         }
-        if trimmed == "/model" {
-            self.picker = Some(Picker::new(self.models.clone()));
-            self.dirty = true;
-            return Vec::new();
-        }
-        if trimmed == "/login" {
-            self.login = Some(Login::new(self.login_providers.clone()));
-            self.dirty = true;
-            return Vec::new();
-        }
         if trimmed.starts_with('/') {
-            self.dirty = true;
-            return Vec::new();
+            match trimmed {
+                "/model" => {
+                    self.picker = Some(Picker::new(self.models.clone()));
+                    self.dirty = true;
+                    return Vec::new();
+                }
+                "/login" => {
+                    self.login = Some(Login::new(self.login_providers.clone()));
+                    self.dirty = true;
+                    return Vec::new();
+                }
+                "/help" => {
+                    self.transcript.push_notice(crate::command::help_text());
+                    self.dirty = true;
+                    return Vec::new();
+                }
+                _ => {
+                    self.transcript
+                        .push_error(format!("unknown command: {trimmed}"));
+                    self.dirty = true;
+                    return Vec::new();
+                }
+            }
         }
         let id = TaskId(self.next_task);
         self.next_task += 1;
@@ -388,7 +486,9 @@ impl App {
 
     fn on_engine(&mut self, event: EngineEvent) {
         match event {
-            EngineEvent::TaskStarted { .. } => {}
+            EngineEvent::TaskStarted { .. } => {
+                self.task_start = Some(std::time::Instant::now());
+            }
             EngineEvent::ModelListChanged { entries } => {
                 if let Some(picker) = &mut self.picker {
                     picker.set_entries(entries.clone());
@@ -424,10 +524,12 @@ impl App {
                 self.transcript
                     .complete(interrupted, &self.highlighter, self.theme);
                 self.active = None;
+                self.task_start = None;
             }
             EngineEvent::Error { message, .. } => {
                 self.transcript.push_error(message);
                 self.active = None;
+                self.task_start = None;
             }
         }
         if self.follow {
@@ -457,8 +559,12 @@ impl App {
     pub(crate) fn composer(&self) -> &Composer {
         &self.composer
     }
-    pub(crate) fn composer_height(&self) -> u16 {
-        self.composer.desired_height()
+    pub(crate) fn composer_height(&self, available_width: u16) -> u16 {
+        self.composer.desired_height(available_width)
+    }
+
+    pub(crate) fn elapsed_secs(&self) -> Option<u64> {
+        self.task_start.map(|t| t.elapsed().as_secs())
     }
     pub(crate) fn is_busy(&self) -> bool {
         self.active.is_some()
@@ -472,6 +578,10 @@ impl App {
     pub(crate) fn spinner_frame(&self) -> &'static str {
         SPINNER[self.spinner % SPINNER.len()]
     }
+
+    pub(crate) fn content_height(&self, width: u16) -> u16 {
+        self.transcript.content_height(width, self.theme)
+    }
     pub(crate) fn scroll(&self) -> u16 {
         self.scroll
     }
@@ -480,6 +590,9 @@ impl App {
     }
     pub(crate) fn login(&self) -> Option<&Login> {
         self.login.as_ref()
+    }
+    pub(crate) fn command_menu(&self) -> Option<&CommandMenu> {
+        self.command_menu.as_ref()
     }
     pub(crate) fn current_model(&self) -> Option<&ModelTarget> {
         self.model.as_ref()
@@ -756,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_slash_command_is_ignored() {
+    fn unknown_slash_command_pushes_error() {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("/bogus");
         let ops = app.submit();
@@ -764,5 +877,24 @@ mod tests {
         assert!(app.picker.is_none());
         assert!(app.login.is_none());
         assert!(app.active.is_none());
+        assert_eq!(app.transcript.items.len(), 1);
+        assert!(matches!(
+            &app.transcript.items[0],
+            crate::transcript::Item::Error(_)
+        ));
+    }
+
+    #[test]
+    fn slash_help_pushes_notice() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("/help");
+        let ops = app.submit();
+        assert!(ops.is_empty());
+        assert!(app.active.is_none());
+        assert_eq!(app.transcript.items.len(), 1);
+        assert!(matches!(
+            &app.transcript.items[0],
+            crate::transcript::Item::Notice(_)
+        ));
     }
 }

@@ -33,6 +33,15 @@ impl OpenAiCompatProvider {
             client: reqwest::Client::new(),
         }
     }
+
+    pub fn local(provider_id: &'static str, base_url: &'static str) -> Self {
+        Self::new(
+            ProviderId::from(provider_id),
+            base_url,
+            None,
+            AuthMethod::None,
+        )
+    }
 }
 
 #[derive(Serialize)]

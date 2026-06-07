@@ -19,10 +19,7 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     match cli.command {
-        Some(Command::Update) => {
-            update::run();
-            Ok(())
-        }
+        Some(Command::Update) => update::run().await,
         Some(Command::Auth(command)) => auth::run(command).await,
         None => run_tui().await,
     }
@@ -39,15 +36,17 @@ async fn run_tui() -> color_eyre::Result<()> {
     };
 
     let auth_path = goat_config::auth_path()
-        .ok_or_else(|| color_eyre::eyre::eyre!("could not resolve ~/.goat-code"))?;
+        .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
     let db_path = goat_config::db_path()
-        .ok_or_else(|| color_eyre::eyre::eyre!("could not resolve ~/.goat-code"))?;
+        .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
     let credentials = goat_auth::CredentialStore::new(auth_path);
     let store = goat_store::Store::open(&db_path)?;
     let registry = goat_providers::Registry::builtin(&credentials);
     let agent = goat_agent::GoatAgent::new(registry, store, credentials, None);
 
     let session = goat_core::Session::spawn(agent);
-    let (ops, events, _handle) = session.into_parts();
-    goat_tui::run(ops, events, theme).await
+    let (ops, events, handle) = session.into_parts();
+    goat_tui::run(ops, events, theme).await?;
+    handle.await.ok();
+    Ok(())
 }
