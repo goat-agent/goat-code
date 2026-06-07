@@ -46,14 +46,7 @@ impl Tool for ReadTool {
                     path: args.path.clone(),
                     source,
                 })?;
-            let max_bytes = ctx.max_output_bytes;
-            let truncated = bytes.len() > max_bytes;
-            let slice = if truncated {
-                &bytes[..max_bytes]
-            } else {
-                &bytes
-            };
-            let text = String::from_utf8_lossy(slice);
+            let text = String::from_utf8_lossy(&bytes);
 
             let start = args.offset.unwrap_or(1).max(1);
             let mut out = String::new();
@@ -73,7 +66,10 @@ impl Tool for ReadTool {
                 emitted += 1;
             }
 
-            if truncated {
+            let max_bytes = ctx.max_output_bytes;
+            if out.len() > max_bytes {
+                let boundary = out.floor_char_boundary(max_bytes);
+                out.truncate(boundary);
                 out.push_str("\n[output truncated]\n");
             }
             Ok(out)
@@ -83,6 +79,8 @@ impl Tool for ReadTool {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::ReadTool;
     use goat_tool::{Tool, ToolContext, ToolError};
 
@@ -132,5 +130,24 @@ mod tests {
         let ctx = ctx(dir.path());
         let result = ReadTool.run(r#"{"path":"nope.txt"}"#, &ctx).await;
         assert!(matches!(result, Err(ToolError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn large_file_offset_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let content: String = (1..=200).fold(String::new(), |mut s, i| {
+            let _ = writeln!(s, "line {i}");
+            s
+        });
+        std::fs::write(dir.path().join("big.txt"), &content).unwrap();
+        let ctx = ctx(dir.path());
+        let out = ReadTool
+            .run(r#"{"path":"big.txt","offset":100,"limit":5}"#, &ctx)
+            .await
+            .unwrap();
+        assert!(out.contains("   100\tline 100"));
+        assert!(out.contains("   104\tline 104"));
+        assert!(!out.contains("     1\tline 1"));
+        assert!(!out.contains("   105\tline 105"));
     }
 }
