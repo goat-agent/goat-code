@@ -1,6 +1,11 @@
 use std::{
     collections::HashSet,
     fmt::Write as _,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,15 +17,27 @@ use goat_protocol::{
     ToolCall, ToolCallId, ToolOutcome, TranscriptEntry,
 };
 use goat_provider::{
-    ContentBlock, MessageRole, ModelEvent, ModelRequest, ProviderMessage, ToolDefinition,
+    ContentBlock, MessageRole, ModelEvent, ModelProvider, ModelRequest, ProviderMessage,
+    ToolDefinition,
 };
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
-use goat_store::{NewMessage, NewThread, NewTurn, Store};
-use goat_tool::{ToolContext, outcome_from};
+use goat_store::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
+use goat_tool::ToolContext;
 use goat_tools::ToolRegistry;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{Semaphore, mpsc},
+    task::JoinHandle,
+};
+use tokio_util::sync::CancellationToken;
+
+mod agent;
+
+pub use agent::{AgentRegistry, AgentSpec, ToolSelection};
 
 const MAX_TOOL_ROUNDS: usize = 20;
+const MAX_CONCURRENT_AGENTS: usize = 8;
+const AGENT_TOOL_NAME: &str = "Agent";
+const CHILD_ID_BASE: u64 = 1 << 32;
 const SYSTEM_PROMPT: &str = "You are Goat, an expert software engineering assistant. You help users understand, build, and improve software by reading code, running tools, and providing accurate, actionable guidance. When using tools, prefer targeted reads and searches over broad exploration. Always verify your understanding before making changes.";
 
 fn build_system_prompt(skills: &[SkillInfo]) -> String {
@@ -82,9 +99,12 @@ struct Ctx<'a> {
     registry: &'a Registry,
     credentials: &'a CredentialStore,
     tools: &'a ToolRegistry,
+    agents: &'a AgentRegistry,
     store: &'a Store,
     events: &'a mpsc::Sender<Event>,
     skills: &'a [SkillInfo],
+    semaphore: &'a Arc<Semaphore>,
+    child_ids: &'a AtomicU64,
 }
 
 enum Flow {
@@ -92,11 +112,56 @@ enum Flow {
     Shutdown,
 }
 
+struct TurnIds {
+    stored_thread: Option<i64>,
+    turn_db_id: Option<i64>,
+}
+
+enum Report<'a> {
+    Top(&'a TurnIds),
+    Child,
+}
+
+struct Run<'a> {
+    id: TaskId,
+    report: Report<'a>,
+}
+
+impl<'a> Run<'a> {
+    fn top(id: TaskId, ids: &'a TurnIds) -> Self {
+        Self {
+            id,
+            report: Report::Top(ids),
+        }
+    }
+
+    fn child(id: TaskId) -> Self {
+        Self {
+            id,
+            report: Report::Child,
+        }
+    }
+
+    fn ids(&self) -> Option<&TurnIds> {
+        match &self.report {
+            Report::Top(ids) => Some(ids),
+            Report::Child => None,
+        }
+    }
+}
+
+struct LoopEnv<'a> {
+    provider: &'a dyn ModelProvider,
+    target: &'a ModelTarget,
+    tool_defs: &'a [ToolDefinition],
+    cwd: &'a Path,
+    allow_delegate: bool,
+}
+
 enum RoundEnd {
     Completed,
-    Interrupted,
+    Cancelled,
     Failed(String),
-    ShuttingDown,
 }
 
 struct RoundResult {
@@ -107,25 +172,17 @@ struct RoundResult {
     pending_calls: Vec<(String, String, String)>,
 }
 
-enum ToolResult {
-    Done(Result<String, goat_tool::ToolError>),
-    Interrupted,
-    ShuttingDown,
-}
-
 struct ToolExecResult {
     result_content: ContentBlock,
-    interrupted: bool,
-    shutting_down: bool,
+    cancelled: bool,
 }
 
 struct ToolBatchResult {
     tool_results: Vec<ContentBlock>,
-    interrupted_at: Option<usize>,
-    shutting_down: bool,
+    cancelled: bool,
 }
 
-struct ToolCallSpec<'a> {
+struct Prepared<'a> {
     vendor_id: &'a str,
     name: &'a str,
     input_json: &'a str,
@@ -133,23 +190,23 @@ struct ToolCallSpec<'a> {
     db_id: Option<i64>,
 }
 
-struct TurnIds {
-    stored_thread: Option<i64>,
-    turn_db_id: Option<i64>,
-}
-
 enum RoundOutcome {
-    Done(RoundEnd),
+    Done,
     Continue,
-    Shutdown,
+    Cancelled,
 }
 
-struct RoundState<'a> {
-    ids: &'a TurnIds,
-    rounds: usize,
-    cwd: &'a std::path::Path,
-    call_seq: &'a mut u64,
-    deferred: &'a mut Vec<Op>,
+enum LoopOutcome {
+    Completed,
+    Cancelled,
+    Failed(String),
+}
+
+enum TurnEnd {
+    Done,
+    Interrupted,
+    Failed(String),
+    Shutdown,
 }
 
 fn now_ms() -> i64 {
@@ -224,6 +281,7 @@ async fn handle_remove_account(
     emit_accounts_changed(events, registry, credentials).await;
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender<Event>) {
     let GoatAgent {
         mut registry,
@@ -240,7 +298,11 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     }
     announce_startup(&events, &registry, &credentials, target.as_ref()).await;
 
-    let skills = load_skill_infos(&std::env::current_dir().unwrap_or_default());
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let skills = load_skill_infos(&cwd);
+    let agents = AgentRegistry::load(&cwd);
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_AGENTS));
+    let child_ids = AtomicU64::new(CHILD_ID_BASE);
     let _ = events
         .send(Event::SkillsChanged {
             skills: skills.clone(),
@@ -254,9 +316,12 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     registry: &registry,
                     credentials: &credentials,
                     tools: &tools,
+                    agents: &agents,
                     store: &store,
                     events: &events,
                     skills: &skills,
+                    semaphore: &semaphore,
+                    child_ids: &child_ids,
                 };
                 if let Flow::Shutdown = handle_turn(
                     &ctx,
@@ -646,12 +711,11 @@ async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> V
 }
 
 async fn run_round(
-    id: TaskId,
-    provider: &dyn goat_provider::ModelProvider,
+    ctx: &Ctx<'_>,
+    run: &Run<'_>,
+    provider: &dyn ModelProvider,
     request: ModelRequest,
-    ops: &mut mpsc::Receiver<Op>,
-    events: &mpsc::Sender<Event>,
-    deferred: &mut Vec<Op>,
+    token: &CancellationToken,
 ) -> RoundResult {
     let (mev_tx, mut mev_rx) = mpsc::channel(64);
     let handle = provider.request(request, mev_tx);
@@ -663,28 +727,24 @@ async fn run_round(
     let end = loop {
         tokio::select! {
             biased;
-            maybe_op = ops.recv() => match maybe_op {
-                Some(Op::Interrupt { .. }) => { handle.abort(); break RoundEnd::Interrupted; }
-                Some(Op::Shutdown) | None => {
-                    handle.abort();
-                    break RoundEnd::ShuttingDown;
-                }
-                Some(op) => { deferred.push(op); }
-            },
+            () = token.cancelled() => {
+                handle.abort();
+                break RoundEnd::Cancelled;
+            }
             maybe_event = mev_rx.recv() => match maybe_event {
                 Some(ModelEvent::TextDelta { text }) => {
                     raw.push_str(&text);
-                    if events.send(Event::TextDelta { id, chunk: text }).await.is_err() {
-                        handle.abort();
-                        break RoundEnd::ShuttingDown;
-                    }
+                    let _ = ctx
+                        .events
+                        .send(Event::TextDelta { id: run.id, chunk: text })
+                        .await;
                 }
                 Some(ModelEvent::ThinkingDelta { text }) => {
                     thinking.push_str(&text);
-                    if events.send(Event::ThinkingDelta { id, chunk: text }).await.is_err() {
-                        handle.abort();
-                        break RoundEnd::ShuttingDown;
-                    }
+                    let _ = ctx
+                        .events
+                        .send(Event::ThinkingDelta { id: run.id, chunk: text })
+                        .await;
                 }
                 Some(ModelEvent::ThinkingSignature { signature: sig }) => {
                     signature.push_str(&sig);
@@ -710,76 +770,102 @@ async fn run_round(
     }
 }
 
-async fn finish_tool_interrupted(
-    ctx: &Ctx<'_>,
-    id: TaskId,
-    vendor_id: &str,
-    tui_id: u64,
-    db_id: Option<i64>,
-) -> ContentBlock {
-    if let Some(db) = db_id
-        && let Err(err) = ctx
-            .store
-            .finish_tool_call(
-                db,
-                "interrupted".to_owned(),
-                Some("interrupted".to_owned()),
-                now_ms(),
-            )
-            .await
-    {
-        tracing::warn!(%err, "failed to finish tool call");
-    }
-    let _ = ctx
-        .events
-        .send(Event::ToolDone {
-            id,
-            call: ToolCallId(tui_id),
-            outcome: goat_protocol::ToolOutcome {
-                ok: false,
-                summary: Some("interrupted".to_owned()),
+fn tool_outcome(result: &Result<String, String>) -> (ToolOutcome, String) {
+    match result {
+        Ok(text) => (
+            ToolOutcome {
+                ok: true,
+                summary: summarize_line(text),
             },
-        })
-        .await;
-    ContentBlock::ToolResult {
-        tool_use_id: vendor_id.to_owned(),
-        content: "interrupted".to_owned(),
-        is_error: true,
+            text.clone(),
+        ),
+        Err(message) => (
+            ToolOutcome {
+                ok: false,
+                summary: Some(message.clone()),
+            },
+            message.clone(),
+        ),
     }
 }
 
-async fn finish_tool_success(
+fn summarize_line(text: &str) -> Option<String> {
+    text.lines().next().map(|line| {
+        if line.chars().count() > 80 {
+            let head: String = line.chars().take(80).collect();
+            format!("{head}…")
+        } else {
+            line.to_owned()
+        }
+    })
+}
+
+async fn create_tool_call_record(
     ctx: &Ctx<'_>,
-    id: TaskId,
+    ids: &TurnIds,
     vendor_id: &str,
-    tui_id: u64,
-    db_id: Option<i64>,
-    result: &Result<String, goat_tool::ToolError>,
-) -> ContentBlock {
-    let (outcome, result_text) = outcome_from(result);
-    if let Some(db) = db_id {
-        let status = if outcome.ok { "done" } else { "error" }.to_owned();
-        if let Err(err) = ctx
-            .store
-            .finish_tool_call(db, status, outcome.summary.clone(), now_ms())
-            .await
-        {
-            tracing::warn!(%err, "failed to finish tool call");
+    name: &str,
+    input_json: &str,
+) -> Option<i64> {
+    let (Some(tid), Some(turn)) = (ids.stored_thread, ids.turn_db_id) else {
+        return None;
+    };
+    match ctx
+        .store
+        .create_tool_call(NewToolCall {
+            thread_id: tid,
+            turn_id: turn,
+            call_id: vendor_id.to_owned(),
+            name: name.to_owned(),
+            input: input_json.to_owned(),
+            status: "running".to_owned(),
+            started_at: now_ms(),
+        })
+        .await
+    {
+        Ok(id) => Some(id),
+        Err(err) => {
+            tracing::warn!(%err, "failed to create tool call record");
+            None
         }
     }
-    let is_error = !outcome.ok;
-    let _ = ctx
-        .events
-        .send(Event::ToolDone {
-            id,
-            call: ToolCallId(tui_id),
-            outcome,
-        })
-        .await;
-    ContentBlock::ToolResult {
-        tool_use_id: vendor_id.to_owned(),
-        content: cap_tool_result(result_text),
-        is_error,
+}
+
+async fn finish_tool_db(ctx: &Ctx<'_>, db_id: Option<i64>, outcome: &ToolOutcome) {
+    let Some(db) = db_id else {
+        return;
+    };
+    let status = if outcome.ok { "done" } else { "error" }.to_owned();
+    if let Err(err) = ctx
+        .store
+        .finish_tool_call(db, status, outcome.summary.clone(), now_ms())
+        .await
+    {
+        tracing::warn!(%err, "failed to finish tool call");
+    }
+}
+
+async fn run_regular_tool(
+    ctx: &Ctx<'_>,
+    name: &str,
+    input_json: &str,
+    tool_ctx: &ToolContext,
+    token: &CancellationToken,
+) -> Option<Result<String, String>> {
+    let fut = async {
+        match ctx.tools.get(name) {
+            Some(tool) => tool
+                .run(input_json, tool_ctx)
+                .await
+                .map_err(|err| err.to_string()),
+            None => Err(format!("unknown tool: {name}")),
+        }
+    };
+    let mut fut = std::pin::pin!(fut);
+    tokio::select! {
+        biased;
+        () = token.cancelled() => None,
+        result = &mut fut => Some(result),
     }
 }
 
@@ -796,151 +882,119 @@ fn cap_tool_result(mut content: String) -> String {
 
 async fn execute_tool(
     ctx: &Ctx<'_>,
-    id: TaskId,
-    spec: ToolCallSpec<'_>,
+    run: &Run<'_>,
+    env: &LoopEnv<'_>,
+    prep: &Prepared<'_>,
     tool_ctx: &ToolContext,
-    ops: &mut mpsc::Receiver<Op>,
-    deferred: &mut Vec<Op>,
+    token: &CancellationToken,
 ) -> ToolExecResult {
-    let ToolCallSpec {
-        vendor_id,
-        name,
-        input_json,
-        tui_id,
-        db_id,
-    } = spec;
-    let run_fut = async {
-        match ctx.tools.get(name) {
-            Some(tool) => tool.run(input_json, tool_ctx).await,
-            None => Err(goat_tool::ToolError::UnknownTool {
-                name: name.to_owned(),
-            }),
+    let step = if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
+        match ctx.semaphore.acquire().await {
+            Ok(_permit) if !token.is_cancelled() => {
+                Some(run_delegation(ctx, env, prep.input_json, run.id, token).await)
+            }
+            _ => None,
         }
+    } else {
+        run_regular_tool(ctx, prep.name, prep.input_json, tool_ctx, token).await
     };
-    let mut run_fut = std::pin::pin!(run_fut);
-    let tool_result = loop {
-        tokio::select! {
-            biased;
-            maybe_op = ops.recv() => match maybe_op {
-                Some(Op::Interrupt { id: task_id }) if task_id == id => break ToolResult::Interrupted,
-                Some(Op::Shutdown) | None => break ToolResult::ShuttingDown,
-                Some(op) => { deferred.push(op); }
-            },
-            r = &mut run_fut => break ToolResult::Done(r),
-        }
-    };
-    match tool_result {
-        ToolResult::ShuttingDown => ToolExecResult {
+    let Some(result) = step else {
+        let outcome = ToolOutcome {
+            ok: false,
+            summary: Some("interrupted".to_owned()),
+        };
+        finish_tool_db(ctx, prep.db_id, &outcome).await;
+        let _ = ctx
+            .events
+            .send(Event::ToolDone {
+                id: run.id,
+                call: ToolCallId(prep.tui_id),
+                outcome,
+            })
+            .await;
+        return ToolExecResult {
             result_content: ContentBlock::ToolResult {
-                tool_use_id: vendor_id.to_owned(),
-                content: "shutdown".to_owned(),
+                tool_use_id: prep.vendor_id.to_owned(),
+                content: "interrupted".to_owned(),
                 is_error: true,
             },
-            interrupted: false,
-            shutting_down: true,
+            cancelled: true,
+        };
+    };
+    let (outcome, result_text) = tool_outcome(&result);
+    finish_tool_db(ctx, prep.db_id, &outcome).await;
+    let is_error = !outcome.ok;
+    let _ = ctx
+        .events
+        .send(Event::ToolDone {
+            id: run.id,
+            call: ToolCallId(prep.tui_id),
+            outcome,
+        })
+        .await;
+    ToolExecResult {
+        result_content: ContentBlock::ToolResult {
+            tool_use_id: prep.vendor_id.to_owned(),
+            content: cap_tool_result(result_text),
+            is_error,
         },
-        ToolResult::Interrupted => {
-            let block = finish_tool_interrupted(ctx, id, vendor_id, tui_id, db_id).await;
-            ToolExecResult {
-                result_content: block,
-                interrupted: true,
-                shutting_down: false,
-            }
-        }
-        ToolResult::Done(result) => {
-            let block = finish_tool_success(ctx, id, vendor_id, tui_id, db_id, &result).await;
-            ToolExecResult {
-                result_content: block,
-                interrupted: false,
-                shutting_down: false,
-            }
-        }
+        cancelled: false,
     }
 }
 
 async fn run_tool_batch(
     ctx: &Ctx<'_>,
-    id: TaskId,
+    run: &Run<'_>,
+    env: &LoopEnv<'_>,
     pending_calls: &[(String, String, String)],
-    state: &mut RoundState<'_>,
+    call_seq: &mut u64,
     tool_ctx: &ToolContext,
-    ops: &mut mpsc::Receiver<Op>,
+    token: &CancellationToken,
 ) -> ToolBatchResult {
-    let mut tool_results: Vec<ContentBlock> = Vec::new();
-    let mut interrupted_at: Option<usize> = None;
-    for (index, (vendor_id, name, input_json)) in pending_calls.iter().enumerate() {
-        *state.call_seq += 1;
-        let tui_id = *state.call_seq;
+    let mut prepared: Vec<Prepared> = Vec::with_capacity(pending_calls.len());
+    for (vendor_id, name, input_json) in pending_calls {
+        *call_seq += 1;
+        let tui_id = *call_seq;
         let _ = ctx
             .events
             .send(Event::ToolStarted {
-                id,
-                call: goat_protocol::ToolCall {
+                id: run.id,
+                call: ToolCall {
                     id: ToolCallId(tui_id),
                     name: name.clone(),
                     input: input_json.clone(),
                 },
             })
             .await;
-        let db_id = if let (Some(tid), Some(turn)) = (state.ids.stored_thread, state.ids.turn_db_id)
-        {
-            match ctx
-                .store
-                .create_tool_call(goat_store::NewToolCall {
-                    thread_id: tid,
-                    turn_id: turn,
-                    call_id: vendor_id.clone(),
-                    name: name.clone(),
-                    input: input_json.clone(),
-                    status: "running".to_owned(),
-                    started_at: now_ms(),
-                })
-                .await
-            {
-                Ok(id) => Some(id),
-                Err(err) => {
-                    tracing::warn!(%err, "failed to create tool call record");
-                    None
-                }
-            }
-        } else {
-            None
+        let db_id = match run.ids() {
+            Some(ids) => create_tool_call_record(ctx, ids, vendor_id, name, input_json).await,
+            None => None,
         };
-        let spec = ToolCallSpec {
-            vendor_id,
-            name,
-            input_json,
+        prepared.push(Prepared {
+            vendor_id: vendor_id.as_str(),
+            name: name.as_str(),
+            input_json: input_json.as_str(),
             tui_id,
             db_id,
-        };
-        let exec = execute_tool(ctx, id, spec, tool_ctx, ops, state.deferred).await;
-        if exec.shutting_down {
-            return ToolBatchResult {
-                tool_results,
-                interrupted_at,
-                shutting_down: true,
-            };
-        }
-        if exec.interrupted {
-            interrupted_at = Some(index);
-            tool_results.push(exec.result_content);
-            break;
-        }
-        tool_results.push(exec.result_content);
+        });
     }
-    if let Some(index) = interrupted_at {
-        for (vendor_id, _, _) in pending_calls.iter().skip(index + 1) {
-            tool_results.push(ContentBlock::ToolResult {
-                tool_use_id: vendor_id.clone(),
-                content: "interrupted".to_owned(),
-                is_error: true,
-            });
+    let results = futures::future::join_all(
+        prepared
+            .iter()
+            .map(|prep| execute_tool(ctx, run, env, prep, tool_ctx, token)),
+    )
+    .await;
+    let mut tool_results = Vec::with_capacity(results.len());
+    let mut cancelled = false;
+    for result in results {
+        if result.cancelled {
+            cancelled = true;
         }
+        tool_results.push(result.result_content);
     }
     ToolBatchResult {
         tool_results,
-        interrupted_at,
-        shutting_down: false,
+        cancelled,
     }
 }
 
@@ -1066,9 +1120,9 @@ async fn persist_message(ctx: &Ctx<'_>, ids: &TurnIds, message: &ProviderMessage
     }
 }
 
-async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &RoundEnd, ids: &TurnIds) {
+async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &TurnEnd, ids: &TurnIds) {
     match outcome {
-        RoundEnd::Completed => {
+        TurnEnd::Done => {
             if let Some(turn) = ids.turn_db_id
                 && let Err(err) = ctx
                     .store
@@ -1085,7 +1139,7 @@ async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &RoundEnd, ids: &Turn
                 })
                 .await;
         }
-        RoundEnd::Interrupted => {
+        TurnEnd::Interrupted => {
             if let Some(turn) = ids.turn_db_id
                 && let Err(err) = ctx
                     .store
@@ -1102,7 +1156,7 @@ async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &RoundEnd, ids: &Turn
                 })
                 .await;
         }
-        RoundEnd::Failed(message) => {
+        TurnEnd::Failed(message) => {
             let _ = ctx
                 .events
                 .send(Event::Error {
@@ -1126,17 +1180,21 @@ async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &RoundEnd, ids: &Turn
                 })
                 .await;
         }
-        RoundEnd::ShuttingDown => {}
+        TurnEnd::Shutdown => {}
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_round_output(
     ctx: &Ctx<'_>,
-    id: TaskId,
+    run: &Run<'_>,
+    env: &LoopEnv<'_>,
     round: RoundResult,
     history: &mut Vec<ProviderMessage>,
-    state: &mut RoundState<'_>,
-    ops: &mut mpsc::Receiver<Op>,
+    rounds: usize,
+    call_seq: &mut u64,
+    tool_ctx: &ToolContext,
+    token: &CancellationToken,
 ) -> RoundOutcome {
     let raw = round.raw;
     let pending_calls = round.pending_calls;
@@ -1171,17 +1229,25 @@ async fn process_round_output(
             role: MessageRole::Assistant,
             content,
         };
-        persist_message(ctx, state.ids, &message).await;
+        if let Some(ids) = run.ids() {
+            persist_message(ctx, ids, &message).await;
+        }
         history.push(message);
     }
     if pending_calls.is_empty() {
         if let Some(shown) = shown_text {
-            let _ = ctx.events.send(Event::TextDone { id, text: shown }).await;
+            let _ = ctx
+                .events
+                .send(Event::TextDone {
+                    id: run.id,
+                    text: shown,
+                })
+                .await;
         }
-        return RoundOutcome::Done(RoundEnd::Completed);
+        return RoundOutcome::Done;
     }
-    if state.rounds >= MAX_TOOL_ROUNDS {
-        tracing::warn!(state.rounds, "tool round cap reached; ending turn");
+    if rounds >= MAX_TOOL_ROUNDS {
+        tracing::warn!(rounds, "tool round cap reached; ending run");
         let synthetic: Vec<ContentBlock> = pending_calls
             .iter()
             .map(|(vendor_id, _, _)| ContentBlock::ToolResult {
@@ -1194,29 +1260,32 @@ async fn process_round_output(
             role: MessageRole::User,
             content: synthetic,
         };
-        persist_message(ctx, state.ids, &message).await;
+        if let Some(ids) = run.ids() {
+            persist_message(ctx, ids, &message).await;
+        }
         history.push(message);
         if let Some(shown) = shown_text {
-            let _ = ctx.events.send(Event::TextDone { id, text: shown }).await;
+            let _ = ctx
+                .events
+                .send(Event::TextDone {
+                    id: run.id,
+                    text: shown,
+                })
+                .await;
         }
-        return RoundOutcome::Done(RoundEnd::Completed);
+        return RoundOutcome::Done;
     }
-    let tool_ctx = match ToolContext::new(state.cwd) {
-        Ok(tool_ctx) => tool_ctx,
-        Err(err) => return RoundOutcome::Done(RoundEnd::Failed(err.to_string())),
-    };
-    let batch = run_tool_batch(ctx, id, &pending_calls, state, &tool_ctx, ops).await;
-    if batch.shutting_down {
-        return RoundOutcome::Shutdown;
-    }
+    let batch = run_tool_batch(ctx, run, env, &pending_calls, call_seq, tool_ctx, token).await;
     let message = ProviderMessage {
         role: MessageRole::User,
         content: batch.tool_results,
     };
-    persist_message(ctx, state.ids, &message).await;
+    if let Some(ids) = run.ids() {
+        persist_message(ctx, ids, &message).await;
+    }
     history.push(message);
-    if batch.interrupted_at.is_some() {
-        RoundOutcome::Done(RoundEnd::Interrupted)
+    if batch.cancelled {
+        RoundOutcome::Cancelled
     } else {
         RoundOutcome::Continue
     }
@@ -1224,20 +1293,228 @@ async fn process_round_output(
 
 fn build_tool_defs(
     ctx: &Ctx<'_>,
-    provider: &dyn goat_provider::ModelProvider,
+    provider: &dyn ModelProvider,
+    selection: Option<&ToolSelection>,
+    allow_delegate: bool,
 ) -> Vec<ToolDefinition> {
     if !provider.capabilities().tools {
         return Vec::new();
     }
-    ctx.tools
+    let mut defs: Vec<ToolDefinition> = ctx
+        .tools
         .specs()
         .into_iter()
+        .filter(|spec| selection.is_none_or(|sel| sel.allows(spec.name)))
         .map(|spec| ToolDefinition {
             name: spec.name.to_owned(),
             description: spec.description.to_owned(),
             input_schema: spec.parameters,
         })
-        .collect()
+        .collect();
+    if allow_delegate && !ctx.agents.is_empty() {
+        defs.push(agent_tool_def(ctx));
+    }
+    defs
+}
+
+fn agent_tool_def(ctx: &Ctx<'_>) -> ToolDefinition {
+    let names: Vec<String> = ctx.agents.names();
+    let mut description = String::from(
+        "Delegate a self-contained task to a sub-agent that runs in its own context with a restricted tool set and returns only its final report. Prefer this for focused investigation or work that would otherwise flood the main context. Issue several Agent calls in one response to run them in parallel. Available agent_type values:",
+    );
+    for spec in ctx.agents.iter() {
+        let _ = write!(description, "\n- {}: {}", spec.name, spec.description);
+    }
+    ToolDefinition {
+        name: AGENT_TOOL_NAME.to_owned(),
+        description,
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent_type": {
+                    "type": "string",
+                    "enum": names,
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "A complete, self-contained instruction for the sub-agent. It does not see the conversation, so include all needed context.",
+                },
+            },
+            "required": ["agent_type", "prompt"],
+        }),
+    }
+}
+
+async fn core_loop(
+    ctx: &Ctx<'_>,
+    run: &Run<'_>,
+    env: &LoopEnv<'_>,
+    token: &CancellationToken,
+    history: &mut Vec<ProviderMessage>,
+) -> LoopOutcome {
+    let tool_ctx = match ToolContext::new(env.cwd) {
+        Ok(tool_ctx) => tool_ctx,
+        Err(err) => return LoopOutcome::Failed(err.to_string()),
+    };
+    let mut rounds = 0usize;
+    let mut call_seq = 0u64;
+    loop {
+        rounds += 1;
+        let request = ModelRequest {
+            model: env.target.model.clone(),
+            messages: history.clone(),
+            tools: env.tool_defs.to_vec(),
+            effort: env.target.effort,
+        };
+        let round = run_round(ctx, run, env.provider, request, token).await;
+        match round.end {
+            RoundEnd::Cancelled => return LoopOutcome::Cancelled,
+            RoundEnd::Failed(message) => return LoopOutcome::Failed(message),
+            RoundEnd::Completed => {}
+        }
+        match process_round_output(
+            ctx,
+            run,
+            env,
+            round,
+            history,
+            rounds,
+            &mut call_seq,
+            &tool_ctx,
+            token,
+        )
+        .await
+        {
+            RoundOutcome::Done => return LoopOutcome::Completed,
+            RoundOutcome::Cancelled => return LoopOutcome::Cancelled,
+            RoundOutcome::Continue => {}
+        }
+    }
+}
+
+fn resolve_agent_model(
+    ctx: &Ctx<'_>,
+    parent: &ModelTarget,
+    spec: &AgentSpec,
+) -> Option<(Arc<dyn ModelProvider>, String, Option<Effort>)> {
+    if let Some(model_id) = &spec.model {
+        if let Some(found) = ctx
+            .registry
+            .all()
+            .iter()
+            .find(|provider| provider.catalog().contains(&model_id.as_str()))
+        {
+            let provider_id = found.id().to_string();
+            let provider =
+                goat_providers::build_provider(ctx.credentials, &provider_id, &parent.account)
+                    .unwrap_or_else(|| found.clone());
+            let effort = spec
+                .effort
+                .or_else(|| provider.efforts(model_id).into_iter().next());
+            return Some((provider, model_id.clone(), effort));
+        }
+        tracing::warn!(model = %model_id, "agent model not found; inheriting parent model");
+    }
+    let provider =
+        goat_providers::build_provider(ctx.credentials, &parent.provider, &parent.account)
+            .or_else(|| {
+                ctx.registry
+                    .get(&goat_provider::ProviderId::from(parent.provider.as_str()))
+            })?;
+    Some((provider, parent.model.clone(), parent.effort))
+}
+
+async fn run_delegation(
+    ctx: &Ctx<'_>,
+    env: &LoopEnv<'_>,
+    input_json: &str,
+    parent: TaskId,
+    token: &CancellationToken,
+) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        agent_type: String,
+        prompt: String,
+    }
+    let args: Input =
+        serde_json::from_str(input_json).map_err(|err| format!("invalid Agent input: {err}"))?;
+    let Some(spec) = ctx.agents.get(&args.agent_type) else {
+        return Err(format!("unknown agent_type: {}", args.agent_type));
+    };
+    let Some((provider, model, effort)) = resolve_agent_model(ctx, env.target, spec) else {
+        return Err("could not resolve a model for the agent".to_owned());
+    };
+    let child_target = ModelTarget {
+        provider: provider.id().to_string(),
+        model,
+        account: env.target.account.clone(),
+        effort,
+    };
+    let tool_defs = build_tool_defs(ctx, provider.as_ref(), Some(&spec.tools), false);
+    let mut history = vec![
+        ProviderMessage::text(MessageRole::System, spec.prompt.clone()),
+        ProviderMessage::text(MessageRole::User, args.prompt.clone()),
+    ];
+    let child_id = TaskId(ctx.child_ids.fetch_add(1, Ordering::Relaxed));
+    let _ = ctx
+        .events
+        .send(Event::AgentStarted {
+            id: child_id,
+            parent,
+            agent_type: args.agent_type.clone(),
+            label: delegation_label(&args.prompt),
+        })
+        .await;
+    let run = Run::child(child_id);
+    let child_env = LoopEnv {
+        provider: provider.as_ref(),
+        target: &child_target,
+        tool_defs: &tool_defs,
+        cwd: env.cwd,
+        allow_delegate: false,
+    };
+    let child_token = token.child_token();
+    let outcome = Box::pin(core_loop(ctx, &run, &child_env, &child_token, &mut history)).await;
+    let result = match outcome {
+        LoopOutcome::Completed => Ok(final_text(&history)),
+        LoopOutcome::Cancelled => Ok("(agent interrupted)".to_owned()),
+        LoopOutcome::Failed(message) => Err(message),
+    };
+    let _ = ctx
+        .events
+        .send(Event::AgentDone {
+            id: child_id,
+            ok: result.is_ok(),
+        })
+        .await;
+    result
+}
+
+fn delegation_label(prompt: &str) -> String {
+    let line = prompt.lines().next().unwrap_or("").trim();
+    if line.chars().count() > 50 {
+        let head: String = line.chars().take(50).collect();
+        format!("{head}…")
+    } else {
+        line.to_owned()
+    }
+}
+
+fn final_text(history: &[ProviderMessage]) -> String {
+    for message in history.iter().rev() {
+        if message.role == MessageRole::Assistant {
+            let mut text = String::new();
+            for block in &message.content {
+                if let ContentBlock::Text { text: chunk } = block {
+                    text.push_str(chunk);
+                }
+            }
+            if !text.trim().is_empty() {
+                return text;
+            }
+        }
+    }
+    "(agent produced no output)".to_owned()
 }
 
 async fn resolve_thread_cwd(ctx: &Ctx<'_>, stored_thread: Option<i64>) -> std::path::PathBuf {
@@ -1433,7 +1710,7 @@ async fn handle_turn(
     thread_id: &mut Option<i64>,
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
-    let Some(resolved) = target.as_ref() else {
+    let Some(resolved) = target.clone() else {
         emit_task_error(ctx, id, "no model selected".to_owned()).await;
         return Flow::Continue;
     };
@@ -1455,63 +1732,60 @@ async fn handle_turn(
         ));
     }
     history.push(ProviderMessage::text(MessageRole::User, text.clone()));
-    let ids = init_db_turn(ctx, id, &text, resolved, thread_id).await;
+    let ids = init_db_turn(ctx, id, &text, &resolved, thread_id).await;
     if ctx.events.send(Event::TaskStarted { id }).await.is_err() {
-        finalize_turn(ctx, id, &RoundEnd::ShuttingDown, &ids).await;
+        finalize_turn(ctx, id, &TurnEnd::Shutdown, &ids).await;
         return Flow::Shutdown;
     }
 
-    let turn_model = resolved.model.clone();
-    let turn_effort = resolved.effort;
-    let tool_defs = build_tool_defs(ctx, provider.as_ref());
     let cwd = resolve_thread_cwd(ctx, ids.stored_thread).await;
-    let mut call_seq: u64 = 0;
-    let mut rounds = 0usize;
+    let tool_defs = build_tool_defs(ctx, provider.as_ref(), None, true);
+    let run = Run::top(id, &ids);
+    let env = LoopEnv {
+        provider: provider.as_ref(),
+        target: &resolved,
+        tool_defs: &tool_defs,
+        cwd: &cwd,
+        allow_delegate: true,
+    };
+    let token = CancellationToken::new();
+    let mut shutdown = false;
     let mut deferred: Vec<Op> = Vec::new();
-    let outcome = loop {
-        rounds += 1;
-        let request = ModelRequest {
-            model: turn_model.clone(),
-            messages: history.clone(),
-            tools: tool_defs.clone(),
-            effort: turn_effort,
-        };
-        let round = run_round(
-            id,
-            provider.as_ref(),
-            request,
-            ops,
-            ctx.events,
-            &mut deferred,
-        )
-        .await;
-        match round.end {
-            RoundEnd::ShuttingDown => {
-                finalize_turn(ctx, id, &RoundEnd::ShuttingDown, &ids).await;
-                return Flow::Shutdown;
+
+    let outcome = {
+        let core = core_loop(ctx, &run, &env, &token, history);
+        tokio::pin!(core);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut core => break result,
+                maybe_op = ops.recv() => match maybe_op {
+                    Some(Op::Interrupt { id: target_id }) if target_id == id => token.cancel(),
+                    Some(Op::Shutdown) | None => {
+                        shutdown = true;
+                        token.cancel();
+                    }
+                    Some(op) => deferred.push(op),
+                },
             }
-            RoundEnd::Interrupted => break RoundEnd::Interrupted,
-            RoundEnd::Failed(message) => break RoundEnd::Failed(message),
-            RoundEnd::Completed => {}
-        }
-        let mut state = RoundState {
-            ids: &ids,
-            rounds,
-            cwd: &cwd,
-            call_seq: &mut call_seq,
-            deferred: &mut deferred,
-        };
-        match process_round_output(ctx, id, round, history, &mut state, ops).await {
-            RoundOutcome::Done(end) => break end,
-            RoundOutcome::Shutdown => {
-                finalize_turn(ctx, id, &RoundEnd::ShuttingDown, &ids).await;
-                return Flow::Shutdown;
-            }
-            RoundOutcome::Continue => {}
         }
     };
 
-    finalize_turn(ctx, id, &outcome, &ids).await;
+    let turn_end = match outcome {
+        LoopOutcome::Completed => TurnEnd::Done,
+        LoopOutcome::Failed(message) => TurnEnd::Failed(message),
+        LoopOutcome::Cancelled => {
+            if shutdown {
+                TurnEnd::Shutdown
+            } else {
+                TurnEnd::Interrupted
+            }
+        }
+    };
+    finalize_turn(ctx, id, &turn_end, &ids).await;
+    if matches!(turn_end, TurnEnd::Shutdown) {
+        return Flow::Shutdown;
+    }
 
     for op in deferred {
         handle_idle_op(op, ctx.store, *thread_id, target, ctx.events).await;
@@ -1572,6 +1846,103 @@ mod tests {
                 drop(out);
             })
         }
+    }
+
+    struct ScriptedProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ModelProvider for ScriptedProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::from("mock")
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                tools: true,
+                auth: AuthMethod::None,
+            }
+        }
+
+        fn request(&self, _req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(async move {
+                match n {
+                    0 => {
+                        let _ = events
+                            .send(ModelEvent::ToolCall {
+                                id: "call-1".to_owned(),
+                                name: "Agent".to_owned(),
+                                input: "{\"agent_type\":\"explore\",\"prompt\":\"look into it\"}"
+                                    .to_owned(),
+                            })
+                            .await;
+                    }
+                    1 => {
+                        let _ = events
+                            .send(ModelEvent::TextDelta {
+                                text: "child findings".to_owned(),
+                            })
+                            .await;
+                    }
+                    _ => {
+                        let _ = events
+                            .send(ModelEvent::TextDelta {
+                                text: "final answer".to_owned(),
+                            })
+                            .await;
+                    }
+                }
+                let _ = events.send(ModelEvent::Completed).await;
+            })
+        }
+
+        fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                drop(out);
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn delegates_to_agent_and_returns_result() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = ScriptedProvider {
+            calls: calls.clone(),
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials =
+            CredentialStore::new(std::env::temp_dir().join("goat-agent-delegate.json"));
+        let agent = GoatAgent::new(registry, store, credentials, Some(target("mock")));
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "do it".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        let mut agent_started = false;
+        let mut agent_done_ok = false;
+        let mut final_text = String::new();
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::ToolStarted { call, .. } if call.name == "Agent" => agent_started = true,
+                Event::ToolDone { outcome, .. } => agent_done_ok = outcome.ok,
+                Event::TextDone { text, .. } => final_text = text,
+                Event::TaskDone { interrupted, .. } => {
+                    assert!(!interrupted);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(agent_started, "expected the Agent tool to start");
+        assert!(agent_done_ok, "expected the Agent delegation to succeed");
+        assert_eq!(final_text, "final answer");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     fn target(provider: &str) -> ModelTarget {

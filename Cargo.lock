@@ -1067,7 +1067,9 @@ dependencies = [
 name = "goat-agent"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "goat-auth",
+ "goat-config",
  "goat-core",
  "goat-protocol",
  "goat-provider",
@@ -1076,8 +1078,11 @@ dependencies = [
  "goat-store",
  "goat-tool",
  "goat-tools",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -3514,6 +3519,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

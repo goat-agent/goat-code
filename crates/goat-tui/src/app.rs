@@ -29,6 +29,19 @@ enum ResumeIntent {
     Index(usize),
 }
 
+pub(crate) struct AgentRunView {
+    pub(crate) agent_type: String,
+    pub(crate) label: String,
+    id: TaskId,
+    transcript: Transcript,
+    pub(crate) done: Option<bool>,
+}
+
+pub(crate) enum MainView {
+    Live,
+    Agent(TaskId),
+}
+
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK: Duration = Duration::from_millis(120);
 const QUIT_ARM_TICKS: u16 = 25;
@@ -68,6 +81,9 @@ pub struct App {
     command_menu: Option<CommandMenu>,
     task_start: Option<std::time::Instant>,
     toasts: Vec<crate::toast::Toast>,
+    agent_runs: Vec<AgentRunView>,
+    main_view: MainView,
+    agent_selector: Option<usize>,
 }
 
 impl App {
@@ -103,6 +119,9 @@ impl App {
             command_menu: None,
             task_start: None,
             toasts: Vec::new(),
+            agent_runs: Vec::new(),
+            main_view: MainView::Live,
+            agent_selector: None,
         }
     }
 
@@ -190,6 +209,9 @@ impl App {
         }
         if self.config.is_some() {
             return self.on_config_key(key);
+        }
+        if self.agent_selector.is_some() {
+            return self.on_agent_selector_key(key);
         }
         if self.command_menu.is_some()
             && let Some(result) = self.on_command_menu_key(key)
@@ -349,6 +371,7 @@ impl App {
                     return Vec::new();
                 }
                 self.transcript.clear();
+                self.reset_agents();
                 self.scroll = 0;
                 self.follow = true;
                 vec![Op::Clear]
@@ -440,7 +463,9 @@ impl App {
                 Vec::new()
             }
             KeyCode::Down => {
-                if self.composer.on_last_row() {
+                if self.composer.is_empty() && !self.agent_runs.is_empty() {
+                    self.set_agent_cursor(0);
+                } else if self.composer.on_last_row() {
                     self.composer.history_next();
                     self.dirty = true;
                 } else {
@@ -765,11 +790,13 @@ impl App {
         let id = TaskId(self.next_task);
         self.next_task += 1;
         self.active = Some(id);
+        self.reset_agents();
         self.transcript.push_user(text.clone());
         self.follow = true;
         vec![Op::SubmitMessage { id, text }]
     }
 
+    #[allow(clippy::too_many_lines)]
     fn on_engine(&mut self, event: EngineEvent) -> Vec<Op> {
         let mut ops = Vec::new();
         match event {
@@ -799,6 +826,7 @@ impl App {
             },
             EngineEvent::ConversationRestored { target, entries } => {
                 self.transcript.clear();
+                self.reset_agents();
                 self.scroll = 0;
                 self.follow = true;
                 for entry in entries {
@@ -838,14 +866,58 @@ impl App {
                     }
                 }
             }
-            EngineEvent::TextDelta { chunk, .. } => self.transcript.push_delta(&chunk),
-            EngineEvent::TextDone { text, .. } => {
-                self.transcript
-                    .commit_text(&text, &self.highlighter, self.theme);
+            EngineEvent::TextDelta { id, chunk } => {
+                if let Some(i) = self.agent_index(id) {
+                    self.agent_runs[i].transcript.push_delta(&chunk);
+                } else {
+                    self.transcript.push_delta(&chunk);
+                }
             }
-            EngineEvent::ToolStarted { call, .. } => self.transcript.push_tool(call),
-            EngineEvent::ToolDone { call, outcome, .. } => {
-                self.transcript.finish_tool(call, outcome);
+            EngineEvent::TextDone { id, text } => {
+                if let Some(i) = self.agent_index(id) {
+                    self.agent_runs[i]
+                        .transcript
+                        .commit_text(&text, &self.highlighter, self.theme);
+                } else {
+                    self.transcript
+                        .commit_text(&text, &self.highlighter, self.theme);
+                }
+            }
+            EngineEvent::ToolStarted { id, call } => {
+                if let Some(i) = self.agent_index(id) {
+                    self.agent_runs[i].transcript.push_tool(call);
+                } else {
+                    self.transcript.push_tool(call);
+                }
+            }
+            EngineEvent::ToolDone { id, call, outcome } => {
+                if let Some(i) = self.agent_index(id) {
+                    self.agent_runs[i].transcript.finish_tool(call, outcome);
+                } else {
+                    self.transcript.finish_tool(call, outcome);
+                }
+            }
+            EngineEvent::AgentStarted {
+                id,
+                agent_type,
+                label,
+                ..
+            } => {
+                self.agent_runs.push(AgentRunView {
+                    id,
+                    agent_type,
+                    label,
+                    transcript: Transcript::default(),
+                    done: None,
+                });
+            }
+            EngineEvent::AgentDone { id, ok } => {
+                if let Some(i) = self.agent_index(id) {
+                    self.agent_runs[i].done = Some(ok);
+                    self.agent_runs[i]
+                        .transcript
+                        .complete(!ok, &self.highlighter, self.theme);
+                }
             }
             EngineEvent::TaskDone { interrupted, .. } => {
                 self.transcript
@@ -887,7 +959,7 @@ impl App {
         self.theme
     }
     pub(crate) fn transcript(&self) -> &Transcript {
-        &self.transcript
+        self.active_transcript()
     }
     pub(crate) fn composer(&self) -> &Composer {
         &self.composer
@@ -913,7 +985,7 @@ impl App {
     }
 
     pub(crate) fn content_height(&self, width: u16) -> u16 {
-        self.transcript.content_height(width, self.theme)
+        self.active_transcript().content_height(width, self.theme)
     }
     pub(crate) fn scroll(&self) -> u16 {
         self.scroll
@@ -941,6 +1013,93 @@ impl App {
     }
     pub(crate) fn toasts(&self) -> &[crate::toast::Toast] {
         &self.toasts
+    }
+
+    fn agent_index(&self, id: TaskId) -> Option<usize> {
+        self.agent_runs.iter().position(|run| run.id == id)
+    }
+
+    fn reset_agents(&mut self) {
+        self.agent_runs.clear();
+        self.agent_selector = None;
+        self.main_view = MainView::Live;
+    }
+
+    fn active_transcript(&self) -> &Transcript {
+        match self.main_view {
+            MainView::Live => &self.transcript,
+            MainView::Agent(id) => self
+                .agent_runs
+                .iter()
+                .find(|run| run.id == id)
+                .map_or(&self.transcript, |run| &run.transcript),
+        }
+    }
+
+    fn set_agent_cursor(&mut self, cursor: usize) {
+        if let Some(run) = self.agent_runs.get(cursor) {
+            self.agent_selector = Some(cursor);
+            self.main_view = MainView::Agent(run.id);
+            self.scroll = 0;
+            self.follow = true;
+            self.dirty = true;
+        }
+    }
+
+    fn close_agent_selector(&mut self) {
+        self.agent_selector = None;
+        self.main_view = MainView::Live;
+        self.follow = true;
+        self.scroll = u16::MAX;
+        self.dirty = true;
+    }
+
+    fn on_agent_selector_key(&mut self, key: KeyEvent) -> Vec<Op> {
+        self.dirty = true;
+        match key.code {
+            KeyCode::Esc => self.close_agent_selector(),
+            KeyCode::Up => match self.agent_selector {
+                Some(0) | None => self.close_agent_selector(),
+                Some(cursor) => self.set_agent_cursor(cursor - 1),
+            },
+            KeyCode::Down => {
+                if let Some(cursor) = self.agent_selector
+                    && cursor + 1 < self.agent_runs.len()
+                {
+                    self.set_agent_cursor(cursor + 1);
+                }
+            }
+            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
+            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn agent_runs(&self) -> &[AgentRunView] {
+        &self.agent_runs
+    }
+    pub(crate) fn agent_selector(&self) -> Option<usize> {
+        self.agent_selector
+    }
+    pub(crate) fn agent_status(&self) -> Option<String> {
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for run in self.agent_runs.iter().filter(|run| run.done.is_none()) {
+            if let Some(entry) = counts.iter_mut().find(|(kind, _)| *kind == run.agent_type) {
+                entry.1 += 1;
+            } else {
+                counts.push((run.agent_type.as_str(), 1));
+            }
+        }
+        let running: usize = counts.iter().map(|(_, n)| n).sum();
+        if running == 0 {
+            return None;
+        }
+        let parts: Vec<String> = counts
+            .iter()
+            .map(|(kind, n)| format!("{n} {kind}"))
+            .collect();
+        Some(format!("{running} agents · {}", parts.join(", ")))
     }
 }
 
@@ -1418,5 +1577,65 @@ mod tests {
             app.current_model().and_then(|m| m.effort),
             Some(goat_protocol::Effort::High)
         );
+    }
+
+    #[test]
+    fn agent_events_route_and_drill_in() {
+        use goat_protocol::{ToolCall, ToolCallId, ToolOutcome};
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("go");
+        app.submit();
+        let top = app.active.unwrap();
+        app.on_engine(EngineEvent::ToolStarted {
+            id: top,
+            call: ToolCall {
+                id: ToolCallId(1),
+                name: "Agent".to_owned(),
+                input: "{}".to_owned(),
+            },
+        });
+        let child = TaskId(1 << 32);
+        app.on_engine(EngineEvent::AgentStarted {
+            id: child,
+            parent: top,
+            agent_type: "explore".to_owned(),
+            label: "look into it".to_owned(),
+        });
+        assert_eq!(app.agent_runs().len(), 1);
+        app.on_engine(EngineEvent::ToolStarted {
+            id: child,
+            call: ToolCall {
+                id: ToolCallId(1),
+                name: "Grep".to_owned(),
+                input: "x".to_owned(),
+            },
+        });
+        app.on_engine(EngineEvent::ToolDone {
+            id: child,
+            call: ToolCallId(1),
+            outcome: ToolOutcome {
+                ok: true,
+                summary: None,
+            },
+        });
+
+        assert_eq!(app.transcript.items.len(), 2);
+        assert_eq!(app.agent_runs[0].transcript.items.len(), 1);
+        assert!(app.agent_status().is_some_and(|s| s.contains("explore")));
+
+        app.on_engine(EngineEvent::AgentDone {
+            id: child,
+            ok: true,
+        });
+        assert_eq!(app.agent_runs[0].done, Some(true));
+        assert!(app.agent_status().is_none());
+
+        assert_eq!(app.transcript().items.len(), 2);
+        app.set_agent_cursor(0);
+        assert!(matches!(app.main_view, super::MainView::Agent(_)));
+        assert_eq!(app.transcript().items.len(), 1);
+        app.close_agent_selector();
+        assert!(matches!(app.main_view, super::MainView::Live));
+        assert_eq!(app.transcript().items.len(), 2);
     }
 }
