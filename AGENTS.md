@@ -18,13 +18,40 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-Five crates in one dependency DAG with `goat-protocol` at the bottom:
+23 crates organized into five layers, with `goat-protocol` at the bottom of the dependency DAG:
 
+**Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`, `Conversation`); serde only; leaf.
 - `goat-config` — config, `ThemeChoice`, XDG paths, log directory; no TUI deps; leaf.
-- `goat-core` — `Session`, the `Engine` trait, and `StubEngine`; depends on `goat-protocol` only.
+- `goat-core` — `Session` and the `Engine` trait; depends on `goat-protocol` only.
 - `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol` only, not `goat-core`.
 - `goat-code` — the `goat` binary; wires the channels, logging, and CLI; depends on all.
+
+**Providers**
+- `goat-provider` — the `Provider` trait; leaf.
+- `goat-provider-anthropic` — Anthropic Claude API provider.
+- `goat-provider-openai-compat` — shared OpenAI-compatible HTTP logic.
+- `goat-provider-openai` — OpenAI Chat Completions provider.
+- `goat-provider-responses` — OpenAI Responses API provider.
+- `goat-provider-openai-codex` — OpenAI Codex provider.
+- `goat-provider-ollama` — Ollama local-inference provider.
+- `goat-provider-lmstudio` — LM Studio local-inference provider.
+- `goat-provider-llama-cpp` — llama.cpp local-inference provider.
+- `goat-providers` — provider registry; wires all provider crates.
+
+**Agent**
+- `goat-agent` — `GoatAgent`, the production `Engine` implementation; owns the LLM loop, tool dispatch, and `Conversation`.
+
+**Auth / Store**
+- `goat-auth` — credential store (provider API keys, OAuth tokens).
+- `goat-store` — conversation persistence (SQLite via rusqlite).
+
+**Tools**
+- `goat-tool` — the `Tool` trait; leaf.
+- `goat-tool-fs` — filesystem tools (read, write, list, search).
+- `goat-tool-shell` — shell execution tool.
+- `goat-tool-search` — web/code search tools.
+- `goat-tools` — tool registry; wires all tool crates.
 
 The UI and the engine communicate only through `goat-protocol` types over bounded
 `tokio::mpsc` channels. The binary owns both channels and connects them.
@@ -40,9 +67,9 @@ The UI and the engine communicate only through `goat-protocol` types over bounde
 
 ## Architecture
 
-- `goat-core` stays feature-free forever: it owns the session lifecycle and the `Op → Event` loop and nothing else. Real capability (LLM, tools, MCP) plugs in above core by implementing the `Engine` trait. `StubEngine` streams a canned reply today so the UI runs end-to-end; a future `goat-agent` replaces it with no change to `goat-tui`.
+- `goat-core` stays feature-free forever: it owns the session lifecycle and the `Op → Event` loop and nothing else. Real capability (LLM, tools) plugs in above core by implementing the `Engine` trait. `GoatAgent` is the production engine.
 - `Engine` is an object-safe actor: `fn spawn(self, ops, events) -> JoinHandle`. No `async_trait`, no `Stream`.
-- The engine owns the `Conversation` (single source of truth); the TUI keeps an append-only render mirror built from `Event`s.
+- `GoatAgent` owns the `Conversation` (single source of truth); the TUI keeps an append-only render mirror built from `Event`s.
 - The TUI normalizes three event sources into one `AppEvent`, runs a pure `App::update` reducer, and renders on a dirty flag — never on every tick.
 - The composer is a first-party widget. Do not add `tui-textarea`; it does not support ratatui 0.30.
 
