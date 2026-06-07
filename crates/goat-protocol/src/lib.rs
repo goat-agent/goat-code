@@ -20,40 +20,6 @@ impl fmt::Display for ToolCallId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    User,
-    Agent,
-    System,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
-}
-
-impl Message {
-    pub fn new(role: Role, content: impl Into<String>) -> Self {
-        Self {
-            role,
-            content: content.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Conversation {
-    pub messages: Vec<Message>,
-}
-
-impl Conversation {
-    pub fn push(&mut self, message: Message) {
-        self.messages.push(message);
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: ToolCallId,
