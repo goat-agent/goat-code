@@ -34,10 +34,6 @@ impl Session {
         (self.ops, self.events, self.handle)
     }
 
-    pub async fn next_event(&mut self) -> Option<Event> {
-        self.events.recv().await
-    }
-
     pub async fn shutdown(self) {
         let _ = self.ops.send(Op::Shutdown).await;
         let _ = self.handle.await;

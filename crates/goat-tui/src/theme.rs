@@ -128,4 +128,14 @@ impl Theme {
     pub fn fg_color(self) -> Color {
         self.fg
     }
+
+    pub fn is_dark(self) -> bool {
+        match self.bg {
+            Color::Rgb(r, g, b) => {
+                let luminance = u32::from(r) + u32::from(g) + u32::from(b);
+                luminance < 384
+            }
+            _ => true,
+        }
+    }
 }

@@ -1,12 +1,14 @@
 mod app;
 mod command;
 mod composer;
+mod config;
 pub mod highlight;
 mod keymap;
-mod login;
 pub mod markdown;
+mod overlay;
 mod picker;
 mod theme;
+mod toast;
 mod transcript;
 mod tui;
 mod view;

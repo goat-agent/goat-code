@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use goat_protocol::{ToolCall, ToolCallId, ToolOutcome};
 use ratatui::{
     Frame,
@@ -34,26 +36,35 @@ pub(crate) enum Item {
 pub struct Transcript {
     pub(crate) items: Vec<Item>,
     streaming: Option<String>,
+    cached_height: Cell<Option<(u16, u16)>>,
 }
 
 impl Transcript {
+    fn invalidate_height_cache(&self) {
+        self.cached_height.set(None);
+    }
+
     pub fn push_user(&mut self, text: impl Into<String>) {
+        self.invalidate_height_cache();
         self.items.push(Item::User(text.into()));
     }
 
     pub fn push_delta(&mut self, chunk: &str) {
+        self.invalidate_height_cache();
         self.streaming
             .get_or_insert_with(String::new)
             .push_str(chunk);
     }
 
     pub fn commit_text(&mut self, text: &str, hl: &dyn Highlighter, theme: Theme) {
+        self.invalidate_height_cache();
         self.streaming = None;
         self.items
             .push(Item::Agent(markdown::render(text, theme, hl)));
     }
 
     pub fn push_tool(&mut self, call: ToolCall) {
+        self.invalidate_height_cache();
         self.items.push(Item::Tool {
             id: call.id,
             name: call.name,
@@ -63,6 +74,7 @@ impl Transcript {
     }
 
     pub fn finish_tool(&mut self, call_id: ToolCallId, outcome: ToolOutcome) {
+        self.invalidate_height_cache();
         for item in self.items.iter_mut().rev() {
             if let Item::Tool { id, status, .. } = item
                 && *id == call_id
@@ -75,15 +87,18 @@ impl Transcript {
     }
 
     pub fn push_error(&mut self, text: impl Into<String>) {
+        self.invalidate_height_cache();
         self.streaming = None;
         self.items.push(Item::Error(text.into()));
     }
 
     pub fn push_notice(&mut self, text: impl Into<String>) {
+        self.invalidate_height_cache();
         self.items.push(Item::Notice(text.into()));
     }
 
     pub fn complete(&mut self, interrupted: bool, hl: &dyn Highlighter, theme: Theme) {
+        self.invalidate_height_cache();
         if interrupted {
             for item in &mut self.items {
                 if let Item::Tool { status, .. } = item
@@ -108,23 +123,31 @@ impl Transcript {
     }
 
     pub fn content_height(&self, width: u16, theme: Theme) -> u16 {
-        let lines = self.build_lines(theme, width, "⠋ ");
-        if width == 0 {
-            return u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        if let Some((w, h)) = self.cached_height.get()
+            && w == width
+        {
+            return h;
         }
-        let w = usize::from(width);
-        lines
-            .iter()
-            .map(|l| {
-                let display: usize = l
-                    .spans
-                    .iter()
-                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                    .sum();
-                let rows = if display == 0 { 1 } else { display.div_ceil(w) };
-                u16::try_from(rows).unwrap_or(u16::MAX)
-            })
-            .sum::<u16>()
+        let lines = self.build_lines(theme, width, "⠋ ");
+        let h = if width == 0 {
+            u16::try_from(lines.len()).unwrap_or(u16::MAX)
+        } else {
+            let w = usize::from(width);
+            lines
+                .iter()
+                .map(|l| {
+                    let display: usize = l
+                        .spans
+                        .iter()
+                        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                        .sum();
+                    let rows = if display == 0 { 1 } else { display.div_ceil(w) };
+                    u16::try_from(rows).unwrap_or(u16::MAX)
+                })
+                .sum::<u16>()
+        };
+        self.cached_height.set(Some((width, h)));
+        h
     }
 
     pub fn render(
@@ -179,7 +202,7 @@ fn item_lines<'a>(
                 line.spans.insert(0, Span::styled("● ", theme.role_agent()));
                 out.push(line);
             }
-            out.extend(rendered[1..].iter().map(|l| {
+            out.extend(rendered.iter().skip(1).map(|l| {
                 let mut padded = l.clone();
                 padded.spans.insert(0, Span::raw("  "));
                 padded
@@ -187,7 +210,7 @@ fn item_lines<'a>(
             out
         }
         Item::Error(text) => labelled(text, "✗ ", theme.error(), theme),
-        Item::Notice(text) => labelled(text, "✓ ", theme.role_tool(), theme),
+        Item::Notice(text) => labelled(text, "→ ", theme.muted(), theme),
         Item::Tool {
             name,
             input,

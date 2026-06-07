@@ -1142,6 +1142,7 @@ dependencies = [
 name = "goat-provider"
 version = "0.1.0"
 dependencies = [
+ "goat-protocol",
  "serde",
  "serde_json",
  "tokio",
@@ -1162,23 +1163,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "goat-provider-llama-cpp"
-version = "0.1.0"
-dependencies = [
- "goat-provider",
- "goat-provider-openai-compat",
-]
-
-[[package]]
-name = "goat-provider-lmstudio"
-version = "0.1.0"
-dependencies = [
- "goat-provider",
- "goat-provider-openai-compat",
-]
-
-[[package]]
-name = "goat-provider-ollama"
+name = "goat-provider-local"
 version = "0.1.0"
 dependencies = [
  "goat-provider",
@@ -1208,6 +1193,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1243,11 +1229,10 @@ dependencies = [
  "goat-auth",
  "goat-provider",
  "goat-provider-anthropic",
- "goat-provider-llama-cpp",
- "goat-provider-lmstudio",
- "goat-provider-ollama",
+ "goat-provider-local",
  "goat-provider-openai",
  "goat-provider-openai-codex",
+ "thiserror 2.0.18",
  "tokio",
 ]
 

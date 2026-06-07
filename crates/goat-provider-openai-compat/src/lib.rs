@@ -30,7 +30,11 @@ impl OpenAiCompatProvider {
             base_url: base_url.into(),
             bearer,
             auth,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_mins(5))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("reqwest client"),
         }
     }
 
@@ -225,7 +229,7 @@ async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<ModelEve
                     return;
                 }
                 accumulate_tool_calls(&mut tool_calls, choice.delta.tool_calls);
-                if choice.finish_reason.as_deref() == Some("tool_calls") {
+                if choice.finish_reason.is_some() {
                     for call in drain_tool_calls(&mut tool_calls) {
                         if events.send(call).await.is_err() {
                             return;
@@ -243,6 +247,11 @@ async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<ModelEve
             }
         }
     }
+    for call in drain_tool_calls(&mut tool_calls) {
+        if events.send(call).await.is_err() {
+            return;
+        }
+    }
     let _ = events.send(ModelEvent::Completed).await;
 }
 
@@ -258,9 +267,39 @@ impl ModelProvider for OpenAiCompatProvider {
         }
     }
 
+    fn validate(&self) -> JoinHandle<Result<(), String>> {
+        let client = self.client.clone();
+        let url = format!("{}/models", self.base_url);
+        let bearer = self.bearer.clone();
+        let auth = self.auth;
+        tokio::spawn(async move {
+            if matches!(auth, AuthMethod::None) {
+                return Ok(());
+            }
+            let Some(token) = bearer else {
+                return Err("no credentials".to_owned());
+            };
+            let resp = client
+                .get(&url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| "could not reach provider".to_owned())?;
+            let status = resp.status();
+            if status.is_success() {
+                Ok(())
+            } else if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                Err("invalid credentials".to_owned())
+            } else {
+                Err(format!("could not reach provider: {status}"))
+            }
+        })
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            streaming: true,
             tools: true,
             auth: self.auth,
         }

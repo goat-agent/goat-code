@@ -4,18 +4,16 @@ use crossterm::event::{
     Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use futures::StreamExt;
-use goat_protocol::{
-    Event as EngineEvent, LoginCredential, LoginProvider, ModelEntry, ModelTarget, Op, TaskId,
-};
+use goat_protocol::{AccountEntry, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
     command::CommandMenu,
     composer::Composer,
+    config::{Config, ConfigOutcome},
     highlight::SyntectHighlighter,
     keymap,
-    login::{Login, LoginOutcome},
     picker::{Picker, PickerOutcome},
     theme::Theme,
     transcript::Transcript,
@@ -33,6 +31,7 @@ enum AppEvent {
     EngineClosed,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     theme: Theme,
     transcript: Transcript,
@@ -50,10 +49,12 @@ pub struct App {
     models: Vec<ModelEntry>,
     model: Option<ModelTarget>,
     picker: Option<Picker>,
-    login: Option<Login>,
-    login_providers: Vec<LoginProvider>,
+    config: Option<Config>,
+    account_entries: Vec<AccountEntry>,
+    mouse_capture: bool,
     command_menu: Option<CommandMenu>,
     task_start: Option<std::time::Instant>,
+    toasts: Vec<crate::toast::Toast>,
 }
 
 impl App {
@@ -79,10 +80,12 @@ impl App {
             models: Vec::new(),
             model: None,
             picker: None,
-            login: None,
-            login_providers: Vec::new(),
+            config: None,
+            account_entries: Vec::new(),
+            mouse_capture: true,
             command_menu: None,
             task_start: None,
+            toasts: Vec::new(),
         }
     }
 
@@ -94,11 +97,14 @@ impl App {
                     self.dirty = true;
                 }
                 if let Some(ticks) = &mut self.quit_arm {
-                    *ticks -= 1;
+                    *ticks = ticks.saturating_sub(1);
                     if *ticks == 0 {
                         self.quit_arm = None;
                         self.dirty = true;
                     }
+                }
+                if crate::toast::tick(&mut self.toasts) {
+                    self.dirty = true;
                 }
                 Vec::new()
             }
@@ -110,8 +116,12 @@ impl App {
                     for ch in text.chars() {
                         picker.on_char(ch);
                     }
-                } else if let Some(login) = &mut self.login {
-                    login.insert_str(&text);
+                } else if self.config.is_some() {
+                    for ch in text.chars() {
+                        if let Some(config) = &mut self.config {
+                            config.on_char(ch);
+                        }
+                    }
                 } else {
                     self.composer.insert_str(&text);
                     self.update_command_menu();
@@ -126,7 +136,6 @@ impl App {
             AppEvent::Input(CtEvent::Mouse(mouse)) => {
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
-                        self.follow = false;
                         self.scroll = self.scroll.saturating_sub(3);
                         self.dirty = true;
                     }
@@ -156,8 +165,8 @@ impl App {
         if self.picker.is_some() {
             return self.on_picker_key(key);
         }
-        if self.login.is_some() {
-            return self.on_login_key(key);
+        if self.config.is_some() {
+            return self.on_config_key(key);
         }
         if self.command_menu.is_some()
             && let Some(result) = self.on_command_menu_key(key)
@@ -203,17 +212,28 @@ impl App {
                 self.command_menu = None;
                 Some(Vec::new())
             }
+            KeyCode::Enter => {
+                if let Some(menu) = &self.command_menu
+                    && let Some(name) = menu.selected_name()
+                {
+                    let completed = name.to_owned();
+                    self.command_menu = None;
+                    self.composer.clear();
+                    return Some(self.dispatch_slash_command(&completed));
+                }
+                None
+            }
             KeyCode::Esc => {
                 self.command_menu = None;
                 Some(Vec::new())
             }
-            KeyCode::Up if self.composer.on_first_row() => {
+            KeyCode::Up => {
                 if let Some(menu) = &mut self.command_menu {
                     menu.move_up();
                 }
                 Some(Vec::new())
             }
-            KeyCode::Down if self.composer.on_last_row() => {
+            KeyCode::Down => {
                 if let Some(menu) = &mut self.command_menu {
                     menu.move_down();
                 }
@@ -223,10 +243,45 @@ impl App {
         }
     }
 
+    fn dispatch_slash_command(&mut self, raw: &str) -> Vec<Op> {
+        let name = raw
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        match name.as_str() {
+            "model" => {
+                self.picker = Some(Picker::new(self.models.clone(), self.model.clone()));
+                self.dirty = true;
+                Vec::new()
+            }
+            "help" => {
+                self.transcript.push_notice(crate::command::help_text());
+                self.dirty = true;
+                Vec::new()
+            }
+            "config" => {
+                self.config = Some(Config::new(
+                    self.account_entries.clone(),
+                    self.theme.is_dark(),
+                    self.mouse_capture,
+                ));
+                self.dirty = true;
+                Vec::new()
+            }
+            _ => {
+                self.transcript
+                    .push_error(format!("unknown command: {raw}"));
+                self.dirty = true;
+                Vec::new()
+            }
+        }
+    }
+
     fn on_normal_key(&mut self, key: KeyEvent) -> Vec<Op> {
         match key.code {
             KeyCode::PageUp => {
-                self.follow = false;
                 self.scroll = self.scroll.saturating_sub(10);
                 self.dirty = true;
                 Vec::new()
@@ -323,7 +378,7 @@ impl App {
     }
 
     fn update_command_menu(&mut self) {
-        let text = self.composer.peek_text();
+        let text = self.composer.text();
         let trimmed = text.trim_start();
         if trimmed.starts_with('/') && !trimmed.contains(' ') {
             match &mut self.command_menu {
@@ -378,55 +433,100 @@ impl App {
         Vec::new()
     }
 
-    fn on_login_key(&mut self, key: KeyEvent) -> Vec<Op> {
+    fn on_config_key(&mut self, key: KeyEvent) -> Vec<Op> {
         self.dirty = true;
         if let Some(ch) = keymap::ctrl_key(&key) {
             if ch == 'c' {
-                self.login = None;
+                self.config = None;
             }
             return Vec::new();
         }
         match key.code {
-            KeyCode::Esc => self.login = None,
+            KeyCode::Esc => {
+                if let Some(config) = &mut self.config {
+                    config.cancel_stage();
+                    if matches!(config.stage_kind(), crate::config::StageKind::List) {
+                        self.config = None;
+                    }
+                }
+            }
+            KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                if let Some(config) = &mut self.config {
+                    config.tab();
+                }
+            }
             KeyCode::Up => {
-                if let Some(login) = &mut self.login {
-                    login.move_up();
+                if let Some(config) = &mut self.config {
+                    config.move_up();
                 }
             }
             KeyCode::Down => {
-                if let Some(login) = &mut self.login {
-                    login.move_down();
+                if let Some(config) = &mut self.config {
+                    config.move_down();
                 }
             }
             KeyCode::Backspace => {
-                if let Some(login) = &mut self.login {
-                    login.backspace();
+                if let Some(config) = &mut self.config {
+                    if matches!(config.stage_kind(), crate::config::StageKind::List) {
+                        let outcome = config.remove_selected();
+                        return self.apply_config_outcome(outcome);
+                    }
+                    config.backspace();
                 }
+            }
+            KeyCode::Delete => {
+                let outcome = self
+                    .config
+                    .as_mut()
+                    .map_or(ConfigOutcome::Pending, Config::remove_selected);
+                return self.apply_config_outcome(outcome);
             }
             KeyCode::Enter => {
-                if let Some(login) = &mut self.login
-                    && let LoginOutcome::Submit {
-                        provider,
-                        credential,
-                    } = login.enter()
-                {
-                    if matches!(credential, LoginCredential::ApiKey(_)) {
-                        self.login = None;
-                    }
-                    return vec![Op::Login {
-                        provider,
-                        credential,
-                    }];
-                }
+                let outcome = self
+                    .config
+                    .as_mut()
+                    .map_or(ConfigOutcome::Pending, Config::enter);
+                return self.apply_config_outcome(outcome);
             }
             KeyCode::Char(c) => {
-                if let Some(login) = &mut self.login {
-                    login.on_char(c);
+                if let Some(config) = &mut self.config {
+                    config.on_char(c);
                 }
             }
             _ => {}
         }
         Vec::new()
+    }
+
+    fn apply_config_outcome(&mut self, outcome: ConfigOutcome) -> Vec<Op> {
+        match outcome {
+            ConfigOutcome::Pending => Vec::new(),
+            ConfigOutcome::AddAccount {
+                provider,
+                name,
+                credential,
+            } => {
+                vec![Op::AddAccount {
+                    provider,
+                    name,
+                    credential,
+                }]
+            }
+            ConfigOutcome::RemoveAccount { provider, name } => {
+                vec![Op::RemoveAccount { provider, name }]
+            }
+            ConfigOutcome::SetTheme { dark } => {
+                self.theme = if dark { Theme::dark() } else { Theme::light() };
+                if let Some(config) = &mut self.config {
+                    config.set_providers(self.account_entries.clone());
+                }
+                vec![Op::SetTheme { dark }]
+            }
+            ConfigOutcome::SetMouseCapture { enabled } => {
+                self.mouse_capture = enabled;
+                Vec::new()
+            }
+        }
     }
 
     fn on_ctrl_c(&mut self) -> Vec<Op> {
@@ -452,29 +552,8 @@ impl App {
             return Vec::new();
         }
         if trimmed.starts_with('/') {
-            match trimmed {
-                "/model" => {
-                    self.picker = Some(Picker::new(self.models.clone()));
-                    self.dirty = true;
-                    return Vec::new();
-                }
-                "/login" => {
-                    self.login = Some(Login::new(self.login_providers.clone()));
-                    self.dirty = true;
-                    return Vec::new();
-                }
-                "/help" => {
-                    self.transcript.push_notice(crate::command::help_text());
-                    self.dirty = true;
-                    return Vec::new();
-                }
-                _ => {
-                    self.transcript
-                        .push_error(format!("unknown command: {trimmed}"));
-                    self.dirty = true;
-                    return Vec::new();
-                }
-            }
+            let cmd = trimmed.to_owned();
+            return self.dispatch_slash_command(&cmd);
         }
         let id = TaskId(self.next_task);
         self.next_task += 1;
@@ -496,19 +575,22 @@ impl App {
                 self.models = entries;
             }
             EngineEvent::ModelSelected { target } => self.model = Some(target),
-            EngineEvent::LoginProviders { providers } => self.login_providers = providers,
+            EngineEvent::LoginProviders { .. } => {}
+            EngineEvent::AccountsChanged { providers } => {
+                if let Some(config) = &mut self.config {
+                    config.set_providers(providers.clone());
+                }
+                self.account_entries = providers;
+            }
             EngineEvent::LoginStatus {
                 message, done, ok, ..
             } => {
-                if done {
-                    self.login = None;
-                    if ok {
-                        self.transcript.push_notice(message);
-                    } else {
-                        self.transcript.push_error(message);
+                if let Some(config) = &mut self.config {
+                    match (done, ok) {
+                        (false, _) => config.set_account_status(message),
+                        (true, true) => config.cancel_stage(),
+                        (true, false) => config.set_error(message),
                     }
-                } else if let Some(login) = &mut self.login {
-                    login.set_status(message);
                 }
             }
             EngineEvent::TextDelta { chunk, .. } => self.transcript.push_delta(&chunk),
@@ -531,6 +613,10 @@ impl App {
                 self.active = None;
                 self.task_start = None;
             }
+            EngineEvent::Notify { kind, message } => {
+                self.toasts.push(crate::toast::Toast::new(kind, message));
+                self.dirty = true;
+            }
         }
         if self.follow {
             self.scroll = u16::MAX;
@@ -538,12 +624,13 @@ impl App {
     }
 
     pub(crate) fn clamp_scroll(&mut self, viewport_height: u16, content_width: u16) {
-        let content = self.transcript.content_height(content_width, self.theme);
-        let max = content.saturating_sub(viewport_height);
-        self.scroll = self.scroll.min(max);
-        if self.scroll >= max {
-            self.follow = true;
+        let max = self
+            .content_height(content_width)
+            .saturating_sub(viewport_height);
+        if self.scroll > max {
+            self.scroll = max;
         }
+        self.follow = self.scroll >= max;
     }
 
     fn take_dirty(&mut self) -> bool {
@@ -588,14 +675,20 @@ impl App {
     pub(crate) fn picker(&self) -> Option<&Picker> {
         self.picker.as_ref()
     }
-    pub(crate) fn login(&self) -> Option<&Login> {
-        self.login.as_ref()
+    pub(crate) fn follow(&self) -> bool {
+        self.follow
+    }
+    pub(crate) fn config(&self) -> Option<&Config> {
+        self.config.as_ref()
     }
     pub(crate) fn command_menu(&self) -> Option<&CommandMenu> {
         self.command_menu.as_ref()
     }
     pub(crate) fn current_model(&self) -> Option<&ModelTarget> {
         self.model.as_ref()
+    }
+    pub(crate) fn toasts(&self) -> &[crate::toast::Toast] {
+        &self.toasts
     }
 }
 
@@ -662,20 +755,10 @@ async fn event_loop(
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use goat_protocol::{
-        AccountChoice, AuthMethod, Event as EngineEvent, LoginCredential, LoginProvider,
-        ModelEntry, ModelTarget, Op,
-    };
+    use goat_protocol::{AccountChoice, Event as EngineEvent, ModelEntry, ModelTarget, Op};
 
     use super::App;
     use crate::theme::Theme;
-
-    fn login_provider(id: &str, method: AuthMethod) -> LoginProvider {
-        LoginProvider {
-            id: id.to_owned(),
-            method,
-        }
-    }
 
     fn single_entry(provider: &str, model: &str) -> ModelEntry {
         ModelEntry {
@@ -690,6 +773,7 @@ mod tests {
                     account: "default".to_owned(),
                 },
             }],
+            context_window: None,
         }
     }
 
@@ -819,63 +903,12 @@ mod tests {
     }
 
     #[test]
-    fn slash_login_opens_login_overlay() {
-        let mut app = App::new(Theme::dark());
-        app.on_engine(EngineEvent::LoginProviders {
-            providers: vec![login_provider("openai", AuthMethod::ApiKey)],
-        });
-        app.composer.insert_str("/login");
-        let ops = app.submit();
-        assert!(ops.is_empty());
-        assert!(app.login.is_some());
-    }
-
-    #[test]
-    fn login_api_key_provider_enters_key_and_emits_op() {
-        let mut app = App::new(Theme::dark());
-        app.on_engine(EngineEvent::LoginProviders {
-            providers: vec![login_provider("openai", AuthMethod::ApiKey)],
-        });
-        app.composer.insert_str("/login");
-        app.submit();
-        app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
-        for ch in "sk".chars() {
-            app.on_key(press(KeyCode::Char(ch), KeyModifiers::NONE));
-        }
-        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(
-            ops.as_slice(),
-            [Op::Login { provider, credential }]
-                if provider == "openai" && matches!(credential, LoginCredential::ApiKey(key) if key == "sk")
-        ));
-        assert!(app.login.is_none());
-    }
-
-    #[test]
-    fn login_oauth_provider_emits_oauth_and_stays_open() {
-        let mut app = App::new(Theme::dark());
-        app.on_engine(EngineEvent::LoginProviders {
-            providers: vec![login_provider("openai-codex", AuthMethod::OAuth)],
-        });
-        app.composer.insert_str("/login");
-        app.submit();
-        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(
-            ops.as_slice(),
-            [Op::Login { provider, credential }]
-                if provider == "openai-codex" && matches!(credential, LoginCredential::OAuth)
-        ));
-        assert!(app.login.is_some());
-    }
-
-    #[test]
     fn unknown_slash_command_pushes_error() {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("/bogus");
         let ops = app.submit();
         assert!(ops.is_empty());
         assert!(app.picker.is_none());
-        assert!(app.login.is_none());
         assert!(app.active.is_none());
         assert_eq!(app.transcript.items.len(), 1);
         assert!(matches!(

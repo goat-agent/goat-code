@@ -8,7 +8,7 @@ use tokio::{
     net::TcpListener,
 };
 
-const BASE64URL: base64::engine::general_purpose::GeneralPurpose =
+pub const BASE64URL: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,7 +291,7 @@ impl RedactionSet {
         Self::default()
     }
 
-    pub fn insert(&mut self, secret: &str) {
+    pub(crate) fn insert(&mut self, secret: &str) {
         if !secret.is_empty() && !self.secrets.iter().any(|known| known == secret) {
             self.secrets.push(secret.to_owned());
         }
@@ -307,6 +307,10 @@ impl RedactionSet {
                 }
             }
         }
+    }
+
+    pub fn max_secret_len(&self) -> usize {
+        self.secrets.iter().map(String::len).max().unwrap_or(0)
     }
 
     pub fn redact(&self, text: &str) -> String {

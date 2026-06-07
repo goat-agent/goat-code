@@ -15,7 +15,7 @@ pub const PROVIDER_ID: &str = "anthropic";
 const BASE_URL: &str = "https://api.anthropic.com/v1";
 const ENV_VAR: &str = "ANTHROPIC_API_KEY";
 const VERSION: &str = "2023-06-01";
-const MAX_TOKENS: u32 = 4096;
+const MAX_TOKENS: u32 = 16384;
 
 const CATALOG: &[&str] = &[
     "claude-opus-4-8",
@@ -39,7 +39,11 @@ impl AnthropicProvider {
         Self {
             base_url: BASE_URL.to_owned(),
             api_key,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_mins(5))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("reqwest client"),
         }
     }
 }
@@ -253,7 +257,6 @@ impl ModelProvider for AnthropicProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            streaming: true,
             tools: true,
             auth: AuthMethod::ApiKey,
         }
@@ -311,6 +314,34 @@ impl ModelProvider for AnthropicProvider {
 
     fn authenticated(&self) -> bool {
         self.api_key.is_some()
+    }
+
+    fn validate(&self) -> JoinHandle<Result<(), String>> {
+        let client = self.client.clone();
+        let url = format!("{}/models", self.base_url);
+        let api_key = self.api_key.clone();
+        tokio::spawn(async move {
+            let Some(key) = api_key else {
+                return Err("no credentials".to_owned());
+            };
+            let resp = client
+                .get(&url)
+                .header("anthropic-version", VERSION)
+                .header("x-api-key", key)
+                .send()
+                .await
+                .map_err(|_| "could not reach provider".to_owned())?;
+            let status = resp.status();
+            if status.is_success() {
+                Ok(())
+            } else if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                Err("invalid credentials".to_owned())
+            } else {
+                Err(format!("could not reach provider: {status}"))
+            }
+        })
     }
 
     fn catalog(&self) -> &'static [&'static str] {

@@ -41,20 +41,19 @@ mod tests {
 
     #[tokio::test]
     async fn session_receives_task_started_and_done() {
-        let mut session = Session::spawn(EchoEngine);
-        session
-            .ops()
-            .send(Op::SubmitMessage {
-                id: TaskId(1),
-                text: "hi".to_owned(),
-            })
-            .await
-            .unwrap();
+        let session = Session::spawn(EchoEngine);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "hi".to_owned(),
+        })
+        .await
+        .unwrap();
 
         let mut saw_started = false;
         let mut saw_text_done = false;
         loop {
-            match session.next_event().await.expect("engine stopped early") {
+            match events.recv().await.expect("engine stopped early") {
                 Event::TaskStarted { id } => {
                     assert_eq!(id, TaskId(1));
                     saw_started = true;

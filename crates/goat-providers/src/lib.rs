@@ -5,15 +5,23 @@ use goat_provider::{AuthMethod, ModelProvider, ProviderId};
 
 pub const DEFAULT_ACCOUNT: &str = "default";
 
+#[derive(Debug, thiserror::Error)]
+pub enum OAuthError {
+    #[error("provider {0} does not support OAuth")]
+    Unsupported(String),
+    #[error(transparent)]
+    Provider(#[from] goat_provider_openai_codex::CodexError),
+}
+
 pub async fn oauth_login(
     provider: &str,
     status: &tokio::sync::mpsc::Sender<String>,
-) -> Result<goat_auth::OAuthTokenSet, String> {
+) -> Result<goat_auth::OAuthTokenSet, OAuthError> {
     match provider {
         goat_provider_openai_codex::PROVIDER_ID => goat_provider_openai_codex::login(status)
             .await
-            .map_err(|err| err.to_string()),
-        _ => Err(format!("provider does not support oauth login: {provider}")),
+            .map_err(OAuthError::Provider),
+        _ => Err(OAuthError::Unsupported(provider.to_owned())),
     }
 }
 
@@ -31,9 +39,9 @@ impl Registry {
             Arc::new(goat_provider_openai::build(store, account)),
             Arc::new(goat_provider_openai_codex::build(store, account)),
             Arc::new(goat_provider_anthropic::build(store, account)),
-            Arc::new(goat_provider_ollama::build()),
-            Arc::new(goat_provider_lmstudio::build()),
-            Arc::new(goat_provider_llama_cpp::build()),
+            Arc::new(goat_provider_local::ollama()),
+            Arc::new(goat_provider_local::lmstudio()),
+            Arc::new(goat_provider_local::llama_cpp()),
         ];
         Self { providers }
     }
@@ -59,6 +67,18 @@ impl Registry {
     pub fn all(&self) -> &[Arc<dyn ModelProvider>] {
         &self.providers
     }
+}
+
+pub fn build_provider(
+    store: &CredentialStore,
+    provider: &str,
+    account: &str,
+) -> Option<Arc<dyn ModelProvider>> {
+    Registry::for_account(store, account)
+        .all()
+        .iter()
+        .find(|candidate| candidate.id().to_string() == provider)
+        .cloned()
 }
 
 #[cfg(test)]
