@@ -45,6 +45,8 @@ async fn run_tui() -> color_eyre::Result<()> {
     let agent = goat_agent::GoatAgent::new(registry, store, credentials, None);
 
     let session = goat_core::Session::spawn(agent);
-    let (ops, events, _handle) = session.into_parts();
-    goat_tui::run(ops, events, theme).await
+    let (ops, events, handle) = session.into_parts();
+    goat_tui::run(ops, events, theme).await?;
+    handle.await.ok();
+    Ok(())
 }
