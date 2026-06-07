@@ -55,8 +55,8 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 **Commands**
 - `goat-command` — the `Command` trait (`&'static str` name/description, `run → CommandEffect`) and `CommandEffect`/`CommandSpec`; leaf, mirrors `goat-tool`.
-- `goat-command-settings` — `/model`, `/config` commands (one module per command).
-- `goat-command-conversation` — `/clear` command.
+- `goat-command-settings` — `/model`, `/effort`, `/config` commands (one module per command). `/model` and `/effort` accept an optional argument (`/model <name>`, `/effort <level>`) or open a picker when bare.
+- `goat-command-conversation` — `/clear` and `/resume` commands. `/resume` opens a picker of past conversations in the cwd, or `/resume <n>` resumes the nth.
 - `goat-command-help` — `/help` command.
 - `goat-commands` — command registry; wires the per-category command crates and surfaces loaded skills as `/name` commands via `set_skills`; mirrors `goat-tools`.
 
@@ -76,7 +76,8 @@ The UI and the engine communicate only through `goat-protocol` types over bounde
 
 - `goat-core` stays feature-free forever: it owns the session lifecycle and the `Op → Event` loop and nothing else. Real capability (LLM, tools) plugs in above core by implementing the `Engine` trait. `GoatAgent` is the production engine.
 - `Engine` is an object-safe actor: `fn spawn(self, ops, events) -> JoinHandle`. No `async_trait`, no `Stream`.
-- `GoatAgent` owns a `Vec<ProviderMessage>` history (single source of truth for the LLM context); the TUI keeps an append-only render mirror built from `Event`s.
+- `GoatAgent` owns a `Vec<ProviderMessage>` history (single source of truth for the LLM context); the TUI keeps an append-only render mirror built from `Event`s. Each message is persisted losslessly as a `Vec<ContentBlock>` JSON `body` (thinking blocks and tool calls/results included), so `/resume` rebuilds both the history and the transcript from the store.
+- Reasoning effort is a per-model property carried on `ModelTarget.effort` (persisted per thread). Providers advertise the valid set per model via `ModelProvider::efforts` and translate the chosen `ModelRequest.effort` themselves — OpenAI/Codex send `reasoning.effort`, Anthropic maps to `output_config.effort`/`thinking.budget_tokens`. Anthropic extended thinking requires the `ContentBlock::Thinking`/`RedactedThinking` blocks to round-trip unchanged in history, which is why they are first-class content blocks every provider must handle.
 - The TUI normalizes three event sources into one `AppEvent`, runs a pure `App::update` reducer, and renders on a dirty flag — never on every tick.
 - The composer is a first-party widget. Do not add `tui-textarea`; it does not support ratatui 0.30.
 
