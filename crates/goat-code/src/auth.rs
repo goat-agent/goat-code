@@ -50,43 +50,46 @@ async fn login(
         account: account.to_owned(),
     };
 
-    match method {
+    let use_oauth = match method {
         AuthMethod::None => {
             println!("{provider} requires no login");
             return Ok(());
         }
-        AuthMethod::ApiKey => {
-            let secret = match key {
-                Some(key) => key,
-                None => prompt(&format!("enter API key for {provider}: "))?,
-            };
-            let secret = secret.trim().to_owned();
-            if secret.is_empty() {
-                return Err(eyre!("no API key provided"));
+        AuthMethod::ApiKey => false,
+        AuthMethod::OAuth => true,
+        AuthMethod::ApiKeyOrOAuth => key.is_none(),
+    };
+
+    if use_oauth {
+        let (status, mut lines) = mpsc::channel::<String>(16);
+        let printer = tokio::spawn(async move {
+            while let Some(line) = lines.recv().await {
+                println!("{line}");
             }
-            store
-                .store(
-                    &credential_key,
-                    ResolvedCredential::ApiKey(SecretString::from(secret)),
-                )
-                .map_err(|err| eyre!(err.to_string()))?;
+        });
+        let tokens = goat_providers::oauth_login(provider, &status)
+            .await
+            .map_err(|err| eyre!(err))?;
+        drop(status);
+        let _ = printer.await;
+        store
+            .store(&credential_key, ResolvedCredential::OAuth(tokens))
+            .map_err(|err| eyre!(err.to_string()))?;
+    } else {
+        let secret = match key {
+            Some(key) => key,
+            None => prompt(&format!("enter API key for {provider}: "))?,
+        };
+        let secret = secret.trim().to_owned();
+        if secret.is_empty() {
+            return Err(eyre!("no API key provided"));
         }
-        AuthMethod::OAuth => {
-            let (status, mut lines) = mpsc::channel::<String>(16);
-            let printer = tokio::spawn(async move {
-                while let Some(line) = lines.recv().await {
-                    println!("{line}");
-                }
-            });
-            let tokens = goat_providers::oauth_login(provider, &status)
-                .await
-                .map_err(|err| eyre!(err))?;
-            drop(status);
-            let _ = printer.await;
-            store
-                .store(&credential_key, ResolvedCredential::OAuth(tokens))
-                .map_err(|err| eyre!(err.to_string()))?;
-        }
+        store
+            .store(
+                &credential_key,
+                ResolvedCredential::ApiKey(SecretString::from(secret)),
+            )
+            .map_err(|err| eyre!(err.to_string()))?;
     }
 
     println!("stored credential for {provider} ({account})");

@@ -11,6 +11,8 @@ pub enum OAuthError {
     Unsupported(String),
     #[error(transparent)]
     Provider(#[from] goat_provider_openai_codex::CodexError),
+    #[error(transparent)]
+    Anthropic(#[from] goat_provider_anthropic::AnthropicAuthError),
 }
 
 pub async fn oauth_login(
@@ -21,6 +23,9 @@ pub async fn oauth_login(
         goat_provider_openai_codex::PROVIDER_ID => goat_provider_openai_codex::login(status)
             .await
             .map_err(OAuthError::Provider),
+        goat_provider_anthropic::PROVIDER_ID => goat_provider_anthropic::login(status)
+            .await
+            .map_err(OAuthError::Anthropic),
         _ => Err(OAuthError::Unsupported(provider.to_owned())),
     }
 }

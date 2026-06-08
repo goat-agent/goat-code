@@ -9,7 +9,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use goat_auth::{CredentialKey, CredentialKind, CredentialStore, ResolvedCredential, SecretString};
+use goat_auth::{
+    CredentialKey, CredentialKind, CredentialStore, OAuthTokenSet, ResolvedCredential, SecretString,
+};
 use goat_core::Engine;
 use goat_protocol::{
     AccountChoice, AccountEntry, AccountInfo, AuthMethod, Effort, Event, LoginCredential,
@@ -414,6 +416,7 @@ fn build_account_entries(registry: &Registry, credentials: &CredentialStore) -> 
                 provider: provider_id,
                 accounts,
                 local: is_local,
+                login: auth_method,
             }
         })
         .collect()
@@ -489,49 +492,59 @@ async fn login_failed(provider: &str, events: &mpsc::Sender<Event>, message: Str
         .await;
 }
 
-async fn store_credential(
-    ctx: &mut LoginCtx<'_>,
+async fn run_self_oauth(
     provider: &str,
-    key: &CredentialKey,
-    credential: LoginCredential,
-) -> Result<(), String> {
-    match credential {
-        LoginCredential::ApiKey(secret) => {
-            let resolved = ResolvedCredential::ApiKey(SecretString::from(secret));
-            ctx.credentials
-                .store(key, resolved)
-                .map_err(|err| err.to_string())
+    events: &mpsc::Sender<Event>,
+) -> Result<OAuthTokenSet, String> {
+    let (status_tx, mut status_rx) = mpsc::channel::<String>(8);
+    let status_provider = provider.to_owned();
+    let status_events = events.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(message) = status_rx.recv().await {
+            let _ = status_events
+                .send(Event::LoginStatus {
+                    provider: status_provider.clone(),
+                    message,
+                    done: false,
+                    ok: false,
+                })
+                .await;
         }
-        LoginCredential::OAuth => {
-            let (status_tx, mut status_rx) = mpsc::channel::<String>(8);
-            let status_provider = provider.to_owned();
-            let status_events = ctx.events.clone();
-            let forwarder = tokio::spawn(async move {
-                while let Some(message) = status_rx.recv().await {
-                    let _ = status_events
-                        .send(Event::LoginStatus {
-                            provider: status_provider.clone(),
-                            message,
-                            done: false,
-                            ok: false,
-                        })
-                        .await;
-                }
-            });
-            let result = goat_providers::oauth_login(provider, &status_tx).await;
-            drop(status_tx);
-            let _ = forwarder.await;
-            match result {
-                Ok(tokens) => {
-                    let resolved = ResolvedCredential::OAuth(tokens);
-                    ctx.credentials
-                        .store(key, resolved)
-                        .map_err(|err| err.to_string())
-                }
-                Err(err) => Err(err.to_string()),
-            }
-        }
+    });
+    let result = goat_providers::oauth_login(provider, &status_tx).await;
+    drop(status_tx);
+    let _ = forwarder.await;
+    result.map_err(|err| err.to_string())
+}
+
+async fn finalize_login(
+    ctx: LoginCtx<'_>,
+    provider: String,
+    name: String,
+    key: CredentialKey,
+    resolved: ResolvedCredential,
+) {
+    if let Err(message) = ctx
+        .credentials
+        .store(&key, resolved)
+        .map_err(|err| err.to_string())
+    {
+        login_failed(&provider, ctx.events, message).await;
+        emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
+        return;
     }
+    *ctx.registry = Registry::for_account(ctx.credentials, DEFAULT_ACCOUNT);
+    if let Err(message) = validate_stored(ctx.credentials, &provider, &name).await {
+        let _ = ctx.credentials.remove(&key);
+        *ctx.registry = Registry::for_account(ctx.credentials, DEFAULT_ACCOUNT);
+        login_failed(&provider, ctx.events, message).await;
+        emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
+        return;
+    }
+    let entries = discover_ready(ctx.registry, ctx.credentials).await;
+    let _ = ctx.events.send(Event::ModelListChanged { entries }).await;
+    login_succeeded(&provider, ctx.events).await;
+    emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
 }
 
 async fn validate_stored(
@@ -549,7 +562,7 @@ async fn validate_stored(
 }
 
 async fn handle_login(
-    mut ctx: LoginCtx<'_>,
+    ctx: LoginCtx<'_>,
     provider: String,
     name: String,
     credential: LoginCredential,
@@ -574,23 +587,18 @@ async fn handle_login(
         .await;
         return;
     }
-    if let Err(message) = store_credential(&mut ctx, &provider, &key, credential).await {
-        login_failed(&provider, ctx.events, message).await;
-        emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
-        return;
-    }
-    *ctx.registry = Registry::for_account(ctx.credentials, DEFAULT_ACCOUNT);
-    if let Err(message) = validate_stored(ctx.credentials, &provider, &name).await {
-        let _ = ctx.credentials.remove(&key);
-        *ctx.registry = Registry::for_account(ctx.credentials, DEFAULT_ACCOUNT);
-        login_failed(&provider, ctx.events, message).await;
-        emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
-        return;
-    }
-    let entries = discover_ready(ctx.registry, ctx.credentials).await;
-    let _ = ctx.events.send(Event::ModelListChanged { entries }).await;
-    login_succeeded(&provider, ctx.events).await;
-    emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
+    let resolved = match credential {
+        LoginCredential::ApiKey(secret) => ResolvedCredential::ApiKey(SecretString::from(secret)),
+        LoginCredential::OAuth => match run_self_oauth(&provider, ctx.events).await {
+            Ok(tokens) => ResolvedCredential::OAuth(tokens),
+            Err(message) => {
+                login_failed(&provider, ctx.events, message).await;
+                emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
+                return;
+            }
+        },
+    };
+    finalize_login(ctx, provider, name, key, resolved).await;
 }
 
 fn account_names_for(credentials: &CredentialStore, provider_id: &str) -> Vec<String> {
