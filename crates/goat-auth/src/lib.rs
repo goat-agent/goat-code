@@ -1,4 +1,8 @@
-use std::{fmt, fs, path::PathBuf};
+use std::{
+    fmt, fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -10,6 +14,14 @@ use tokio::{
 
 pub const BASE64URL: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+pub fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        .unwrap_or(0)
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -53,30 +65,80 @@ pub enum CredentialKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OAuthTokenSet {
+pub struct TokenSet {
     pub access_token: SecretString,
     pub refresh_token: Option<SecretString>,
     pub expires_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolvedCredential {
-    ApiKey(SecretString),
-    OAuth(OAuthTokenSet),
+impl TokenSet {
+    pub fn from_parts(
+        access: String,
+        refresh: Option<String>,
+        expires_in: Option<i64>,
+        fallback_refresh: Option<&str>,
+    ) -> Self {
+        let expires_at = expires_in.map(|secs| now_secs() + secs);
+        Self {
+            access_token: SecretString::from(access),
+            refresh_token: refresh
+                .map(SecretString::from)
+                .or_else(|| fallback_refresh.map(SecretString::from)),
+            expires_at,
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.expires_at.is_some_and(|exp| exp <= now_secs() + 60)
+    }
 }
 
-impl ResolvedCredential {
+pub async fn ensure_valid<F, Fut>(
+    tokens: TokenSet,
+    store: &CredentialStore,
+    key: &CredentialKey,
+    refresh: F,
+) -> Option<TokenSet>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<TokenSet, String>>,
+{
+    if !tokens.is_expired() {
+        return Some(tokens);
+    }
+    let refresh_token = tokens.refresh_token.as_ref()?.expose().to_owned();
+    match refresh(refresh_token).await {
+        Ok(fresh) => {
+            if let Err(err) = store.store(key, Credential::OAuth(fresh.clone())) {
+                tracing::warn!(%err, "failed to persist refreshed oauth tokens");
+            }
+            Some(fresh)
+        }
+        Err(err) => {
+            tracing::warn!(%err, "token refresh failed; treating as logged out");
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+    ApiKey(SecretString),
+    OAuth(TokenSet),
+}
+
+impl Credential {
     pub fn kind(&self) -> CredentialKind {
         match self {
-            ResolvedCredential::ApiKey(_) => CredentialKind::ApiKey,
-            ResolvedCredential::OAuth(_) => CredentialKind::OAuth,
+            Credential::ApiKey(_) => CredentialKind::ApiKey,
+            Credential::OAuth(_) => CredentialKind::OAuth,
         }
     }
 
     pub fn bearer(&self) -> &str {
         match self {
-            ResolvedCredential::ApiKey(secret) => secret.expose(),
-            ResolvedCredential::OAuth(tokens) => tokens.access_token.expose(),
+            Credential::ApiKey(secret) => secret.expose(),
+            Credential::OAuth(tokens) => tokens.access_token.expose(),
         }
     }
 }
@@ -85,23 +147,23 @@ impl ResolvedCredential {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum StoredValue {
     ApiKey { secret: SecretString },
-    OAuth { tokens: OAuthTokenSet },
+    OAuth { tokens: TokenSet },
 }
 
-impl From<ResolvedCredential> for StoredValue {
-    fn from(value: ResolvedCredential) -> Self {
+impl From<Credential> for StoredValue {
+    fn from(value: Credential) -> Self {
         match value {
-            ResolvedCredential::ApiKey(secret) => StoredValue::ApiKey { secret },
-            ResolvedCredential::OAuth(tokens) => StoredValue::OAuth { tokens },
+            Credential::ApiKey(secret) => StoredValue::ApiKey { secret },
+            Credential::OAuth(tokens) => StoredValue::OAuth { tokens },
         }
     }
 }
 
-impl From<StoredValue> for ResolvedCredential {
+impl From<StoredValue> for Credential {
     fn from(value: StoredValue) -> Self {
         match value {
-            StoredValue::ApiKey { secret } => ResolvedCredential::ApiKey(secret),
-            StoredValue::OAuth { tokens } => ResolvedCredential::OAuth(tokens),
+            StoredValue::ApiKey { secret } => Credential::ApiKey(secret),
+            StoredValue::OAuth { tokens } => Credential::OAuth(tokens),
         }
     }
 }
@@ -213,21 +275,17 @@ impl CredentialStore {
         Self { path }
     }
 
-    pub fn resolve(
-        &self,
-        key: &CredentialKey,
-        env_var: Option<&str>,
-    ) -> Option<ResolvedCredential> {
+    pub fn resolve(&self, key: &CredentialKey, env_var: Option<&str>) -> Option<Credential> {
         if let Some(var) = env_var
             && let Ok(value) = std::env::var(var)
             && !value.is_empty()
         {
-            return Some(ResolvedCredential::ApiKey(SecretString::from(value)));
+            return Some(Credential::ApiKey(SecretString::from(value)));
         }
         self.file_get(key)
     }
 
-    pub fn store(&self, key: &CredentialKey, value: ResolvedCredential) -> Result<(), AuthError> {
+    pub fn store(&self, key: &CredentialKey, value: Credential) -> Result<(), AuthError> {
         self.file_set(key, value)
     }
 
@@ -236,7 +294,7 @@ impl CredentialStore {
             .credentials
             .into_iter()
             .map(|entry| {
-                let resolved: ResolvedCredential = entry.value.into();
+                let resolved: Credential = entry.value.into();
                 (entry.key, resolved.kind())
             })
             .collect()
@@ -268,7 +326,7 @@ impl CredentialStore {
         Ok(())
     }
 
-    fn file_get(&self, key: &CredentialKey) -> Option<ResolvedCredential> {
+    fn file_get(&self, key: &CredentialKey) -> Option<Credential> {
         self.load_file()
             .credentials
             .into_iter()
@@ -276,7 +334,7 @@ impl CredentialStore {
             .map(|entry| entry.value.into())
     }
 
-    fn file_set(&self, key: &CredentialKey, value: ResolvedCredential) -> Result<(), AuthError> {
+    fn file_set(&self, key: &CredentialKey, value: Credential) -> Result<(), AuthError> {
         let mut file = self.load_file();
         let stored = StoredValue::from(value);
         if let Some(entry) = file.credentials.iter_mut().find(|entry| &entry.key == key) {
@@ -294,7 +352,7 @@ impl CredentialStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialKey, CredentialKind, CredentialStore, Pkce, ResolvedCredential, SecretString,
+        Credential, CredentialKey, CredentialKind, CredentialStore, Pkce, SecretString, TokenSet,
     };
 
     #[test]
@@ -324,7 +382,7 @@ mod tests {
 
     #[test]
     fn resolved_credential_kind() {
-        let cred = ResolvedCredential::ApiKey(SecretString::from("k"));
+        let cred = Credential::ApiKey(SecretString::from("k"));
         assert_eq!(cred.kind(), CredentialKind::ApiKey);
     }
 
@@ -338,10 +396,10 @@ mod tests {
             account: "a".into(),
         };
         store
-            .file_set(&key, ResolvedCredential::ApiKey(SecretString::from("k")))
+            .file_set(&key, Credential::ApiKey(SecretString::from("k")))
             .unwrap();
         let got = store.file_get(&key).unwrap();
-        assert!(matches!(got, ResolvedCredential::ApiKey(secret) if secret.expose() == "k"));
+        assert!(matches!(got, Credential::ApiKey(secret) if secret.expose() == "k"));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -355,7 +413,7 @@ mod tests {
             account: "x".into(),
         };
         let cred = store.resolve(&key, Some("PATH")).unwrap();
-        assert!(matches!(cred, ResolvedCredential::ApiKey(_)));
+        assert!(matches!(cred, Credential::ApiKey(_)));
     }
 
     #[test]
@@ -372,5 +430,46 @@ mod tests {
                 .resolve(&key, Some("GOAT_DEFINITELY_NOT_SET_VAR_42"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn token_set_is_expired() {
+        let expired = TokenSet {
+            access_token: SecretString::from("a"),
+            refresh_token: None,
+            expires_at: Some(0),
+        };
+        assert!(expired.is_expired());
+        let fresh = TokenSet {
+            access_token: SecretString::from("a"),
+            refresh_token: None,
+            expires_at: Some(i64::MAX),
+        };
+        assert!(!fresh.is_expired());
+        let no_expiry = TokenSet {
+            access_token: SecretString::from("a"),
+            refresh_token: None,
+            expires_at: None,
+        };
+        assert!(!no_expiry.is_expired());
+    }
+
+    #[test]
+    fn token_set_from_parts() {
+        let ts = TokenSet::from_parts(
+            "access".to_owned(),
+            Some("refresh".to_owned()),
+            Some(3600),
+            None,
+        );
+        assert_eq!(ts.access_token.expose(), "access");
+        assert_eq!(ts.refresh_token.as_ref().unwrap().expose(), "refresh");
+        assert!(ts.expires_at.is_some());
+    }
+
+    #[test]
+    fn token_set_from_parts_fallback_refresh() {
+        let ts = TokenSet::from_parts("access".to_owned(), None, None, Some("fallback"));
+        assert_eq!(ts.refresh_token.as_ref().unwrap().expose(), "fallback");
     }
 }

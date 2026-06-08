@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
-    AuthMethod, ContentBlock, Effort, MessageRole, ModelEvent, ModelInfo, ModelProvider,
-    ModelRequest, ProviderCapabilities, ProviderId, ProviderMessage, ToolDefinition,
+    AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
+    ProviderId, Request, StreamEvent, ToolDefinition,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -62,7 +62,7 @@ fn text_item(role: &str, content_kind: &str, text: &str) -> serde_json::Value {
 }
 
 fn append_message_items(
-    message: &ProviderMessage,
+    message: &Message,
     role: &str,
     content_kind: &str,
     input: &mut Vec<serde_json::Value>,
@@ -109,7 +109,7 @@ fn append_message_items(
 
 pub fn build_body(
     model: &str,
-    messages: &[ProviderMessage],
+    messages: &[Message],
     tools: &[ToolDefinition],
     default_instructions: Option<&str>,
     store: bool,
@@ -169,7 +169,7 @@ pub async fn run_request(
     bearer: Option<&str>,
     account_id: Option<&str>,
     body: &serde_json::Value,
-    events: &mpsc::Sender<ModelEvent>,
+    events: &mpsc::Sender<StreamEvent>,
 ) {
     let mut builder = client
         .post(url)
@@ -185,7 +185,7 @@ pub async fn run_request(
         Ok(resp) => resp,
         Err(err) => {
             let _ = events
-                .send(ModelEvent::Failed {
+                .send(StreamEvent::Failed {
                     message: err.to_string(),
                 })
                 .await;
@@ -196,7 +196,7 @@ pub async fn run_request(
         let status = resp.status();
         let detail = resp.text().await.unwrap_or_default();
         let _ = events
-            .send(ModelEvent::Failed {
+            .send(StreamEvent::Failed {
                 message: format!("{status}: {detail}"),
             })
             .await;
@@ -205,7 +205,7 @@ pub async fn run_request(
     stream_responses(resp, events).await;
 }
 
-async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<ModelEvent>) {
+async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<StreamEvent>) {
     let mut stream = response.bytes_stream().eventsource();
     let mut tool_calls: HashMap<String, (String, String, String)> = HashMap::new();
     while let Some(event) = stream.next().await {
@@ -213,7 +213,7 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Mod
             Ok(event) => match event.event.as_str() {
                 "response.output_text.delta" => {
                     if let Some(text) = parse_output_delta(&event.data)
-                        && events.send(ModelEvent::TextDelta { text }).await.is_err()
+                        && events.send(StreamEvent::TextDelta { text }).await.is_err()
                     {
                         return;
                     }
@@ -234,7 +234,7 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Mod
                     if let Some(item_id) = parse_item_id(&event.data)
                         && let Some((call_id, name, input)) = tool_calls.remove(&item_id)
                         && events
-                            .send(ModelEvent::ToolCall {
+                            .send(StreamEvent::ToolCall {
                                 id: call_id,
                                 name,
                                 input,
@@ -248,7 +248,7 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Mod
                 "response.completed" => break,
                 "response.failed" | "error" => {
                     let _ = events
-                        .send(ModelEvent::Failed {
+                        .send(StreamEvent::Failed {
                             message: event.data,
                         })
                         .await;
@@ -258,7 +258,7 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Mod
             },
             Err(err) => {
                 let _ = events
-                    .send(ModelEvent::Failed {
+                    .send(StreamEvent::Failed {
                         message: err.to_string(),
                     })
                     .await;
@@ -266,7 +266,7 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Mod
             }
         }
     }
-    let _ = events.send(ModelEvent::Completed).await;
+    let _ = events.send(StreamEvent::Completed).await;
 }
 
 #[derive(Deserialize)]
@@ -388,7 +388,7 @@ impl ResponsesProvider {
     }
 }
 
-impl ModelProvider for ResponsesProvider {
+impl Provider for ResponsesProvider {
     fn id(&self) -> ProviderId {
         self.id.clone()
     }
@@ -431,8 +431,8 @@ impl ModelProvider for ResponsesProvider {
         })
     }
 
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
             tools: true,
             auth: self.auth,
         }
@@ -446,7 +446,7 @@ impl ModelProvider for ResponsesProvider {
         responses_efforts(model)
     }
 
-    fn request(&self, req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()> {
+    fn stream(&self, req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
         let client = self.client.clone();
         let url = format!("{}/responses", self.base_url);
         let bearer = self.bearer.clone();
@@ -463,7 +463,7 @@ impl ModelProvider for ResponsesProvider {
         })
     }
 
-    fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()> {
+    fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
         let client = self.client.clone();
         let url = format!("{}/models", self.base_url);
         let bearer = self.bearer.clone();
@@ -485,7 +485,7 @@ impl ModelProvider for ResponsesProvider {
                 {
                     continue;
                 }
-                if out.send(ModelInfo { id: model.id }).await.is_err() {
+                if out.send(Model { id: model.id }).await.is_err() {
                     return;
                 }
             }
@@ -499,7 +499,7 @@ mod tests {
         build_body, parse_arguments_delta, parse_function_call_item, parse_item_id,
         parse_output_delta,
     };
-    use goat_provider::{ContentBlock, MessageRole, ProviderMessage, ToolDefinition};
+    use goat_provider::{ContentBlock, Message, MessageRole, ToolDefinition};
     use serde_json::json;
 
     #[test]
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn default_instructions_used_when_no_system_message() {
-        let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
+        let messages = vec![Message::text(MessageRole::User, "hi")];
         let body = build_body("gpt-5.5", &messages, &[], Some("base"), false, None);
         assert_eq!(body["instructions"], "base");
         assert_eq!(body["input"][0]["role"], "user");
@@ -520,8 +520,8 @@ mod tests {
     #[test]
     fn system_message_overrides_default_instructions() {
         let messages = vec![
-            ProviderMessage::text(MessageRole::System, "be terse"),
-            ProviderMessage::text(MessageRole::User, "hi"),
+            Message::text(MessageRole::System, "be terse"),
+            Message::text(MessageRole::User, "hi"),
         ];
         let body = build_body("gpt-5.5", &messages, &[], Some("base"), false, None);
         assert_eq!(body["instructions"], "be terse");
@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn instructions_omitted_when_empty_and_no_default() {
-        let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
+        let messages = vec![Message::text(MessageRole::User, "hi")];
         let body = build_body("gpt-5.5", &messages, &[], None, false, None);
         assert!(body.get("instructions").is_none());
     }
@@ -541,7 +541,7 @@ mod tests {
             description: "reads a file".to_owned(),
             input_schema: json!({ "type": "object" }),
         }];
-        let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
+        let messages = vec![Message::text(MessageRole::User, "hi")];
         let body = build_body("gpt-5.5", &messages, &tools, None, false, None);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "read_file");
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn serializes_tool_use_and_result_items() {
-        let assistant = ProviderMessage {
+        let assistant = Message {
             role: MessageRole::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "call_1".to_owned(),
@@ -558,7 +558,7 @@ mod tests {
                 input: json!({ "path": "a.txt" }),
             }],
         };
-        let result = ProviderMessage {
+        let result = Message {
             role: MessageRole::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "call_1".to_owned(),
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn reasoning_included_only_when_effort_present() {
-        let messages = vec![ProviderMessage::text(MessageRole::User, "hi")];
+        let messages = vec![Message::text(MessageRole::User, "hi")];
         let plain = build_body("gpt-5.5", &messages, &[], None, false, None);
         assert!(plain.get("reasoning").is_none());
         let high = build_body(
