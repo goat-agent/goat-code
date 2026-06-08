@@ -98,23 +98,24 @@ impl Theme {
         Style::new().fg(self.border)
     }
 
-    pub fn selected(self) -> Style {
-        Style::new()
-            .fg(self.bg)
-            .bg(self.accent)
-            .add_modifier(Modifier::BOLD)
-    }
-
     pub fn role_user(self) -> Style {
         Style::new().fg(self.user).add_modifier(Modifier::BOLD)
     }
 
     pub fn role_agent(self) -> Style {
-        Style::new().fg(self.agent)
+        Style::new().fg(self.agent).add_modifier(Modifier::BOLD)
     }
 
     pub fn role_tool(self) -> Style {
+        Style::new().fg(self.tool).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn tool_name(self) -> Style {
         Style::new().fg(self.tool)
+    }
+
+    pub fn selected_row(self) -> Style {
+        Style::new().bg(self.border)
     }
 
     pub fn error(self) -> Style {
@@ -127,6 +128,14 @@ impl Theme {
 
     pub fn fg_color(self) -> Color {
         self.fg
+    }
+
+    pub fn accent_color(self) -> Color {
+        self.accent
+    }
+
+    pub fn muted_accent(self) -> Style {
+        Style::new().fg(self.muted).add_modifier(Modifier::BOLD)
     }
 
     pub fn is_dark(self) -> bool {
