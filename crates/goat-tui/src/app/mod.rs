@@ -1,13 +1,13 @@
+mod engine;
+mod keys;
+
 use std::{path::Path, time::Duration};
 
-use crossterm::event::{
-    Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
-};
+use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
 use futures::StreamExt;
 use goat_commands::{CommandEffect, CommandRegistry};
 use goat_protocol::{
     AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId,
-    TranscriptEntry,
 };
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -17,15 +17,14 @@ use crate::{
     composer::Composer,
     config::{Config, ConfigOutcome},
     highlight::SyntectHighlighter,
-    keymap,
-    picker::{EffortOutcome, EffortPicker, Picker, PickerOutcome, ThreadOutcome, ThreadPicker},
+    picker::{EffortPicker, Picker, ThreadPicker},
     symbols,
     theme::Theme,
     transcript::Transcript,
     tui, view,
 };
 
-enum ResumeIntent {
+pub(crate) enum ResumeIntent {
     Picker,
     Index(usize),
 }
@@ -33,8 +32,8 @@ enum ResumeIntent {
 pub(crate) struct AgentRunView {
     pub(crate) agent_type: String,
     pub(crate) label: String,
-    id: TaskId,
-    transcript: Transcript,
+    pub(crate) id: TaskId,
+    pub(crate) transcript: Transcript,
     pub(crate) done: Option<bool>,
 }
 
@@ -43,10 +42,20 @@ pub(crate) enum MainView {
     Agent(TaskId),
 }
 
+pub(crate) enum Overlay {
+    None,
+    Model(Picker),
+    Effort(EffortPicker),
+    Thread(ThreadPicker),
+    Config(Config),
+    Commands(CommandMenu),
+    Agents(usize),
+}
+
 const TICK: Duration = Duration::from_millis(120);
 const QUIT_ARM_TICKS: u16 = 25;
 
-enum AppEvent {
+pub(crate) enum AppEvent {
     Input(CtEvent),
     Tick,
     Engine(EngineEvent),
@@ -55,39 +64,34 @@ enum AppEvent {
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct App {
-    theme: Theme,
-    transcript: Transcript,
-    composer: Composer,
-    highlighter: SyntectHighlighter,
-    cwd: String,
-    active: Option<TaskId>,
-    next_task: u64,
-    spinner: usize,
-    quit_arm: Option<u16>,
-    should_quit: bool,
-    dirty: bool,
-    scroll: u16,
-    follow: bool,
-    models: Vec<ModelEntry>,
-    model: Option<ModelTarget>,
-    picker: Option<Picker>,
-    effort_picker: Option<EffortPicker>,
-    thread_picker: Option<ThreadPicker>,
-    pending_resume: Option<ResumeIntent>,
-    config: Option<Config>,
-    account_entries: Vec<AccountEntry>,
-    mouse_capture: bool,
-    commands: CommandRegistry,
-    command_menu: Option<CommandMenu>,
-    task_start: Option<std::time::Instant>,
-    toasts: Vec<crate::toast::Toast>,
-    agent_runs: Vec<AgentRunView>,
-    main_view: MainView,
-    agent_selector: Option<usize>,
+    pub(crate) theme: Theme,
+    pub(crate) transcript: Transcript,
+    pub(crate) composer: Composer,
+    pub(crate) highlighter: SyntectHighlighter,
+    pub(crate) cwd: String,
+    pub(crate) active: Option<TaskId>,
+    pub(crate) next_task: u64,
+    pub(crate) spinner: usize,
+    pub(crate) quit_arm: Option<u16>,
+    pub(crate) should_quit: bool,
+    pub(crate) dirty: bool,
+    pub(crate) scroll: u16,
+    pub(crate) follow: bool,
+    pub(crate) models: Vec<ModelEntry>,
+    pub(crate) model: Option<ModelTarget>,
+    pub(crate) overlay: Overlay,
+    pub(crate) pending_resume: Option<ResumeIntent>,
+    pub(crate) account_entries: Vec<AccountEntry>,
+    pub(crate) mouse_capture: bool,
+    pub(crate) commands: CommandRegistry,
+    pub(crate) task_start: Option<std::time::Instant>,
+    pub(crate) toasts: Vec<crate::toast::Toast>,
+    pub(crate) agent_runs: Vec<AgentRunView>,
+    pub(crate) main_view: MainView,
 }
 
 impl App {
-    fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         let cwd = std::env::current_dir()
             .ok()
             .map(|p| shorten_home(&p))
@@ -108,24 +112,19 @@ impl App {
             follow: true,
             models: Vec::new(),
             model: None,
-            picker: None,
-            effort_picker: None,
-            thread_picker: None,
+            overlay: Overlay::None,
             pending_resume: None,
-            config: None,
             account_entries: Vec::new(),
             mouse_capture: true,
             commands: CommandRegistry::builtin(),
-            command_menu: None,
             task_start: None,
             toasts: Vec::new(),
             agent_runs: Vec::new(),
             main_view: MainView::Live,
-            agent_selector: None,
         }
     }
 
-    fn update(&mut self, event: AppEvent) -> Vec<Op> {
+    pub(crate) fn update(&mut self, event: AppEvent) -> Vec<Op> {
         match event {
             AppEvent::Tick => {
                 if self.active.is_some() {
@@ -148,19 +147,21 @@ impl App {
                 self.on_key(key)
             }
             AppEvent::Input(CtEvent::Paste(text)) => {
-                if let Some(picker) = &mut self.picker {
-                    for ch in text.chars() {
-                        picker.on_char(ch);
+                match &mut self.overlay {
+                    Overlay::Model(picker) => {
+                        for ch in text.chars() {
+                            picker.on_char(ch);
+                        }
                     }
-                } else if self.config.is_some() {
-                    for ch in text.chars() {
-                        if let Some(config) = &mut self.config {
+                    Overlay::Config(config) => {
+                        for ch in text.chars() {
                             config.on_char(ch);
                         }
                     }
-                } else {
-                    self.composer.insert_str(&text);
-                    self.update_command_menu();
+                    _ => {
+                        self.composer.insert_str(&text);
+                        self.update_command_menu();
+                    }
                 }
                 self.dirty = true;
                 Vec::new()
@@ -196,99 +197,7 @@ impl App {
         }
     }
 
-    fn on_key(&mut self, key: KeyEvent) -> Vec<Op> {
-        tracing::trace!(code = ?key.code, modifiers = ?key.modifiers, "key");
-        if self.picker.is_some() {
-            return self.on_picker_key(key);
-        }
-        if self.effort_picker.is_some() {
-            return self.on_effort_picker_key(key);
-        }
-        if self.thread_picker.is_some() {
-            return self.on_thread_picker_key(key);
-        }
-        if self.config.is_some() {
-            return self.on_config_key(key);
-        }
-        if self.agent_selector.is_some() {
-            return self.on_agent_selector_key(key);
-        }
-        if self.command_menu.is_some()
-            && let Some(result) = self.on_command_menu_key(key)
-        {
-            return result;
-        }
-        if let Some(ch) = keymap::ctrl_key(&key) {
-            if ch == 'c' {
-                return self.on_ctrl_c();
-            }
-            self.quit_arm = None;
-            match ch {
-                'a' => {
-                    self.dirty |= self.composer.move_home();
-                }
-                'e' => {
-                    self.dirty |= self.composer.move_end();
-                }
-                'w' => {
-                    self.composer.delete_word_before();
-                    self.update_command_menu();
-                    self.dirty = true;
-                }
-                _ => {}
-            }
-            return Vec::new();
-        }
-        self.quit_arm = None;
-        self.on_normal_key(key)
-    }
-
-    fn on_command_menu_key(&mut self, key: KeyEvent) -> Option<Vec<Op>> {
-        self.dirty = true;
-        match key.code {
-            KeyCode::Tab => {
-                if let Some(menu) = &self.command_menu
-                    && let Some(name) = menu.selected_name()
-                {
-                    let completed = format!("/{name} ");
-                    self.composer.clear();
-                    self.composer.insert_str(&completed);
-                }
-                self.command_menu = None;
-                Some(Vec::new())
-            }
-            KeyCode::Enter => {
-                if let Some(menu) = &self.command_menu
-                    && let Some(name) = menu.selected_name()
-                {
-                    let completed = format!("/{name}");
-                    self.command_menu = None;
-                    self.composer.clear();
-                    return Some(self.dispatch_slash_command(&completed));
-                }
-                None
-            }
-            KeyCode::Esc => {
-                self.command_menu = None;
-                Some(Vec::new())
-            }
-            KeyCode::Up => {
-                if let Some(menu) = &mut self.command_menu {
-                    menu.move_up();
-                }
-                Some(Vec::new())
-            }
-            KeyCode::Down => {
-                if let Some(menu) = &mut self.command_menu {
-                    menu.move_down();
-                }
-                Some(Vec::new())
-            }
-            _ => None,
-        }
-    }
-
-    fn dispatch_slash_command(&mut self, raw: &str) -> Vec<Op> {
+    pub(crate) fn dispatch_slash_command(&mut self, raw: &str) -> Vec<Op> {
         let rest = raw.trim().trim_start_matches('/');
         let (name, args) = match rest.split_once(char::is_whitespace) {
             Some((name, args)) => (name, args.trim()),
@@ -298,11 +207,11 @@ impl App {
         self.apply_command_effect(effect)
     }
 
-    fn apply_command_effect(&mut self, effect: CommandEffect) -> Vec<Op> {
+    pub(crate) fn apply_command_effect(&mut self, effect: CommandEffect) -> Vec<Op> {
         self.dirty = true;
         match effect {
             CommandEffect::OpenModelPicker => {
-                self.picker = Some(Picker::new(self.models.clone(), self.model.clone()));
+                self.overlay = Overlay::Model(Picker::new(self.models.clone(), self.model.clone()));
                 Vec::new()
             }
             CommandEffect::SelectModelNamed(query) => self.select_model_named(&query),
@@ -319,7 +228,7 @@ impl App {
                     .map(|m| format!("{}/{}", m.provider, m.model))
                     .unwrap_or_default();
                 let current = self.model.as_ref().and_then(|m| m.effort);
-                self.effort_picker = Some(EffortPicker::new(label, efforts, current));
+                self.overlay = Overlay::Effort(EffortPicker::new(label, efforts, current));
                 Vec::new()
             }
             CommandEffect::SelectEffort(level) => {
@@ -354,7 +263,7 @@ impl App {
                 vec![Op::ListThreads]
             }
             CommandEffect::OpenConfig => {
-                self.config = Some(Config::new(
+                self.overlay = Overlay::Config(Config::new(
                     self.account_entries.clone(),
                     self.theme.is_dark(),
                     self.mouse_capture,
@@ -389,229 +298,67 @@ impl App {
         }
     }
 
-    fn on_normal_key(&mut self, key: KeyEvent) -> Vec<Op> {
-        match key.code {
-            KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
-                self.dirty = true;
-                Vec::new()
+    pub(crate) fn apply_config_outcome(&mut self, outcome: ConfigOutcome) -> Vec<Op> {
+        match outcome {
+            ConfigOutcome::Pending => Vec::new(),
+            ConfigOutcome::AddAccount {
+                provider,
+                name,
+                credential,
+            } => {
+                vec![Op::AddAccount {
+                    provider,
+                    name,
+                    credential,
+                }]
             }
-            KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10);
-                self.dirty = true;
-                Vec::new()
+            ConfigOutcome::RemoveAccount { provider, name } => {
+                vec![Op::RemoveAccount { provider, name }]
             }
-            KeyCode::Enter
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
-            {
-                self.composer.newline();
-                self.dirty = true;
-                Vec::new()
-            }
-            KeyCode::Enter => {
-                self.command_menu = None;
-                self.dirty = true;
-                self.submit()
-            }
-            KeyCode::Backspace => {
-                self.composer.backspace();
-                self.update_command_menu();
-                self.dirty = true;
-                Vec::new()
-            }
-            KeyCode::Delete => {
-                self.composer.delete_forward();
-                self.update_command_menu();
-                self.dirty = true;
-                Vec::new()
-            }
-            KeyCode::Left => {
-                let changed = if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.composer.move_word_left()
-                } else {
-                    self.composer.move_left()
-                };
-                self.dirty |= changed;
-                Vec::new()
-            }
-            KeyCode::Right => {
-                let changed = if key.modifiers.contains(KeyModifiers::ALT) {
-                    self.composer.move_word_right()
-                } else {
-                    self.composer.move_right()
-                };
-                self.dirty |= changed;
-                Vec::new()
-            }
-            KeyCode::Home => {
-                self.dirty |= self.composer.move_home();
-                Vec::new()
-            }
-            KeyCode::End => {
-                self.dirty |= self.composer.move_end();
-                Vec::new()
-            }
-            KeyCode::Up => {
-                if self.composer.on_first_row() {
-                    self.composer.history_prev();
-                    self.dirty = true;
-                } else {
-                    self.dirty |= self.composer.move_up();
+            ConfigOutcome::SetTheme { dark } => {
+                self.theme = if dark { Theme::dark() } else { Theme::light() };
+                if let Overlay::Config(config) = &mut self.overlay {
+                    config.set_providers(self.account_entries.clone());
                 }
+                vec![Op::SetTheme { dark }]
+            }
+            ConfigOutcome::SetMouseCapture { enabled } => {
+                self.mouse_capture = enabled;
                 Vec::new()
             }
-            KeyCode::Down => {
-                if self.composer.is_empty() && !self.agent_runs.is_empty() {
-                    self.set_agent_cursor(0);
-                } else if self.composer.on_last_row() {
-                    self.composer.history_next();
-                    self.dirty = true;
-                } else {
-                    self.dirty |= self.composer.move_down();
-                }
-                Vec::new()
-            }
-            KeyCode::Esc => {
-                self.command_menu = None;
-                self.composer.clear();
-                self.dirty = true;
-                Vec::new()
-            }
-            KeyCode::Char(c) => {
-                self.composer.insert_char(c);
-                self.update_command_menu();
-                self.dirty = true;
-                Vec::new()
-            }
-            _ => Vec::new(),
         }
     }
 
-    fn update_command_menu(&mut self) {
-        let text = self.composer.text();
-        let trimmed = text.trim_start();
-        if trimmed.starts_with('/') && !trimmed.contains(' ') {
-            match &mut self.command_menu {
-                Some(menu) => menu.update(&self.commands, trimmed),
-                None => self.command_menu = Some(CommandMenu::new(&self.commands, trimmed)),
-            }
-        } else {
-            self.command_menu = None;
-        }
-    }
-
-    fn on_picker_key(&mut self, key: KeyEvent) -> Vec<Op> {
-        self.dirty = true;
-        if let Some(ch) = keymap::ctrl_key(&key) {
-            if ch == 'c' {
-                self.picker = None;
-            }
+    pub(crate) fn submit(&mut self) -> Vec<Op> {
+        if self.active.is_some() || self.composer.is_empty() {
             return Vec::new();
         }
-        match key.code {
-            KeyCode::Esc => self.picker = None,
-            KeyCode::Up => {
-                if let Some(picker) = &mut self.picker {
-                    picker.move_up();
-                }
-            }
-            KeyCode::Down => {
-                if let Some(picker) = &mut self.picker {
-                    picker.move_down();
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(picker) = &mut self.picker {
-                    picker.backspace();
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(picker) = &mut self.picker
-                    && let PickerOutcome::Selected(target) = picker.choose()
-                {
-                    self.picker = None;
-                    return vec![Op::SelectModel { target }];
-                }
-            }
-            KeyCode::Char(c) => {
-                if let Some(picker) = &mut self.picker {
-                    picker.on_char(c);
-                }
-            }
-            _ => {}
-        }
-        Vec::new()
-    }
-
-    fn on_effort_picker_key(&mut self, key: KeyEvent) -> Vec<Op> {
-        self.dirty = true;
-        if let Some(ch) = keymap::ctrl_key(&key) {
-            if ch == 'c' {
-                self.effort_picker = None;
-            }
+        let text = self.composer.take();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
             return Vec::new();
         }
-        match key.code {
-            KeyCode::Esc => self.effort_picker = None,
-            KeyCode::Up => {
-                if let Some(picker) = &mut self.effort_picker {
-                    picker.move_up();
-                }
-            }
-            KeyCode::Down => {
-                if let Some(picker) = &mut self.effort_picker {
-                    picker.move_down();
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(picker) = &self.effort_picker
-                    && let EffortOutcome::Selected(effort) = picker.choose()
-                {
-                    self.effort_picker = None;
-                    return self.apply_effort(effort);
-                }
-            }
-            _ => {}
+        if trimmed.starts_with('/') {
+            let cmd = trimmed.to_owned();
+            return self.dispatch_slash_command(&cmd);
         }
-        Vec::new()
+        self.submit_text(text)
     }
 
-    fn on_thread_picker_key(&mut self, key: KeyEvent) -> Vec<Op> {
-        self.dirty = true;
-        if let Some(ch) = keymap::ctrl_key(&key) {
-            if ch == 'c' {
-                self.thread_picker = None;
-            }
+    pub(crate) fn submit_text(&mut self, text: String) -> Vec<Op> {
+        if self.active.is_some() {
             return Vec::new();
         }
-        match key.code {
-            KeyCode::Esc => self.thread_picker = None,
-            KeyCode::Up => {
-                if let Some(picker) = &mut self.thread_picker {
-                    picker.move_up();
-                }
-            }
-            KeyCode::Down => {
-                if let Some(picker) = &mut self.thread_picker {
-                    picker.move_down();
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(picker) = &self.thread_picker
-                    && let ThreadOutcome::Selected(thread_id) = picker.choose()
-                {
-                    self.thread_picker = None;
-                    return vec![Op::Resume { thread_id }];
-                }
-            }
-            _ => {}
-        }
-        Vec::new()
+        let id = TaskId(self.next_task);
+        self.next_task += 1;
+        self.active = Some(id);
+        self.reset_agents();
+        self.transcript.push_user(text.clone());
+        self.follow = true;
+        vec![Op::SubmitMessage { id, text }]
     }
 
-    fn current_efforts(&self) -> Vec<Effort> {
+    pub(crate) fn current_efforts(&self) -> Vec<Effort> {
         let Some(model) = &self.model else {
             return Vec::new();
         };
@@ -622,7 +369,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    fn apply_effort(&mut self, effort: Effort) -> Vec<Op> {
+    pub(crate) fn apply_effort(&mut self, effort: Effort) -> Vec<Op> {
         let Some(current) = &self.model else {
             self.transcript
                 .push_error("select a model first".to_owned());
@@ -633,7 +380,7 @@ impl App {
         vec![Op::SelectModel { target }]
     }
 
-    fn select_model_named(&mut self, query: &str) -> Vec<Op> {
+    pub(crate) fn select_model_named(&mut self, query: &str) -> Vec<Op> {
         let needle = query.trim().to_lowercase();
         let exact: Vec<&ModelEntry> = self
             .models
@@ -654,291 +401,23 @@ impl App {
         for ch in query.trim().chars() {
             picker.on_char(ch);
         }
-        self.picker = Some(picker);
+        self.overlay = Overlay::Model(picker);
         Vec::new()
     }
 
-    fn on_config_key(&mut self, key: KeyEvent) -> Vec<Op> {
-        self.dirty = true;
-        if let Some(ch) = keymap::ctrl_key(&key) {
-            if ch == 'c' {
-                self.config = None;
+    pub(crate) fn update_command_menu(&mut self) {
+        let text = self.composer.text();
+        let trimmed = text.trim_start();
+        if trimmed.starts_with('/') && !trimmed.contains(' ') {
+            match &mut self.overlay {
+                Overlay::Commands(menu) => menu.update(&self.commands, trimmed),
+                _ => {
+                    self.overlay = Overlay::Commands(CommandMenu::new(&self.commands, trimmed));
+                }
             }
-            return Vec::new();
+        } else if matches!(self.overlay, Overlay::Commands(_)) {
+            self.overlay = Overlay::None;
         }
-        match key.code {
-            KeyCode::Esc => {
-                if let Some(config) = &mut self.config {
-                    config.cancel_stage();
-                    if matches!(config.stage_kind(), crate::config::StageKind::List) {
-                        self.config = None;
-                    }
-                }
-            }
-            KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
-                if let Some(config) = &mut self.config {
-                    config.tab();
-                }
-            }
-            KeyCode::Up => {
-                if let Some(config) = &mut self.config {
-                    config.move_up();
-                }
-            }
-            KeyCode::Down => {
-                if let Some(config) = &mut self.config {
-                    config.move_down();
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(config) = &mut self.config {
-                    if matches!(config.stage_kind(), crate::config::StageKind::List) {
-                        let outcome = config.remove_selected();
-                        return self.apply_config_outcome(outcome);
-                    }
-                    config.backspace();
-                }
-            }
-            KeyCode::Delete => {
-                let outcome = self
-                    .config
-                    .as_mut()
-                    .map_or(ConfigOutcome::Pending, Config::remove_selected);
-                return self.apply_config_outcome(outcome);
-            }
-            KeyCode::Enter => {
-                let outcome = self
-                    .config
-                    .as_mut()
-                    .map_or(ConfigOutcome::Pending, Config::enter);
-                return self.apply_config_outcome(outcome);
-            }
-            KeyCode::Char(c) => {
-                if let Some(config) = &mut self.config {
-                    config.on_char(c);
-                }
-            }
-            _ => {}
-        }
-        Vec::new()
-    }
-
-    fn apply_config_outcome(&mut self, outcome: ConfigOutcome) -> Vec<Op> {
-        match outcome {
-            ConfigOutcome::Pending => Vec::new(),
-            ConfigOutcome::AddAccount {
-                provider,
-                name,
-                credential,
-            } => {
-                vec![Op::AddAccount {
-                    provider,
-                    name,
-                    credential,
-                }]
-            }
-            ConfigOutcome::RemoveAccount { provider, name } => {
-                vec![Op::RemoveAccount { provider, name }]
-            }
-            ConfigOutcome::SetTheme { dark } => {
-                self.theme = if dark { Theme::dark() } else { Theme::light() };
-                if let Some(config) = &mut self.config {
-                    config.set_providers(self.account_entries.clone());
-                }
-                vec![Op::SetTheme { dark }]
-            }
-            ConfigOutcome::SetMouseCapture { enabled } => {
-                self.mouse_capture = enabled;
-                Vec::new()
-            }
-        }
-    }
-
-    fn on_ctrl_c(&mut self) -> Vec<Op> {
-        self.dirty = true;
-        if let Some(id) = self.active {
-            return vec![Op::Interrupt { id }];
-        }
-        if self.quit_arm.is_some() {
-            self.should_quit = true;
-        } else {
-            self.quit_arm = Some(QUIT_ARM_TICKS);
-        }
-        Vec::new()
-    }
-
-    fn submit(&mut self) -> Vec<Op> {
-        if self.active.is_some() || self.composer.is_empty() {
-            return Vec::new();
-        }
-        let text = self.composer.take();
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return Vec::new();
-        }
-        if trimmed.starts_with('/') {
-            let cmd = trimmed.to_owned();
-            return self.dispatch_slash_command(&cmd);
-        }
-        self.submit_text(text)
-    }
-
-    fn submit_text(&mut self, text: String) -> Vec<Op> {
-        if self.active.is_some() {
-            return Vec::new();
-        }
-        let id = TaskId(self.next_task);
-        self.next_task += 1;
-        self.active = Some(id);
-        self.reset_agents();
-        self.transcript.push_user(text.clone());
-        self.follow = true;
-        vec![Op::SubmitMessage { id, text }]
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn on_engine(&mut self, event: EngineEvent) -> Vec<Op> {
-        let mut ops = Vec::new();
-        match event {
-            EngineEvent::TaskStarted { .. } => {
-                self.task_start = Some(std::time::Instant::now());
-            }
-            EngineEvent::ModelListChanged { entries } => {
-                if let Some(picker) = &mut self.picker {
-                    picker.set_entries(entries.clone());
-                }
-                self.models = entries;
-            }
-            EngineEvent::ModelSelected { target } => self.model = Some(target),
-            EngineEvent::ThreadsListed { threads } => match self.pending_resume.take() {
-                Some(ResumeIntent::Picker) => {
-                    self.thread_picker = Some(ThreadPicker::new(threads));
-                }
-                Some(ResumeIntent::Index(index)) => match threads.get(index) {
-                    Some(thread) => ops.push(Op::Resume {
-                        thread_id: thread.id,
-                    }),
-                    None => self
-                        .transcript
-                        .push_error(format!("no conversation #{}", index + 1)),
-                },
-                None => {}
-            },
-            EngineEvent::ConversationRestored { target, entries } => {
-                self.transcript.clear();
-                self.reset_agents();
-                self.scroll = 0;
-                self.follow = true;
-                for entry in entries {
-                    match entry {
-                        TranscriptEntry::User(text) => self.transcript.push_user(text),
-                        TranscriptEntry::Assistant(text) => {
-                            self.transcript
-                                .commit_text(&text, &self.highlighter, self.theme);
-                        }
-                        TranscriptEntry::Tool { call, outcome } => {
-                            let id = call.id;
-                            self.transcript.push_tool(call);
-                            self.transcript.finish_tool(id, outcome);
-                        }
-                    }
-                }
-                self.model = Some(target);
-            }
-            EngineEvent::ThinkingDelta { .. } | EngineEvent::LoginProviders { .. } => {}
-            EngineEvent::AccountsChanged { providers } => {
-                if let Some(config) = &mut self.config {
-                    config.set_providers(providers.clone());
-                }
-                self.account_entries = providers;
-            }
-            EngineEvent::SkillsChanged { skills } => {
-                self.commands.set_skills(&skills);
-            }
-            EngineEvent::LoginStatus {
-                message, done, ok, ..
-            } => {
-                if let Some(config) = &mut self.config {
-                    match (done, ok) {
-                        (false, _) => config.set_account_status(message),
-                        (true, true) => config.cancel_stage(),
-                        (true, false) => config.set_error(message),
-                    }
-                }
-            }
-            EngineEvent::TextDelta { id, chunk } => {
-                if let Some(i) = self.agent_index(id) {
-                    self.agent_runs[i].transcript.push_delta(&chunk);
-                } else {
-                    self.transcript.push_delta(&chunk);
-                }
-            }
-            EngineEvent::TextDone { id, text } => {
-                if let Some(i) = self.agent_index(id) {
-                    self.agent_runs[i]
-                        .transcript
-                        .commit_text(&text, &self.highlighter, self.theme);
-                } else {
-                    self.transcript
-                        .commit_text(&text, &self.highlighter, self.theme);
-                }
-            }
-            EngineEvent::ToolStarted { id, call } => {
-                if let Some(i) = self.agent_index(id) {
-                    self.agent_runs[i].transcript.push_tool(call);
-                } else {
-                    self.transcript.push_tool(call);
-                }
-            }
-            EngineEvent::ToolDone { id, call, outcome } => {
-                if let Some(i) = self.agent_index(id) {
-                    self.agent_runs[i].transcript.finish_tool(call, outcome);
-                } else {
-                    self.transcript.finish_tool(call, outcome);
-                }
-            }
-            EngineEvent::AgentStarted {
-                id,
-                agent_type,
-                label,
-                ..
-            } => {
-                self.agent_runs.push(AgentRunView {
-                    id,
-                    agent_type,
-                    label,
-                    transcript: Transcript::default(),
-                    done: None,
-                });
-            }
-            EngineEvent::AgentDone { id, ok } => {
-                if let Some(i) = self.agent_index(id) {
-                    self.agent_runs[i].done = Some(ok);
-                    self.agent_runs[i]
-                        .transcript
-                        .complete(!ok, &self.highlighter, self.theme);
-                }
-            }
-            EngineEvent::TaskDone { interrupted, .. } => {
-                self.transcript
-                    .complete(interrupted, &self.highlighter, self.theme);
-                self.active = None;
-                self.task_start = None;
-            }
-            EngineEvent::Error { message, .. } => {
-                self.transcript.push_error(message);
-                self.active = None;
-                self.task_start = None;
-            }
-            EngineEvent::Notify { kind, message } => {
-                self.toasts.push(crate::toast::Toast::new(kind, message));
-                self.dirty = true;
-            }
-        }
-        if self.follow {
-            self.scroll = u16::MAX;
-        }
-        ops
     }
 
     pub(crate) fn clamp_scroll(&mut self, viewport_height: u16, content_width: u16) {
@@ -951,7 +430,7 @@ impl App {
         self.follow = self.scroll >= max;
     }
 
-    fn take_dirty(&mut self) -> bool {
+    pub(crate) fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
 
@@ -990,23 +469,11 @@ impl App {
     pub(crate) fn scroll(&self) -> u16 {
         self.scroll
     }
-    pub(crate) fn picker(&self) -> Option<&Picker> {
-        self.picker.as_ref()
-    }
-    pub(crate) fn effort_picker(&self) -> Option<&EffortPicker> {
-        self.effort_picker.as_ref()
-    }
-    pub(crate) fn thread_picker(&self) -> Option<&ThreadPicker> {
-        self.thread_picker.as_ref()
+    pub(crate) fn overlay(&self) -> &Overlay {
+        &self.overlay
     }
     pub(crate) fn follow(&self) -> bool {
         self.follow
-    }
-    pub(crate) fn config(&self) -> Option<&Config> {
-        self.config.as_ref()
-    }
-    pub(crate) fn command_menu(&self) -> Option<&CommandMenu> {
-        self.command_menu.as_ref()
     }
     pub(crate) fn current_model(&self) -> Option<&ModelTarget> {
         self.model.as_ref()
@@ -1022,17 +489,15 @@ impl App {
         &self.toasts
     }
 
-    fn agent_index(&self, id: TaskId) -> Option<usize> {
-        self.agent_runs.iter().position(|run| run.id == id)
-    }
-
-    fn reset_agents(&mut self) {
+    pub(crate) fn reset_agents(&mut self) {
         self.agent_runs.clear();
-        self.agent_selector = None;
         self.main_view = MainView::Live;
+        if matches!(self.overlay, Overlay::Agents(_)) {
+            self.overlay = Overlay::None;
+        }
     }
 
-    fn active_transcript(&self) -> &Transcript {
+    pub(crate) fn active_transcript(&self) -> &Transcript {
         match self.main_view {
             MainView::Live => &self.transcript,
             MainView::Agent(id) => self
@@ -1043,9 +508,9 @@ impl App {
         }
     }
 
-    fn set_agent_cursor(&mut self, cursor: usize) {
+    pub(crate) fn set_agent_cursor(&mut self, cursor: usize) {
         if let Some(run) = self.agent_runs.get(cursor) {
-            self.agent_selector = Some(cursor);
+            self.overlay = Overlay::Agents(cursor);
             self.main_view = MainView::Agent(run.id);
             self.scroll = 0;
             self.follow = true;
@@ -1053,41 +518,22 @@ impl App {
         }
     }
 
-    fn close_agent_selector(&mut self) {
-        self.agent_selector = None;
+    pub(crate) fn close_agent_selector(&mut self) {
+        self.overlay = Overlay::None;
         self.main_view = MainView::Live;
         self.follow = true;
         self.scroll = u16::MAX;
         self.dirty = true;
     }
 
-    fn on_agent_selector_key(&mut self, key: KeyEvent) -> Vec<Op> {
-        self.dirty = true;
-        match key.code {
-            KeyCode::Esc => self.close_agent_selector(),
-            KeyCode::Up => match self.agent_selector {
-                Some(0) | None => self.close_agent_selector(),
-                Some(cursor) => self.set_agent_cursor(cursor - 1),
-            },
-            KeyCode::Down => {
-                if let Some(cursor) = self.agent_selector
-                    && cursor + 1 < self.agent_runs.len()
-                {
-                    self.set_agent_cursor(cursor + 1);
-                }
-            }
-            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
-            _ => {}
-        }
-        Vec::new()
-    }
-
     pub(crate) fn agent_runs(&self) -> &[AgentRunView] {
         &self.agent_runs
     }
     pub(crate) fn agent_selector(&self) -> Option<usize> {
-        self.agent_selector
+        match self.overlay {
+            Overlay::Agents(cursor) => Some(cursor),
+            _ => None,
+        }
     }
     pub(crate) fn agent_status(&self) -> Option<String> {
         let mut counts: Vec<(&str, usize)> = Vec::new();
@@ -1175,7 +621,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use goat_protocol::{AccountChoice, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId};
 
-    use super::App;
+    use super::{App, Overlay};
     use crate::theme::Theme;
 
     fn single_entry(provider: &str, model: &str) -> ModelEntry {
@@ -1291,7 +737,7 @@ mod tests {
         app.composer.insert_str("/model");
         let ops = app.submit();
         assert!(ops.is_empty());
-        assert!(app.picker.is_some());
+        assert!(matches!(app.overlay, Overlay::Model(_)));
     }
 
     #[test]
@@ -1300,7 +746,7 @@ mod tests {
         app.composer.insert_str("/model");
         app.submit();
         app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.picker.is_none());
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[test]
@@ -1313,7 +759,7 @@ mod tests {
         app.submit();
         let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(ops.as_slice(), [Op::SelectModel { .. }]));
-        assert!(app.picker.is_none());
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[test]
@@ -1343,7 +789,7 @@ mod tests {
         app.submit();
         let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
         assert!(ops.is_empty());
-        assert!(app.picker.is_some());
+        assert!(matches!(app.overlay, Overlay::Model(_)));
     }
 
     #[test]
@@ -1352,7 +798,7 @@ mod tests {
         app.composer.insert_str("/bogus");
         let ops = app.submit();
         assert!(ops.is_empty());
-        assert!(app.picker.is_none());
+        assert!(matches!(app.overlay, Overlay::None));
         assert!(app.active.is_none());
         assert_eq!(app.transcript.items.len(), 1);
         assert!(matches!(
@@ -1429,7 +875,7 @@ mod tests {
         let mut app = App::new(Theme::dark());
         let ops = app.dispatch_slash_command("/effort");
         assert!(ops.is_empty());
-        assert!(app.effort_picker.is_none());
+        assert!(!matches!(app.overlay, Overlay::Effort(_)));
         assert!(matches!(
             app.transcript.items.last(),
             Some(crate::transcript::Item::Notice(_))
@@ -1450,13 +896,13 @@ mod tests {
         select_model(&mut app, "openai", "gpt");
         let ops = app.dispatch_slash_command("/effort");
         assert!(ops.is_empty());
-        assert!(app.effort_picker.is_some());
+        assert!(matches!(app.overlay, Overlay::Effort(_)));
         app.on_key(press(KeyCode::Down, KeyModifiers::NONE));
         let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
             matches!(ops.as_slice(), [Op::SelectModel { target }] if target.effort == Some(Effort::High))
         );
-        assert!(app.effort_picker.is_none());
+        assert!(!matches!(app.overlay, Overlay::Effort(_)));
     }
 
     #[test]
@@ -1504,7 +950,7 @@ mod tests {
         });
         let ops = app.dispatch_slash_command("/model claude");
         assert!(matches!(ops.as_slice(), [Op::SelectModel { target }] if target.model == "claude"));
-        assert!(app.picker.is_none());
+        assert!(!matches!(app.overlay, Overlay::Model(_)));
     }
 
     #[test]
@@ -1522,7 +968,7 @@ mod tests {
             }],
         });
         assert!(ops.is_empty());
-        assert!(app.thread_picker.is_some());
+        assert!(matches!(app.overlay, Overlay::Thread(_)));
     }
 
     #[test]
@@ -1540,7 +986,7 @@ mod tests {
             }],
         });
         assert!(matches!(ops.as_slice(), [Op::Resume { thread_id: 42 }]));
-        assert!(app.thread_picker.is_none());
+        assert!(!matches!(app.overlay, Overlay::Thread(_)));
     }
 
     #[test]
