@@ -7,6 +7,7 @@ mod keymap;
 pub mod markdown;
 mod overlay;
 mod picker;
+pub mod symbols;
 mod theme;
 mod toast;
 mod transcript;
