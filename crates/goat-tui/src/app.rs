@@ -19,6 +19,7 @@ use crate::{
     highlight::SyntectHighlighter,
     keymap,
     picker::{EffortOutcome, EffortPicker, Picker, PickerOutcome, ThreadOutcome, ThreadPicker},
+    symbols,
     theme::Theme,
     transcript::Transcript,
     tui, view,
@@ -42,7 +43,6 @@ pub(crate) enum MainView {
     Agent(TaskId),
 }
 
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK: Duration = Duration::from_millis(120);
 const QUIT_ARM_TICKS: u16 = 25;
 
@@ -981,7 +981,7 @@ impl App {
         self.quit_arm.is_some()
     }
     pub(crate) fn spinner_frame(&self) -> &'static str {
-        SPINNER[self.spinner % SPINNER.len()]
+        symbols::SPINNER[self.spinner % symbols::SPINNER.len()]
     }
 
     pub(crate) fn content_height(&self, width: u16) -> u16 {
@@ -1010,6 +1010,13 @@ impl App {
     }
     pub(crate) fn current_model(&self) -> Option<&ModelTarget> {
         self.model.as_ref()
+    }
+
+    pub(crate) fn provider_has_multiple_accounts(&self, provider: &str) -> bool {
+        self.account_entries
+            .iter()
+            .find(|e| e.provider == provider)
+            .is_some_and(|e| e.accounts.len() > 1)
     }
     pub(crate) fn toasts(&self) -> &[crate::toast::Toast] {
         &self.toasts

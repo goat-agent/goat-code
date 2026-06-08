@@ -297,8 +297,7 @@ impl Composer {
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool) {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(theme.border())
-            .title_bottom(Line::from(Span::styled(" goat-code ", theme.muted())).right_aligned());
+            .border_style(theme.border());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 

@@ -3,12 +3,12 @@ use std::fmt::Write;
 use goat_commands::CommandRegistry;
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     text::{Line, Span},
     widgets::Paragraph,
 };
 
-use crate::theme::Theme;
+use crate::{overlay::selection_row, symbols, theme::Theme};
 
 fn subsequence_match(query: &str, target: &str) -> Option<Vec<usize>> {
     if query.is_empty() {
@@ -88,10 +88,15 @@ impl CommandMenu {
 
     pub fn desired_height(&self) -> u16 {
         let rows = self.matches.len().max(1);
-        u16::try_from(rows).unwrap_or(u16::MAX)
+        u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(1)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
+        let hint_height = 1u16;
+        let [list_area, hint_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(hint_height)]).areas(area);
+
+        let width = usize::from(list_area.width);
         let lines: Vec<Line> = self
             .matches
             .iter()
@@ -99,28 +104,40 @@ impl CommandMenu {
             .map(|(pos, entry)| {
                 let selected = pos == self.cursor;
                 let name_style = if selected { theme.key() } else { theme.muted() };
-                let mut spans: Vec<Span> = vec![Span::styled("  /", name_style)];
+                let mut name_spans: Vec<Span> = vec![Span::styled("/", name_style)];
                 for (byte_i, ch) in entry.name.char_indices() {
                     let style = if entry.positions.contains(&byte_i) {
                         theme.accent()
                     } else {
                         name_style
                     };
-                    spans.push(Span::styled(ch.to_string(), style));
+                    name_spans.push(Span::styled(ch.to_string(), style));
                 }
-                spans.push(Span::styled("   ", theme.base()));
-                spans.push(Span::styled(
-                    entry.description.clone(),
-                    if selected {
-                        theme.base()
-                    } else {
-                        theme.muted()
-                    },
-                ));
-                Line::from(spans)
+                let desc_style = if selected {
+                    theme.base()
+                } else {
+                    theme.muted()
+                };
+                let right = Some(Span::styled(entry.description.clone(), desc_style));
+                selection_row(theme, selected, width, name_spans, right)
             })
             .collect();
-        frame.render_widget(Paragraph::new(lines), area);
+        frame.render_widget(Paragraph::new(lines), list_area);
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(
+                    " {}{} navigate{}{}  complete{}  run  esc close",
+                    symbols::key::ARROW_UP,
+                    symbols::key::ARROW_DOWN,
+                    symbols::ui::SEPARATOR,
+                    symbols::key::TAB,
+                    symbols::ui::SEPARATOR,
+                ),
+                theme.muted(),
+            ))),
+            hint_area,
+        );
     }
 }
 
@@ -130,15 +147,29 @@ pub fn help_text(registry: &CommandRegistry) -> String {
         let _ = writeln!(out, "  /{}  {}", spec.name, spec.description);
     }
     out.push_str("\nKeybindings:\n");
-    out.push_str("  Enter       send message\n");
+    out.push_str("  Enter            send message\n");
     out.push_str("  Shift/Alt+Enter  newline\n");
-    out.push_str("  Ctrl-C      interrupt / quit\n");
-    out.push_str("  Ctrl-A/E    line start/end\n");
-    out.push_str("  Ctrl-W      delete word before\n");
-    out.push_str("  Alt-\u{2190}/\u{2192}     word left/right\n");
-    out.push_str("  \u{2191}/\u{2193}         history (when at first/last row)\n");
-    out.push_str("  PageUp/Down scroll transcript\n");
-    out.push_str("  Tab         complete slash command\n");
-    out.push_str("  Esc         clear composer");
+    out.push_str("  Ctrl-C           interrupt / quit\n");
+    out.push_str("  Ctrl-A/E         line start/end\n");
+    out.push_str("  Ctrl-W           delete word before\n");
+    let _ = writeln!(
+        out,
+        "  Alt-{}/{}          word left/right",
+        symbols::key::ARROW_LEFT,
+        symbols::key::ARROW_RIGHT
+    );
+    let _ = writeln!(
+        out,
+        "  {}/{}              history (when at first/last row)",
+        symbols::key::ARROW_UP,
+        symbols::key::ARROW_DOWN
+    );
+    out.push_str("  PageUp/Down      scroll transcript\n");
+    let _ = writeln!(
+        out,
+        "  {}               complete slash command",
+        symbols::key::TAB
+    );
+    out.push_str("  Esc              clear composer");
     out
 }

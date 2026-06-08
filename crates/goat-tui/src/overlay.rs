@@ -1,11 +1,13 @@
 use ratatui::{
     Frame,
     layout::Rect,
+    style::Style,
     text::{Line, Span},
     widgets::{Block, BorderType, Clear},
 };
+use unicode_width::UnicodeWidthStr;
 
-use crate::theme::Theme;
+use crate::{symbols, theme::Theme};
 
 pub fn clamp_u16(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
@@ -35,6 +37,58 @@ pub fn overlay_frame(
         return None;
     }
     Some(inner)
+}
+
+pub fn selection_row<'a>(
+    theme: Theme,
+    selected: bool,
+    inner_width: usize,
+    left_spans: Vec<Span<'a>>,
+    right_span: Option<Span<'a>>,
+) -> Line<'a> {
+    let caret = if selected {
+        Span::styled(format!(" {} ", symbols::ui::CARET), theme.accent())
+    } else {
+        Span::raw("   ")
+    };
+    let left_w: usize = left_spans.iter().map(|s| s.content.width()).sum();
+    let right_w = right_span.as_ref().map_or(0, |s| s.content.width());
+    let caret_w = 3usize;
+    let pad =
+        inner_width.saturating_sub(caret_w + left_w + right_w + usize::from(right_span.is_some()));
+    let row_style = if selected {
+        theme.selected_row()
+    } else {
+        Style::default()
+    };
+    let mut spans = vec![caret];
+    spans.extend(left_spans.into_iter().map(|s| {
+        let patched = s.style.patch(row_style);
+        Span::styled(s.content, patched)
+    }));
+    if let Some(right) = right_span {
+        spans.push(Span::styled(" ".repeat(pad), row_style));
+        let patched = right.style.patch(row_style);
+        spans.push(Span::styled(right.content, patched));
+    } else {
+        spans.push(Span::styled(" ".repeat(pad), row_style));
+    }
+    Line::from(spans)
+}
+
+pub fn overflow_hint(start: usize, shown: usize, total: usize) -> (Option<String>, Option<String>) {
+    let above = if start > 0 {
+        Some(format!("{} {} more", symbols::ui::MORE_ABOVE, start))
+    } else {
+        None
+    };
+    let remaining = total.saturating_sub(start + shown);
+    let below = if remaining > 0 {
+        Some(format!("{} {} more", symbols::ui::MORE_BELOW, remaining))
+    } else {
+        None
+    };
+    (above, below)
 }
 
 pub fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {

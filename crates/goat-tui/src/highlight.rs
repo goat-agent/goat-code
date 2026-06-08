@@ -1,4 +1,7 @@
-use std::{str::FromStr, sync::Mutex};
+use std::{
+    str::FromStr,
+    sync::{Mutex, OnceLock},
+};
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -29,15 +32,19 @@ impl Highlighter for PlainHighlighter {
     }
 }
 
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+
+fn syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
 pub struct SyntectHighlighter {
-    syntax_set: SyntaxSet,
     cached_syntect_theme: Mutex<Option<(bool, SyntectTheme)>>,
 }
 
 impl SyntectHighlighter {
     pub fn new() -> Self {
         Self {
-            syntax_set: SyntaxSet::load_defaults_newlines(),
             cached_syntect_theme: Mutex::new(None),
         }
     }
@@ -116,11 +123,11 @@ fn palette_to_syntect_theme(code: &CodePalette, fg: Color, bg: Color) -> Syntect
 
 impl Highlighter for SyntectHighlighter {
     fn highlight(&self, lang: &str, code: &str, theme: Theme) -> Vec<Line<'static>> {
-        let syntax = self
-            .syntax_set
+        let ss = syntax_set();
+        let syntax = ss
             .find_syntax_by_token(lang)
-            .or_else(|| self.syntax_set.find_syntax_by_extension(lang))
-            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+            .or_else(|| ss.find_syntax_by_extension(lang))
+            .unwrap_or_else(|| ss.find_syntax_plain_text());
 
         let syntect_theme = self.get_or_build_syntect_theme(theme);
         let mut hl = HighlightLines::new(syntax, &syntect_theme);
@@ -128,9 +135,7 @@ impl Highlighter for SyntectHighlighter {
         let mut result = Vec::new();
 
         for raw_line in LinesWithEndings::from(code) {
-            let ranges = hl
-                .highlight_line(raw_line, &self.syntax_set)
-                .unwrap_or_default();
+            let ranges = hl.highlight_line(raw_line, ss).unwrap_or_default();
 
             let spans: Vec<Span<'static>> = ranges
                 .into_iter()

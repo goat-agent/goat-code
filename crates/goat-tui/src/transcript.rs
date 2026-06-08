@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use goat_protocol::{ToolCall, ToolCallId, ToolOutcome};
 use ratatui::{
@@ -10,7 +10,9 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::{highlight::Highlighter, markdown, theme::Theme};
+use crate::{highlight::Highlighter, markdown, symbols, theme::Theme};
+
+type LineCache = RefCell<Option<(u16, u64, usize, Vec<Line<'static>>)>>;
 
 #[derive(Debug)]
 pub(crate) enum ToolStatus {
@@ -36,41 +38,46 @@ pub(crate) enum Item {
 pub struct Transcript {
     pub(crate) items: Vec<Item>,
     streaming: Option<String>,
+    version: u64,
     cached_height: Cell<Option<(u16, u16)>>,
+    cached_lines: LineCache,
 }
 
 impl Transcript {
-    fn invalidate_height_cache(&self) {
+    fn bump_version(&mut self) {
+        self.version = self.version.wrapping_add(1);
         self.cached_height.set(None);
+        *self.cached_lines.borrow_mut() = None;
     }
 
     pub fn clear(&mut self) {
-        self.invalidate_height_cache();
+        self.bump_version();
         self.items.clear();
         self.streaming = None;
     }
 
     pub fn push_user(&mut self, text: impl Into<String>) {
-        self.invalidate_height_cache();
+        self.bump_version();
         self.items.push(Item::User(text.into()));
     }
 
     pub fn push_delta(&mut self, chunk: &str) {
-        self.invalidate_height_cache();
+        self.cached_height.set(None);
+        *self.cached_lines.borrow_mut() = None;
         self.streaming
             .get_or_insert_with(String::new)
             .push_str(chunk);
     }
 
     pub fn commit_text(&mut self, text: &str, hl: &dyn Highlighter, theme: Theme) {
-        self.invalidate_height_cache();
+        self.bump_version();
         self.streaming = None;
         self.items
             .push(Item::Agent(markdown::render(text, theme, hl)));
     }
 
     pub fn push_tool(&mut self, call: ToolCall) {
-        self.invalidate_height_cache();
+        self.bump_version();
         self.items.push(Item::Tool {
             id: call.id,
             name: call.name,
@@ -80,7 +87,7 @@ impl Transcript {
     }
 
     pub fn finish_tool(&mut self, call_id: ToolCallId, outcome: ToolOutcome) {
-        self.invalidate_height_cache();
+        self.bump_version();
         for item in self.items.iter_mut().rev() {
             if let Item::Tool { id, status, .. } = item
                 && *id == call_id
@@ -93,18 +100,18 @@ impl Transcript {
     }
 
     pub fn push_error(&mut self, text: impl Into<String>) {
-        self.invalidate_height_cache();
+        self.bump_version();
         self.streaming = None;
         self.items.push(Item::Error(text.into()));
     }
 
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        self.invalidate_height_cache();
+        self.bump_version();
         self.items.push(Item::Notice(text.into()));
     }
 
     pub fn complete(&mut self, interrupted: bool, hl: &dyn Highlighter, theme: Theme) {
-        self.invalidate_height_cache();
+        self.bump_version();
         if interrupted {
             for item in &mut self.items {
                 if let Item::Tool { status, .. } = item
@@ -128,13 +135,38 @@ impl Transcript {
         }
     }
 
+    fn get_or_build_static_lines(
+        &self,
+        theme: Theme,
+        width: u16,
+        spinner: &'static str,
+    ) -> Vec<Line<'static>> {
+        let spinner_idx = symbols::SPINNER
+            .iter()
+            .position(|&s| s == spinner)
+            .unwrap_or(0);
+        {
+            let guard = self.cached_lines.borrow();
+            if let Some((w, v, si, ref cached)) = *guard
+                && w == width
+                && v == self.version
+                && si == spinner_idx
+            {
+                return cached.clone();
+            }
+        }
+        let built = build_static_lines(&self.items, theme, width, spinner);
+        *self.cached_lines.borrow_mut() = Some((width, self.version, spinner_idx, built.clone()));
+        built
+    }
+
     pub fn content_height(&self, width: u16, theme: Theme) -> u16 {
         if let Some((w, h)) = self.cached_height.get()
             && w == width
         {
             return h;
         }
-        let lines = self.build_lines(theme, width, "⠋ ");
+        let lines = self.get_or_build_static_lines(theme, width, symbols::SPINNER[0]);
         let h = if width == 0 {
             u16::try_from(lines.len()).unwrap_or(u16::MAX)
         } else {
@@ -164,11 +196,12 @@ impl Transcript {
         scroll: u16,
         spinner: &'static str,
     ) {
-        let mut lines = self.build_lines(theme, area.width, spinner);
+        let mut lines = self.get_or_build_static_lines(theme, area.width, spinner);
         if let Some(buffer) = &self.streaming {
-            let mut streamed = labelled(buffer, "● ", theme.role_agent(), theme);
+            let mut streamed = labelled(buffer, symbols::marker::AGENT, theme.role_agent(), theme);
             if let Some(last) = streamed.last_mut() {
-                last.spans.push(Span::styled("▌", theme.accent()));
+                last.spans
+                    .push(Span::styled(symbols::ui::STREAM_CURSOR, theme.accent()));
             }
             lines.extend(streamed);
         }
@@ -179,33 +212,39 @@ impl Transcript {
             area,
         );
     }
-
-    fn build_lines(&self, theme: Theme, width: u16, spinner: &'static str) -> Vec<Line<'_>> {
-        let mut lines: Vec<Line<'_>> = Vec::new();
-        for (i, item) in self.items.iter().enumerate() {
-            lines.extend(item_lines(item, theme, width, spinner));
-            let next_is_tool = matches!(self.items.get(i + 1), Some(Item::Tool { .. }));
-            if !(matches!(item, Item::Tool { .. }) && next_is_tool) {
-                lines.push(Line::default());
-            }
-        }
-        lines
-    }
 }
 
-fn item_lines<'a>(
-    item: &'a Item,
+fn build_static_lines(
+    items: &[Item],
     theme: Theme,
     width: u16,
     spinner: &'static str,
-) -> Vec<Line<'a>> {
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        lines.extend(item_lines(item, theme, width, spinner));
+        let next_is_tool = matches!(items.get(i + 1), Some(Item::Tool { .. }));
+        if !(matches!(item, Item::Tool { .. }) && next_is_tool) {
+            lines.push(Line::default());
+        }
+    }
+    lines
+}
+
+fn item_lines(item: &Item, theme: Theme, width: u16, spinner: &'static str) -> Vec<Line<'static>> {
     match item {
-        Item::User(text) => labelled(text, "› ", theme.role_user(), theme),
+        Item::User(text) => labelled(
+            text.as_str(),
+            symbols::marker::USER,
+            theme.role_user(),
+            theme,
+        ),
         Item::Agent(rendered) => {
             let mut out: Vec<Line<'_>> = Vec::new();
             if let Some(first) = rendered.first() {
                 let mut line = first.clone();
-                line.spans.insert(0, Span::styled("● ", theme.role_agent()));
+                line.spans
+                    .insert(0, Span::styled(symbols::marker::AGENT, theme.role_agent()));
                 out.push(line);
             }
             out.extend(rendered.iter().skip(1).map(|l| {
@@ -215,8 +254,10 @@ fn item_lines<'a>(
             }));
             out
         }
-        Item::Error(text) => labelled(text, "✗ ", theme.error(), theme),
-        Item::Notice(text) => labelled(text, "→ ", theme.muted(), theme),
+        Item::Error(text) => labelled(text.as_str(), symbols::marker::ERROR, theme.error(), theme),
+        Item::Notice(text) => {
+            labelled(text.as_str(), symbols::marker::NOTICE, theme.muted(), theme)
+        }
         Item::Tool {
             name,
             input,
@@ -225,8 +266,12 @@ fn item_lines<'a>(
         } => {
             let (marker, marker_style): (&str, _) = match status {
                 ToolStatus::Running => (spinner, theme.accent()),
-                ToolStatus::Done(ToolOutcome { ok: true, .. }) => ("✓ ", theme.role_tool()),
-                ToolStatus::Done(ToolOutcome { ok: false, .. }) => ("✗ ", theme.error()),
+                ToolStatus::Done(ToolOutcome { ok: true, .. }) => {
+                    (symbols::marker::OK, theme.role_tool())
+                }
+                ToolStatus::Done(ToolOutcome { ok: false, .. }) => {
+                    (symbols::marker::ERROR, theme.error())
+                }
             };
 
             let summary = match status {
@@ -248,7 +293,7 @@ fn item_lines<'a>(
 
             let mut spans = vec![
                 Span::styled(marker, marker_style),
-                Span::styled(name.clone(), theme.base()),
+                Span::styled(name.clone(), theme.tool_name()),
                 Span::raw(" "),
                 Span::styled(shown_input, theme.muted()),
             ];
@@ -298,22 +343,25 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
-fn labelled<'a>(
-    text: &'a str,
+fn labelled(
+    text: &str,
     marker: &'static str,
     marker_style: Style,
     theme: Theme,
-) -> Vec<Line<'a>> {
+) -> Vec<Line<'static>> {
     text.split('\n')
         .enumerate()
         .map(|(i, raw)| {
             if i == 0 {
                 Line::from(vec![
                     Span::styled(marker, marker_style),
-                    Span::styled(raw, theme.base()),
+                    Span::styled(raw.to_owned(), theme.base()),
                 ])
             } else {
-                Line::from(vec![Span::raw("  "), Span::styled(raw, theme.base())])
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(raw.to_owned(), theme.base()),
+                ])
             }
         })
         .collect()

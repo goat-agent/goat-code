@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Paragraph},
 };
 
-use crate::theme::Theme;
+use crate::{symbols, theme::Theme};
 
 pub struct Toast {
     message: String,
@@ -30,9 +30,9 @@ impl Toast {
 
     fn icon(&self) -> &'static str {
         match self.kind {
-            NotifyKind::Success => "\u{2713}",
-            NotifyKind::Error => "\u{2717}",
-            NotifyKind::Info => "\u{00b7}",
+            NotifyKind::Success => symbols::ui::CHECK,
+            NotifyKind::Error => symbols::ui::CROSS,
+            NotifyKind::Info => symbols::ui::MIDDOT,
         }
     }
 
