@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 
-use crate::{app::App, command::CommandMenu, theme::Theme};
+use crate::{app::App, command::CommandMenu, overlay, symbols, theme::Theme};
 
 #[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -125,6 +125,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 fn render_agent_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, cursor: usize) {
     let spinner = app.spinner_frame();
+    let inner_width = usize::from(area.width);
     let lines: Vec<Line> = app
         .agent_runs()
         .iter()
@@ -133,21 +134,20 @@ fn render_agent_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, cu
             let selected = i == cursor;
             let (marker, marker_style) = match run.done {
                 None => (spinner, theme.accent()),
-                Some(true) => ("\u{2713}", theme.role_tool()),
-                Some(false) => ("\u{2717}", theme.error()),
+                Some(true) => (symbols::marker::OK, theme.role_tool()),
+                Some(false) => (symbols::marker::ERROR, theme.error()),
             };
             let name_style = if selected { theme.key() } else { theme.muted() };
-            let mut spans = vec![
-                Span::styled(if selected { " \u{203a} " } else { "   " }, theme.accent()),
+            let mut left = vec![
                 Span::styled(marker, marker_style),
                 Span::raw(" "),
                 Span::styled(run.agent_type.clone(), name_style),
             ];
             if !run.label.is_empty() {
-                spans.push(Span::styled("  ", theme.muted()));
-                spans.push(Span::styled(run.label.clone(), theme.muted()));
+                left.push(Span::styled("  ", theme.muted()));
+                left.push(Span::styled(run.label.clone(), theme.muted()));
             }
-            Line::from(spans)
+            overlay::selection_row(theme, selected, inner_width, left, None)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
@@ -181,18 +181,24 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let mut spans = vec![Span::styled(format!(" {}", app.cwd()), theme.muted())];
     if let Some(model) = app.current_model() {
         spans.push(Span::styled("  \u{00b7}  ", theme.muted()));
-        spans.push(Span::styled(
-            format!("{}:{}/{}", model.provider, model.account, model.model),
-            theme.key(),
-        ));
+        let model_label = if app.provider_has_multiple_accounts(&model.provider) {
+            format!("{}:{}/{}", model.provider, model.account, model.model)
+        } else {
+            format!("{}/{}", model.provider, model.model)
+        };
+        spans.push(Span::styled(model_label, theme.key()));
         if let Some(effort) = model.effort {
-            spans.push(Span::styled(format!(":{effort}"), theme.accent()));
+            spans.push(Span::styled(
+                format!("{}{}", symbols::ui::SEPARATOR, effort),
+                theme.accent(),
+            ));
         }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+    let sep = symbols::ui::SEPARATOR;
     let line = if app.is_busy() {
         let mut spans = vec![Span::styled(
             format!(" {} ", app.spinner_frame()),
@@ -201,35 +207,44 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         if let Some(status) = app.agent_status() {
             spans.push(Span::styled(status, theme.muted()));
         } else {
-            spans.push(Span::styled("Working\u{2026}", theme.muted()));
+            spans.push(Span::styled(
+                format!("Working{}", symbols::ui::ELLIPSIS),
+                theme.muted(),
+            ));
             if let Some(secs) = app.elapsed_secs() {
                 spans.push(Span::styled(format!(" {secs}s"), theme.muted()));
             }
         }
-        spans.push(Span::styled(" \u{00b7} ", theme.muted()));
-        spans.push(Span::styled("\u{2303}c", theme.key()));
+        spans.push(Span::styled(sep, theme.muted()));
+        spans.push(Span::styled(
+            format!("{}c", symbols::key::CTRL),
+            theme.key(),
+        ));
         spans.push(Span::styled(" interrupt", theme.muted()));
         Line::from(spans)
     } else if app.quit_armed() {
         Line::from(vec![
-            Span::styled(" \u{2303}c", theme.key()),
+            Span::styled(format!(" {}c", symbols::key::CTRL), theme.key()),
             Span::styled(" again to quit", theme.muted()),
         ])
     } else {
         let mut spans = vec![
-            Span::styled(" \u{21e7}\u{21b5}", theme.key()),
+            Span::styled(format!(" {}", symbols::key::SHIFT_ENTER), theme.key()),
             Span::styled(" newline", theme.muted()),
-            Span::styled(" \u{00b7} ", theme.muted()),
-            Span::styled("\u{2191}\u{2193}", theme.key()),
+            Span::styled(sep, theme.muted()),
+            Span::styled(symbols::key::ARROWS_UPDOWN, theme.key()),
             Span::styled(" history", theme.muted()),
         ];
         if !app.agent_runs().is_empty() {
-            spans.push(Span::styled(" \u{00b7} ", theme.muted()));
-            spans.push(Span::styled("\u{2193}", theme.key()));
+            spans.push(Span::styled(sep, theme.muted()));
+            spans.push(Span::styled(symbols::key::ARROW_DOWN, theme.key()));
             spans.push(Span::styled(" agents", theme.muted()));
         }
-        spans.push(Span::styled(" \u{00b7} ", theme.muted()));
-        spans.push(Span::styled("\u{2303}c", theme.key()));
+        spans.push(Span::styled(sep, theme.muted()));
+        spans.push(Span::styled(
+            format!("{}c", symbols::key::CTRL),
+            theme.key(),
+        ));
         spans.push(Span::styled(" quit", theme.muted()));
         Line::from(spans)
     };
