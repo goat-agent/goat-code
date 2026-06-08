@@ -377,7 +377,8 @@ where
 }
 
 fn span_text_width(spans: &[Span<'static>]) -> usize {
-    spans.iter().map(|s| s.content.len()).sum()
+    use unicode_width::UnicodeWidthStr;
+    spans.iter().map(|s| s.content.width()).sum()
 }
 
 fn next_bullet(list_stack: &[Option<u64>], list_item_index: &mut [u64]) -> String {
