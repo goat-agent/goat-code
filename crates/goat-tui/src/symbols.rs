@@ -29,7 +29,6 @@ pub mod key {
     pub const CTRL: &str = "⌃";
     pub const SHIFT: &str = "⇧";
     pub const ENTER: &str = "↵";
-    pub const RETURN: &str = "⏎";
     pub const TAB: &str = "⇥";
     pub const BACKSPACE: &str = "⌫";
     pub const ARROW_UP: &str = "↑";

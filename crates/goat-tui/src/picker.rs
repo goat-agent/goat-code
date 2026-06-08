@@ -12,6 +12,18 @@ use crate::{
     theme::Theme,
 };
 
+fn hint_line<'a>(pairs: &[(&'a str, &'a str)], sep: &'a str, theme: Theme) -> Line<'a> {
+    let mut spans: Vec<Span<'a>> = vec![Span::raw(" ")];
+    for (i, (glyph, label)) in pairs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(sep, theme.muted()));
+        }
+        spans.push(Span::styled(*glyph, theme.muted_accent()));
+        spans.push(Span::styled(*label, theme.muted()));
+    }
+    Line::from(spans)
+}
+
 pub enum PickerOutcome {
     NoOp,
     Selected(ModelTarget),
@@ -236,15 +248,15 @@ impl Picker {
         frame.render_widget(Paragraph::new(lines), list_area);
 
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(
-                    " {}{} navigate   {} select   esc close",
-                    symbols::key::ARROW_UP,
-                    symbols::key::ARROW_DOWN,
-                    symbols::key::ENTER
-                ),
-                theme.muted(),
-            ))),
+            Paragraph::new(hint_line(
+                &[
+                    (symbols::key::ARROWS_UPDOWN, " navigate"),
+                    (symbols::key::ENTER, " select"),
+                    ("esc", " close"),
+                ],
+                symbols::ui::SEPARATOR,
+                theme,
+            )),
             hint_area,
         );
 
@@ -345,15 +357,15 @@ impl EffortPicker {
         frame.render_widget(Paragraph::new(lines), list_area);
 
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(
-                    " {}{} navigate   {} select   esc close",
-                    symbols::key::ARROW_UP,
-                    symbols::key::ARROW_DOWN,
-                    symbols::key::ENTER
-                ),
-                theme.muted(),
-            ))),
+            Paragraph::new(hint_line(
+                &[
+                    (symbols::key::ARROWS_UPDOWN, " navigate"),
+                    (symbols::key::ENTER, " select"),
+                    ("esc", " close"),
+                ],
+                symbols::ui::SEPARATOR,
+                theme,
+            )),
             hint_area,
         );
     }
@@ -457,15 +469,15 @@ impl ThreadPicker {
         frame.render_widget(Paragraph::new(lines), list_area);
 
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(
-                    " {}{} navigate   {} resume   esc close",
-                    symbols::key::ARROW_UP,
-                    symbols::key::ARROW_DOWN,
-                    symbols::key::ENTER
-                ),
-                theme.muted(),
-            ))),
+            Paragraph::new(hint_line(
+                &[
+                    (symbols::key::ARROWS_UPDOWN, " navigate"),
+                    (symbols::key::ENTER, " resume"),
+                    ("esc", " close"),
+                ],
+                symbols::ui::SEPARATOR,
+                theme,
+            )),
             hint_area,
         );
     }
@@ -514,15 +526,15 @@ fn render_account(frame: &mut Frame, inner: Rect, theme: Theme, account: &Accoun
     frame.render_widget(Paragraph::new(lines), list_area);
 
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!(
-                " {}{} navigate   {} select   esc back",
-                symbols::key::ARROW_UP,
-                symbols::key::ARROW_DOWN,
-                symbols::key::ENTER
-            ),
-            theme.muted(),
-        ))),
+        Paragraph::new(hint_line(
+            &[
+                (symbols::key::ARROWS_UPDOWN, " navigate"),
+                (symbols::key::ENTER, " select"),
+                ("esc", " back"),
+            ],
+            symbols::ui::SEPARATOR,
+            theme,
+        )),
         hint_area,
     );
 }

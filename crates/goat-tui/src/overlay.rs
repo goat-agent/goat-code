@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear},
+    widgets::{Block, BorderType, Clear, Paragraph},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -24,18 +24,19 @@ pub fn overlay_frame(
         Some(t) => Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(theme.border())
-            .style(theme.base())
+            .style(theme.surface())
             .title_top(Line::from(Span::styled(format!(" {t} "), theme.accent())).left_aligned()),
         None => Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(theme.border())
-            .style(theme.base()),
+            .style(theme.surface()),
     };
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
+    frame.render_widget(Paragraph::new("").style(theme.surface()), inner);
     Some(inner)
 }
 

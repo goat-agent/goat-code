@@ -138,6 +138,10 @@ impl Theme {
         Style::new().fg(self.muted).add_modifier(Modifier::BOLD)
     }
 
+    pub fn surface(self) -> Style {
+        Style::new().fg(self.fg).bg(self.code.bg)
+    }
+
     pub fn is_dark(self) -> bool {
         match self.bg {
             Color::Rgb(r, g, b) => {
