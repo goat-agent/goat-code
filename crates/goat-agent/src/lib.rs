@@ -10,7 +10,7 @@ use std::{
 };
 
 use goat_auth::{
-    CredentialKey, CredentialKind, CredentialStore, OAuthTokenSet, ResolvedCredential, SecretString,
+    Credential, CredentialKey, CredentialKind, CredentialStore, SecretString, TokenSet,
 };
 use goat_core::Engine;
 use goat_protocol::{
@@ -19,8 +19,7 @@ use goat_protocol::{
     ToolCall, ToolCallId, ToolOutcome, TranscriptEntry,
 };
 use goat_provider::{
-    ContentBlock, MessageRole, ModelEvent, ModelProvider, ModelRequest, ProviderMessage,
-    ToolDefinition,
+    ContentBlock, Message, MessageRole, Provider, Request, StreamEvent, ToolDefinition,
 };
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use goat_store::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
@@ -153,7 +152,7 @@ impl<'a> Run<'a> {
 }
 
 struct LoopEnv<'a> {
-    provider: &'a dyn ModelProvider,
+    provider: &'a dyn Provider,
     target: &'a ModelTarget,
     tool_defs: &'a [ToolDefinition],
     cwd: &'a Path,
@@ -227,7 +226,8 @@ async fn restore_target(store: &Store, credentials: &CredentialStore) -> Option<
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let thread = store.latest_thread_in(cwd).await.ok().flatten()?;
-    let provider = goat_providers::build_provider(credentials, &thread.provider, &thread.account)?;
+    let provider = Registry::load(credentials, &thread.account)
+        .get(&goat_provider::ProviderId::from(thread.provider.as_str()))?;
     if !provider.authenticated() {
         return None;
     }
@@ -277,7 +277,7 @@ async fn handle_remove_account(
     if let Err(err) = credentials.remove(&key) {
         tracing::warn!(%err, "failed to remove account");
     }
-    *registry = Registry::for_account(credentials, DEFAULT_ACCOUNT);
+    *registry = Registry::new(credentials);
     let entries = discover_ready(registry, credentials).await;
     let _ = events.send(Event::ModelListChanged { entries }).await;
     emit_accounts_changed(events, registry, credentials).await;
@@ -292,7 +292,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
         credentials,
         mut target,
     } = agent;
-    let mut history: Vec<ProviderMessage> = Vec::new();
+    let mut history: Vec<Message> = Vec::new();
     let mut thread_id: Option<i64> = None;
 
     if target.is_none() {
@@ -396,9 +396,11 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
 fn build_account_entries(registry: &Registry, credentials: &CredentialStore) -> Vec<AccountEntry> {
     let stored = credentials.entries();
     registry
-        .login_providers()
-        .into_iter()
-        .map(|(provider_id, auth_method)| {
+        .all()
+        .iter()
+        .map(|p| {
+            let provider_id = p.id().to_string();
+            let auth_method = p.capabilities().auth;
             let is_local = matches!(auth_method, AuthMethod::None);
             let accounts = stored
                 .iter()
@@ -431,9 +433,12 @@ async fn announce_startup(
     let _ = events
         .send(Event::LoginProviders {
             providers: registry
-                .login_providers()
-                .into_iter()
-                .map(|(id, method)| LoginProvider { id, method })
+                .all()
+                .iter()
+                .map(|p| LoginProvider {
+                    id: p.id().to_string(),
+                    method: p.capabilities().auth,
+                })
                 .collect(),
         })
         .await;
@@ -495,7 +500,8 @@ async fn login_failed(provider: &str, events: &mpsc::Sender<Event>, message: Str
 async fn run_self_oauth(
     provider: &str,
     events: &mpsc::Sender<Event>,
-) -> Result<OAuthTokenSet, String> {
+    registry: &Registry,
+) -> Result<TokenSet, String> {
     let (status_tx, mut status_rx) = mpsc::channel::<String>(8);
     let status_provider = provider.to_owned();
     let status_events = events.clone();
@@ -511,10 +517,9 @@ async fn run_self_oauth(
                 .await;
         }
     });
-    let result = goat_providers::oauth_login(provider, &status_tx).await;
-    drop(status_tx);
+    let result = registry.login(provider, status_tx).await;
     let _ = forwarder.await;
-    result.map_err(|err| err.to_string())
+    result
 }
 
 async fn finalize_login(
@@ -522,7 +527,7 @@ async fn finalize_login(
     provider: String,
     name: String,
     key: CredentialKey,
-    resolved: ResolvedCredential,
+    resolved: Credential,
 ) {
     if let Err(message) = ctx
         .credentials
@@ -533,10 +538,10 @@ async fn finalize_login(
         emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
         return;
     }
-    *ctx.registry = Registry::for_account(ctx.credentials, DEFAULT_ACCOUNT);
+    *ctx.registry = Registry::new(ctx.credentials);
     if let Err(message) = validate_stored(ctx.credentials, &provider, &name).await {
         let _ = ctx.credentials.remove(&key);
-        *ctx.registry = Registry::for_account(ctx.credentials, DEFAULT_ACCOUNT);
+        *ctx.registry = Registry::new(ctx.credentials);
         login_failed(&provider, ctx.events, message).await;
         emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
         return;
@@ -552,7 +557,7 @@ async fn validate_stored(
     provider: &str,
     name: &str,
 ) -> Result<(), String> {
-    match goat_providers::build_provider(credentials, provider, name) {
+    match Registry::load(credentials, name).get(&goat_provider::ProviderId::from(provider)) {
         Some(target) => target
             .validate()
             .await
@@ -588,9 +593,9 @@ async fn handle_login(
         return;
     }
     let resolved = match credential {
-        LoginCredential::ApiKey(secret) => ResolvedCredential::ApiKey(SecretString::from(secret)),
-        LoginCredential::OAuth => match run_self_oauth(&provider, ctx.events).await {
-            Ok(tokens) => ResolvedCredential::OAuth(tokens),
+        LoginCredential::ApiKey(secret) => Credential::ApiKey(SecretString::from(secret)),
+        LoginCredential::OAuth => match run_self_oauth(&provider, ctx.events, ctx.registry).await {
+            Ok(tokens) => Credential::OAuth(tokens),
             Err(message) => {
                 login_failed(&provider, ctx.events, message).await;
                 emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
@@ -612,7 +617,7 @@ fn account_names_for(credentials: &CredentialStore, provider_id: &str) -> Vec<St
 
 fn accounts_for_provider(
     credentials: &CredentialStore,
-    provider: &dyn goat_provider::ModelProvider,
+    provider: &dyn goat_provider::Provider,
 ) -> Option<Vec<String>> {
     let is_local = matches!(provider.capabilities().auth, AuthMethod::None);
     let stored = account_names_for(credentials, &provider.id().to_string());
@@ -721,12 +726,12 @@ async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> V
 async fn run_round(
     ctx: &Ctx<'_>,
     run: &Run<'_>,
-    provider: &dyn ModelProvider,
-    request: ModelRequest,
+    provider: &dyn Provider,
+    request: Request,
     token: &CancellationToken,
 ) -> RoundResult {
     let (mev_tx, mut mev_rx) = mpsc::channel(64);
-    let handle = provider.request(request, mev_tx);
+    let handle = provider.stream(request, mev_tx);
     let mut raw = String::new();
     let mut thinking = String::new();
     let mut signature = String::new();
@@ -740,31 +745,31 @@ async fn run_round(
                 break RoundEnd::Cancelled;
             }
             maybe_event = mev_rx.recv() => match maybe_event {
-                Some(ModelEvent::TextDelta { text }) => {
+                Some(StreamEvent::TextDelta { text }) => {
                     raw.push_str(&text);
                     let _ = ctx
                         .events
                         .send(Event::TextDelta { id: run.id, chunk: text })
                         .await;
                 }
-                Some(ModelEvent::ThinkingDelta { text }) => {
+                Some(StreamEvent::ThinkingDelta { text }) => {
                     thinking.push_str(&text);
                     let _ = ctx
                         .events
                         .send(Event::ThinkingDelta { id: run.id, chunk: text })
                         .await;
                 }
-                Some(ModelEvent::ThinkingSignature { signature: sig }) => {
+                Some(StreamEvent::ThinkingSignature { signature: sig }) => {
                     signature.push_str(&sig);
                 }
-                Some(ModelEvent::RedactedThinking { data }) => {
+                Some(StreamEvent::RedactedThinking { data }) => {
                     redacted.push(data);
                 }
-                Some(ModelEvent::ToolCall { id: vendor_id, name, input }) => {
+                Some(StreamEvent::ToolCall { id: vendor_id, name, input }) => {
                     pending_calls.push((vendor_id, name, input));
                 }
-                Some(ModelEvent::Completed) | None => break RoundEnd::Completed,
-                Some(ModelEvent::Failed { message }) => break RoundEnd::Failed(message),
+                Some(StreamEvent::Completed) | None => break RoundEnd::Completed,
+                Some(StreamEvent::Failed { message }) => break RoundEnd::Failed(message),
             }
         }
     };
@@ -1101,7 +1106,7 @@ async fn init_db_turn(
     }
 }
 
-async fn persist_message(ctx: &Ctx<'_>, ids: &TurnIds, message: &ProviderMessage) {
+async fn persist_message(ctx: &Ctx<'_>, ids: &TurnIds, message: &Message) {
     let role = match message.role {
         MessageRole::System => return,
         MessageRole::User => "user",
@@ -1198,7 +1203,7 @@ async fn process_round_output(
     run: &Run<'_>,
     env: &LoopEnv<'_>,
     round: RoundResult,
-    history: &mut Vec<ProviderMessage>,
+    history: &mut Vec<Message>,
     rounds: usize,
     call_seq: &mut u64,
     tool_ctx: &ToolContext,
@@ -1233,7 +1238,7 @@ async fn process_round_output(
                 input: input_val,
             });
         }
-        let message = ProviderMessage {
+        let message = Message {
             role: MessageRole::Assistant,
             content,
         };
@@ -1264,7 +1269,7 @@ async fn process_round_output(
                 is_error: true,
             })
             .collect();
-        let message = ProviderMessage {
+        let message = Message {
             role: MessageRole::User,
             content: synthetic,
         };
@@ -1284,7 +1289,7 @@ async fn process_round_output(
         return RoundOutcome::Done;
     }
     let batch = run_tool_batch(ctx, run, env, &pending_calls, call_seq, tool_ctx, token).await;
-    let message = ProviderMessage {
+    let message = Message {
         role: MessageRole::User,
         content: batch.tool_results,
     };
@@ -1301,7 +1306,7 @@ async fn process_round_output(
 
 fn build_tool_defs(
     ctx: &Ctx<'_>,
-    provider: &dyn ModelProvider,
+    provider: &dyn Provider,
     selection: Option<&ToolSelection>,
     allow_delegate: bool,
 ) -> Vec<ToolDefinition> {
@@ -1358,7 +1363,7 @@ async fn core_loop(
     run: &Run<'_>,
     env: &LoopEnv<'_>,
     token: &CancellationToken,
-    history: &mut Vec<ProviderMessage>,
+    history: &mut Vec<Message>,
 ) -> LoopOutcome {
     let tool_ctx = match ToolContext::new(env.cwd) {
         Ok(tool_ctx) => tool_ctx,
@@ -1368,7 +1373,7 @@ async fn core_loop(
     let mut call_seq = 0u64;
     loop {
         rounds += 1;
-        let request = ModelRequest {
+        let request = Request {
             model: env.target.model.clone(),
             messages: history.clone(),
             tools: env.tool_defs.to_vec(),
@@ -1404,7 +1409,7 @@ fn resolve_agent_model(
     ctx: &Ctx<'_>,
     parent: &ModelTarget,
     spec: &AgentSpec,
-) -> Option<(Arc<dyn ModelProvider>, String, Option<Effort>)> {
+) -> Option<(Arc<dyn Provider>, String, Option<Effort>)> {
     if let Some(model_id) = &spec.model {
         if let Some(found) = ctx
             .registry
@@ -1413,9 +1418,9 @@ fn resolve_agent_model(
             .find(|provider| provider.catalog().contains(&model_id.as_str()))
         {
             let provider_id = found.id().to_string();
-            let provider =
-                goat_providers::build_provider(ctx.credentials, &provider_id, &parent.account)
-                    .unwrap_or_else(|| found.clone());
+            let provider = Registry::load(ctx.credentials, &parent.account)
+                .get(&goat_provider::ProviderId::from(provider_id.as_str()))
+                .unwrap_or_else(|| found.clone());
             let effort = spec
                 .effort
                 .or_else(|| provider.efforts(model_id).into_iter().next());
@@ -1423,12 +1428,13 @@ fn resolve_agent_model(
         }
         tracing::warn!(model = %model_id, "agent model not found; inheriting parent model");
     }
-    let provider =
-        goat_providers::build_provider(ctx.credentials, &parent.provider, &parent.account)
-            .or_else(|| {
-                ctx.registry
-                    .get(&goat_provider::ProviderId::from(parent.provider.as_str()))
-            })?;
+    let provider = ctx
+        .registry
+        .get(&goat_provider::ProviderId::from(parent.provider.as_str()))
+        .or_else(|| {
+            Registry::load(ctx.credentials, &parent.account)
+                .get(&goat_provider::ProviderId::from(parent.provider.as_str()))
+        })?;
     Some((provider, parent.model.clone(), parent.effort))
 }
 
@@ -1460,8 +1466,8 @@ async fn run_delegation(
     };
     let tool_defs = build_tool_defs(ctx, provider.as_ref(), Some(&spec.tools), false);
     let mut history = vec![
-        ProviderMessage::text(MessageRole::System, spec.prompt.clone()),
-        ProviderMessage::text(MessageRole::User, args.prompt.clone()),
+        Message::text(MessageRole::System, spec.prompt.clone()),
+        Message::text(MessageRole::User, args.prompt.clone()),
     ];
     let child_id = TaskId(ctx.child_ids.fetch_add(1, Ordering::Relaxed));
     let _ = ctx
@@ -1508,7 +1514,7 @@ fn delegation_label(prompt: &str) -> String {
     }
 }
 
-fn final_text(history: &[ProviderMessage]) -> String {
+fn final_text(history: &[Message]) -> String {
     for message in history.iter().rev() {
         if message.role == MessageRole::Assistant {
             let mut text = String::new();
@@ -1632,7 +1638,7 @@ async fn handle_resume(
     skills: &[SkillInfo],
     tid: i64,
     target: &mut Option<ModelTarget>,
-    history: &mut Vec<ProviderMessage>,
+    history: &mut Vec<Message>,
     thread_id: &mut Option<i64>,
     events: &mpsc::Sender<Event>,
 ) {
@@ -1646,7 +1652,7 @@ async fn handle_resume(
         effort: thread.effort.as_deref().and_then(Effort::parse),
     };
     let messages = store.get_messages(tid).await.unwrap_or_default();
-    let mut new_history = vec![ProviderMessage::text(
+    let mut new_history = vec![Message::text(
         MessageRole::System,
         build_system_prompt(skills),
     )];
@@ -1696,7 +1702,7 @@ async fn handle_resume(
                 ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
             }
         }
-        new_history.push(ProviderMessage { role, content });
+        new_history.push(Message { role, content });
     }
     *history = new_history;
     *thread_id = Some(tid);
@@ -1714,7 +1720,7 @@ async fn handle_turn(
     id: TaskId,
     text: String,
     target: &mut Option<ModelTarget>,
-    history: &mut Vec<ProviderMessage>,
+    history: &mut Vec<Message>,
     thread_id: &mut Option<i64>,
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
@@ -1722,24 +1728,25 @@ async fn handle_turn(
         emit_task_error(ctx, id, "no model selected".to_owned()).await;
         return Flow::Continue;
     };
-    let resolved_provider =
-        goat_providers::build_provider(ctx.credentials, &resolved.provider, &resolved.account)
-            .or_else(|| {
-                ctx.registry
-                    .get(&goat_provider::ProviderId::from(resolved.provider.as_str()))
-            });
+    let resolved_provider = ctx
+        .registry
+        .get(&goat_provider::ProviderId::from(resolved.provider.as_str()))
+        .or_else(|| {
+            Registry::load(ctx.credentials, &resolved.account)
+                .get(&goat_provider::ProviderId::from(resolved.provider.as_str()))
+        });
     let Some(provider) = resolved_provider else {
         emit_task_error(ctx, id, format!("unknown provider: {}", resolved.provider)).await;
         return Flow::Continue;
     };
 
     if history.is_empty() {
-        history.push(ProviderMessage::text(
+        history.push(Message::text(
             MessageRole::System,
             build_system_prompt(ctx.skills),
         ));
     }
-    history.push(ProviderMessage::text(MessageRole::User, text.clone()));
+    history.push(Message::text(MessageRole::User, text.clone()));
     let ids = init_db_turn(ctx, id, &text, &resolved, thread_id).await;
     if ctx.events.send(Event::TaskStarted { id }).await.is_err() {
         finalize_turn(ctx, id, &TurnEnd::Shutdown, &ids).await;
@@ -1810,8 +1817,7 @@ mod tests {
     use goat_core::Session;
     use goat_protocol::{Event, ModelTarget, Op, TaskId};
     use goat_provider::{
-        AuthMethod, ModelEvent, ModelInfo, ModelProvider, ModelRequest, ProviderCapabilities,
-        ProviderId,
+        AuthMethod, Capabilities, Model, Provider, ProviderId, Request, StreamEvent,
     };
     use goat_providers::Registry;
     use goat_store::Store;
@@ -1825,31 +1831,31 @@ mod tests {
         delay_ms: u64,
     }
 
-    impl ModelProvider for MockProvider {
+    impl Provider for MockProvider {
         fn id(&self) -> ProviderId {
             ProviderId::from(self.id.as_str())
         }
 
-        fn capabilities(&self) -> ProviderCapabilities {
-            ProviderCapabilities {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
                 tools: false,
                 auth: AuthMethod::None,
             }
         }
 
-        fn request(&self, _req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()> {
+        fn stream(&self, _req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
             let reply = self.reply.clone();
             let delay = self.delay_ms;
             tokio::spawn(async move {
                 if delay > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 }
-                let _ = events.send(ModelEvent::TextDelta { text: reply }).await;
-                let _ = events.send(ModelEvent::Completed).await;
+                let _ = events.send(StreamEvent::TextDelta { text: reply }).await;
+                let _ = events.send(StreamEvent::Completed).await;
             })
         }
 
-        fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()> {
+        fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
             tokio::spawn(async move {
                 drop(out);
             })
@@ -1860,25 +1866,25 @@ mod tests {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
-    impl ModelProvider for ScriptedProvider {
+    impl Provider for ScriptedProvider {
         fn id(&self) -> ProviderId {
             ProviderId::from("mock")
         }
 
-        fn capabilities(&self) -> ProviderCapabilities {
-            ProviderCapabilities {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
                 tools: true,
                 auth: AuthMethod::None,
             }
         }
 
-        fn request(&self, _req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()> {
+        fn stream(&self, _req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             tokio::spawn(async move {
                 match n {
                     0 => {
                         let _ = events
-                            .send(ModelEvent::ToolCall {
+                            .send(StreamEvent::ToolCall {
                                 id: "call-1".to_owned(),
                                 name: "Agent".to_owned(),
                                 input: "{\"agent_type\":\"explore\",\"prompt\":\"look into it\"}"
@@ -1888,24 +1894,24 @@ mod tests {
                     }
                     1 => {
                         let _ = events
-                            .send(ModelEvent::TextDelta {
+                            .send(StreamEvent::TextDelta {
                                 text: "child findings".to_owned(),
                             })
                             .await;
                     }
                     _ => {
                         let _ = events
-                            .send(ModelEvent::TextDelta {
+                            .send(StreamEvent::TextDelta {
                                 text: "final answer".to_owned(),
                             })
                             .await;
                     }
                 }
-                let _ = events.send(ModelEvent::Completed).await;
+                let _ = events.send(StreamEvent::Completed).await;
             })
         }
 
-        fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()> {
+        fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
             tokio::spawn(async move {
                 drop(out);
             })

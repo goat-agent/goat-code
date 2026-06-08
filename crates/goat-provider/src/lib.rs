@@ -1,20 +1,10 @@
-use std::{
-    fmt,
-    time::{SystemTime, UNIX_EPOCH},
-};
-
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinHandle};
 
+pub use goat_auth::{TokenSet, now_secs};
 pub use goat_protocol::{AuthMethod, Effort};
 
-pub fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-        .unwrap_or(0)
-}
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProviderId(pub String);
@@ -72,12 +62,12 @@ pub enum ContentBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProviderMessage {
+pub struct Message {
     pub role: MessageRole,
     pub content: Vec<ContentBlock>,
 }
 
-impl ProviderMessage {
+impl Message {
     pub fn text(role: MessageRole, text: impl Into<String>) -> Self {
         Self {
             role,
@@ -98,14 +88,14 @@ impl ProviderMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelInfo {
+pub struct Model {
     pub id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ModelRequest {
+pub struct Request {
     pub model: String,
-    pub messages: Vec<ProviderMessage>,
+    pub messages: Vec<Message>,
     #[serde(default)]
     pub tools: Vec<ToolDefinition>,
     #[serde(default)]
@@ -113,13 +103,13 @@ pub struct ModelRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderCapabilities {
+pub struct Capabilities {
     pub tools: bool,
     pub auth: AuthMethod,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ModelEvent {
+pub enum StreamEvent {
     TextDelta {
         text: String,
     },
@@ -143,11 +133,11 @@ pub enum ModelEvent {
     },
 }
 
-pub trait ModelProvider: Send + Sync + 'static {
+pub trait Provider: Send + Sync + 'static {
     fn id(&self) -> ProviderId;
-    fn capabilities(&self) -> ProviderCapabilities;
-    fn request(&self, req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()>;
-    fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()>;
+    fn capabilities(&self) -> Capabilities;
+    fn stream(&self, req: Request, tx: mpsc::Sender<StreamEvent>) -> JoinHandle<()>;
+    fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()>;
     fn catalog(&self) -> &'static [&'static str] {
         &[]
     }
@@ -160,6 +150,10 @@ pub trait ModelProvider: Send + Sync + 'static {
     fn validate(&self) -> JoinHandle<Result<(), String>> {
         tokio::spawn(async { Ok(()) })
     }
+    fn login(&self, status: mpsc::Sender<String>) -> JoinHandle<Result<TokenSet, String>> {
+        let _ = status;
+        tokio::spawn(async { Err("login not supported".into()) })
+    }
 }
 
 #[cfg(test)]
@@ -167,37 +161,35 @@ mod tests {
     use tokio::{sync::mpsc, task::JoinHandle};
 
     use super::{
-        AuthMethod, MessageRole, ModelEvent, ModelInfo, ModelProvider, ModelRequest,
-        ProviderCapabilities, ProviderId, ProviderMessage,
+        AuthMethod, Capabilities, Message, MessageRole, Model, Provider, ProviderId, Request,
+        StreamEvent,
     };
 
     struct MockProvider;
 
-    impl ModelProvider for MockProvider {
+    impl Provider for MockProvider {
         fn id(&self) -> ProviderId {
             ProviderId::from("mock")
         }
 
-        fn capabilities(&self) -> ProviderCapabilities {
-            ProviderCapabilities {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
                 tools: false,
                 auth: AuthMethod::None,
             }
         }
 
-        fn request(&self, _req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()> {
+        fn stream(&self, _req: Request, tx: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
             tokio::spawn(async move {
-                let _ = events
-                    .send(ModelEvent::TextDelta { text: "hi".into() })
-                    .await;
-                let _ = events.send(ModelEvent::Completed).await;
+                let _ = tx.send(StreamEvent::TextDelta { text: "hi".into() }).await;
+                let _ = tx.send(StreamEvent::Completed).await;
             })
         }
 
-        fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()> {
+        fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
             tokio::spawn(async move {
                 let _ = out
-                    .send(ModelInfo {
+                    .send(Model {
                         id: "mock-1".into(),
                     })
                     .await;
@@ -211,10 +203,10 @@ mod tests {
         assert_eq!(provider.id(), ProviderId::from("mock"));
         assert!(!provider.capabilities().tools);
         let (tx, mut rx) = mpsc::channel(8);
-        let handle = provider.request(
-            ModelRequest {
+        let handle = provider.stream(
+            Request {
                 model: "mock-1".into(),
-                messages: vec![ProviderMessage::text(MessageRole::User, "hi")],
+                messages: vec![Message::text(MessageRole::User, "hi")],
                 tools: vec![],
                 effort: None,
             },
@@ -228,8 +220,8 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                ModelEvent::TextDelta { text: "hi".into() },
-                ModelEvent::Completed
+                StreamEvent::TextDelta { text: "hi".into() },
+                StreamEvent::Completed
             ]
         );
     }

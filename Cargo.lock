@@ -1097,6 +1097,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1184,6 +1185,7 @@ dependencies = [
 name = "goat-provider"
 version = "0.1.0"
 dependencies = [
+ "goat-auth",
  "goat-protocol",
  "serde",
  "serde_json",
@@ -1221,7 +1223,7 @@ version = "0.1.0"
 dependencies = [
  "goat-auth",
  "goat-provider",
- "goat-provider-responses",
+ "goat-provider-openai-compat",
 ]
 
 [[package]]
@@ -1231,7 +1233,7 @@ dependencies = [
  "base64",
  "goat-auth",
  "goat-provider",
- "goat-provider-responses",
+ "goat-provider-openai-compat",
  "open",
  "reqwest 0.12.28",
  "serde",
@@ -1277,7 +1279,6 @@ dependencies = [
  "goat-provider-local",
  "goat-provider-openai",
  "goat-provider-openai-codex",
- "thiserror 2.0.18",
  "tokio",
 ]
 

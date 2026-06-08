@@ -2,12 +2,11 @@ use std::time::Duration;
 
 use base64::Engine;
 use goat_auth::{
-    BASE64URL, CredentialKey, CredentialStore, OAuthTokenSet, Pkce, ResolvedCredential,
-    SecretString, capture_loopback_code, random_state,
+    BASE64URL, Credential, CredentialKey, CredentialStore, Pkce, TokenSet, capture_loopback_code,
+    ensure_valid, random_state,
 };
 use goat_provider::{
-    AuthMethod, ModelEvent, ModelInfo, ModelProvider, ModelRequest, ProviderCapabilities,
-    ProviderId, now_secs,
+    AuthMethod, Capabilities, Model, Provider, ProviderId, Request, StreamEvent, now_secs,
 };
 use serde::Deserialize;
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -89,7 +88,7 @@ fn auth_client() -> reqwest::Client {
         .expect("reqwest client")
 }
 
-async fn exchange_code(code: &str, verifier: &str) -> Result<OAuthTokenSet, CodexError> {
+async fn exchange_code(code: &str, verifier: &str) -> Result<TokenSet, CodexError> {
     let response = auth_client()
         .post(TOKEN)
         .form(&[
@@ -105,12 +104,12 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OAuthTokenSet, Code
         return Err(CodexError::Token(err.to_string()));
     }
     let tokens: TokenResponse = response.json().await?;
-    let expires_at = tokens.expires_in.map(|seconds| now_secs() + seconds);
-    Ok(OAuthTokenSet {
-        access_token: SecretString::from(tokens.access_token),
-        refresh_token: tokens.refresh_token.map(SecretString::from),
-        expires_at,
-    })
+    Ok(TokenSet::from_parts(
+        tokens.access_token,
+        tokens.refresh_token,
+        tokens.expires_in,
+        None,
+    ))
 }
 
 fn browser_available() -> bool {
@@ -120,7 +119,7 @@ fn browser_available() -> bool {
     std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-pub async fn login(status: &mpsc::Sender<String>) -> Result<OAuthTokenSet, CodexError> {
+pub async fn login(status: &mpsc::Sender<String>) -> Result<TokenSet, CodexError> {
     if browser_available() {
         match login_browser().await {
             Err(CodexError::NoBrowser) => login_device(status).await,
@@ -131,7 +130,7 @@ pub async fn login(status: &mpsc::Sender<String>) -> Result<OAuthTokenSet, Codex
     }
 }
 
-async fn login_browser() -> Result<OAuthTokenSet, CodexError> {
+async fn login_browser() -> Result<TokenSet, CodexError> {
     let pkce = Pkce::generate();
     let state = random_state();
     let url = authorize_url(&pkce.challenge, &state)?;
@@ -160,7 +159,7 @@ struct DevicePollError {
     error: Option<String>,
 }
 
-async fn login_device(status: &mpsc::Sender<String>) -> Result<OAuthTokenSet, CodexError> {
+async fn login_device(status: &mpsc::Sender<String>) -> Result<TokenSet, CodexError> {
     let client = auth_client();
     let response = client
         .post(DEVICE_USERCODE)
@@ -218,33 +217,27 @@ async fn login_device(status: &mpsc::Sender<String>) -> Result<OAuthTokenSet, Co
     }
 }
 
-pub async fn refresh_tokens(refresh_token: &str) -> Result<OAuthTokenSet, CodexError> {
+async fn do_refresh(refresh_token: String) -> Result<TokenSet, String> {
     let response = auth_client()
         .post(TOKEN)
         .form(&[
             ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
+            ("refresh_token", refresh_token.as_str()),
             ("client_id", CLIENT_ID),
         ])
         .send()
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
     if let Err(err) = response.error_for_status_ref() {
-        return Err(CodexError::Token(err.to_string()));
+        return Err(err.to_string());
     }
-    let tokens: TokenResponse = response.json().await?;
-    let expires_at = tokens.expires_in.map(|seconds| now_secs() + seconds);
-    Ok(OAuthTokenSet {
-        access_token: SecretString::from(tokens.access_token),
-        refresh_token: tokens
-            .refresh_token
-            .map(SecretString::from)
-            .or_else(|| Some(SecretString::from(refresh_token))),
-        expires_at,
-    })
-}
-
-fn is_expired(tokens: &OAuthTokenSet) -> bool {
-    tokens.expires_at.is_some_and(|exp| exp <= now_secs() + 60)
+    let tokens: TokenResponse = response.json().await.map_err(|e| e.to_string())?;
+    Ok(TokenSet::from_parts(
+        tokens.access_token,
+        tokens.refresh_token,
+        tokens.expires_in,
+        Some(refresh_token.as_str()),
+    ))
 }
 
 async fn current_access(
@@ -252,32 +245,14 @@ async fn current_access(
     key: &CredentialKey,
 ) -> Option<(String, Option<String>)> {
     let tokens = match store.resolve(key, None)? {
-        ResolvedCredential::OAuth(tokens) => tokens,
-        ResolvedCredential::ApiKey(secret) => {
+        Credential::OAuth(tokens) => tokens,
+        Credential::ApiKey(secret) => {
             let access = secret.expose().to_owned();
             let account = account_id(&access);
             return Some((access, account));
         }
     };
-    let tokens = if is_expired(&tokens) {
-        match tokens.refresh_token.as_ref() {
-            Some(refresh) => match refresh_tokens(refresh.expose()).await {
-                Ok(fresh) => {
-                    if let Err(err) = store.store(key, ResolvedCredential::OAuth(fresh.clone())) {
-                        tracing::warn!(%err, "failed to persist refreshed oauth tokens");
-                    }
-                    fresh
-                }
-                Err(err) => {
-                    tracing::warn!(%err, "token refresh failed; treating as logged out");
-                    return None;
-                }
-            },
-            None => tokens,
-        }
-    } else {
-        tokens
-    };
+    let tokens = ensure_valid(tokens, store, key, do_refresh).await?;
     let access = tokens.access_token.expose().to_owned();
     let account = account_id(&access);
     Some((access, account))
@@ -311,11 +286,7 @@ impl CodexProvider {
     }
 }
 
-async fn fetch_models(
-    client: &reqwest::Client,
-    access: &str,
-    account: Option<&str>,
-) -> Vec<ModelInfo> {
+async fn fetch_models(client: &reqwest::Client, access: &str, account: Option<&str>) -> Vec<Model> {
     let mut builder = client
         .get(format!("{BASE}/models?client_version=0.0.0"))
         .bearer_auth(access)
@@ -340,12 +311,12 @@ async fn fetch_models(
         .filter(|model| model.get("visibility").and_then(serde_json::Value::as_str) == Some("list"))
         .filter_map(|model| {
             let id = model.get("slug").and_then(serde_json::Value::as_str)?;
-            Some(ModelInfo { id: id.to_owned() })
+            Some(Model { id: id.to_owned() })
         })
         .collect()
 }
 
-impl ModelProvider for CodexProvider {
+impl Provider for CodexProvider {
     fn id(&self) -> ProviderId {
         ProviderId::from(PROVIDER_ID)
     }
@@ -366,14 +337,18 @@ impl ModelProvider for CodexProvider {
         })
     }
 
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
             tools: true,
             auth: AuthMethod::OAuth,
         }
     }
 
-    fn request(&self, req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()> {
+    fn login(&self, status: mpsc::Sender<String>) -> JoinHandle<Result<TokenSet, String>> {
+        tokio::spawn(async move { login(&status).await.map_err(|e| e.to_string()) })
+    }
+
+    fn stream(&self, req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
         let client = self.client.clone();
         let url = format!("{BASE}/responses");
         let store = self.store.clone();
@@ -381,13 +356,13 @@ impl ModelProvider for CodexProvider {
         tokio::spawn(async move {
             let Some((access, account)) = current_access(&store, &key).await else {
                 let _ = events
-                    .send(ModelEvent::Failed {
+                    .send(StreamEvent::Failed {
                         message: "not logged in to codex".to_owned(),
                     })
                     .await;
                 return;
             };
-            let body = goat_provider_responses::build_body(
+            let body = goat_provider_openai_compat::build_body(
                 &req.model,
                 &req.messages,
                 &req.tools,
@@ -395,7 +370,7 @@ impl ModelProvider for CodexProvider {
                 false,
                 req.effort,
             );
-            goat_provider_responses::run_request(
+            goat_provider_openai_compat::run_request(
                 &client,
                 &url,
                 Some(&access),
@@ -412,10 +387,10 @@ impl ModelProvider for CodexProvider {
     }
 
     fn efforts(&self, model: &str) -> Vec<goat_provider::Effort> {
-        goat_provider_responses::responses_efforts(model)
+        goat_provider_openai_compat::responses_efforts(model)
     }
 
-    fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()> {
+    fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
         let client = self.client.clone();
         let store = self.store.clone();
         let key = self.key.clone();

@@ -6,6 +6,18 @@ use ratatui::{
     widgets::Paragraph,
 };
 
+fn hint_line<'a>(pairs: &[(&'a str, &'a str)], sep: &'a str, theme: Theme) -> Line<'a> {
+    let mut spans: Vec<Span<'a>> = vec![Span::raw("  ")];
+    for (i, (glyph, label)) in pairs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(sep, theme.muted()));
+        }
+        spans.push(Span::styled(*glyph, theme.muted_accent()));
+        spans.push(Span::styled(*label, theme.muted()));
+    }
+    Line::from(spans)
+}
+
 use crate::{
     overlay::{centered_rect, clamp_u16, overlay_frame, selection_row},
     symbols,
@@ -543,33 +555,35 @@ impl Config {
         match self.section {
             Section::Providers => {
                 self.render_providers(frame, body_area, theme);
-                render_hint(
-                    frame,
+                frame.render_widget(
+                    Paragraph::new(hint_line(
+                        &[
+                            (symbols::key::ARROWS_UPDOWN, " move"),
+                            (symbols::key::ENTER, " add"),
+                            (symbols::key::BACKSPACE, " remove"),
+                            (symbols::key::ARROWS_LEFTRIGHT, " section"),
+                            ("esc", " close"),
+                        ],
+                        symbols::ui::SEPARATOR,
+                        theme,
+                    )),
                     hint_area,
-                    theme,
-                    &format!(
-                        "  {}{} move   {} add   {} remove   {} section   esc close",
-                        symbols::key::ARROW_UP,
-                        symbols::key::ARROW_DOWN,
-                        symbols::key::RETURN,
-                        symbols::key::BACKSPACE,
-                        symbols::key::ARROWS_LEFTRIGHT,
-                    ),
                 );
             }
             Section::Appearance => {
                 self.render_appearance(frame, body_area, theme);
-                render_hint(
-                    frame,
+                frame.render_widget(
+                    Paragraph::new(hint_line(
+                        &[
+                            (symbols::key::ARROWS_UPDOWN, " move"),
+                            (symbols::key::ENTER, " toggle"),
+                            (symbols::key::ARROWS_LEFTRIGHT, " section"),
+                            ("esc", " close"),
+                        ],
+                        symbols::ui::SEPARATOR,
+                        theme,
+                    )),
                     hint_area,
-                    theme,
-                    &format!(
-                        "  {}{} move   {} toggle   {} section   esc close",
-                        symbols::key::ARROW_UP,
-                        symbols::key::ARROW_DOWN,
-                        symbols::key::RETURN,
-                        symbols::key::ARROWS_LEFTRIGHT,
-                    ),
                 );
             }
         }
@@ -700,13 +714,6 @@ fn provider_method(entry: &AccountEntry) -> AuthMethod {
     entry.login
 }
 
-fn render_hint(frame: &mut Frame, area: Rect, theme: Theme, text: &str) {
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(text.to_owned(), theme.muted()))),
-        area,
-    );
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_adding(
     frame: &mut Frame,
@@ -787,22 +794,29 @@ fn render_adding(
         );
     }
 
-    let hint = if api_key {
-        format!(
-            "  {} save{}{} next field{} esc cancel",
-            symbols::key::RETURN,
-            symbols::ui::SEPARATOR,
-            symbols::key::TAB,
-            symbols::ui::SEPARATOR,
-        )
+    if api_key {
+        frame.render_widget(
+            Paragraph::new(hint_line(
+                &[
+                    (symbols::key::ENTER, " save"),
+                    (symbols::key::TAB, " next field"),
+                    ("esc", " cancel"),
+                ],
+                symbols::ui::SEPARATOR,
+                theme,
+            )),
+            hint_area,
+        );
     } else {
-        format!(
-            "  {} open browser{} esc cancel",
-            symbols::key::RETURN,
-            symbols::ui::SEPARATOR,
-        )
-    };
-    render_hint(frame, hint_area, theme, &hint);
+        frame.render_widget(
+            Paragraph::new(hint_line(
+                &[(symbols::key::ENTER, " open browser"), ("esc", " cancel")],
+                symbols::ui::SEPARATOR,
+                theme,
+            )),
+            hint_area,
+        );
+    }
 }
 
 fn place_cursor(frame: &mut Frame, area: Rect, prefix: u16, value_len: usize) {
@@ -871,17 +885,20 @@ fn render_choosing(
         api_area,
     );
     frame.render_widget(
-        Paragraph::new(row(
-            matches!(method, AuthMethod::OAuth),
-            "browser (claude subscription)",
-        )),
+        Paragraph::new(row(matches!(method, AuthMethod::OAuth), "browser")),
         browser_area,
     );
-    render_hint(
-        frame,
+    frame.render_widget(
+        Paragraph::new(hint_line(
+            &[
+                (symbols::key::ARROWS_UPDOWN, " choose"),
+                (symbols::key::ENTER, " continue"),
+                ("esc", " cancel"),
+            ],
+            symbols::ui::SEPARATOR,
+            theme,
+        )),
         hint_area,
-        theme,
-        "  \u{2191}\u{2193} choose \u{b7} \u{23ce} continue \u{b7} esc cancel",
     );
 }
 

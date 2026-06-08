@@ -3,12 +3,11 @@ use std::collections::HashMap;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_auth::{
-    CredentialKey, CredentialStore, OAuthTokenSet, Pkce, ResolvedCredential, SecretString,
-    random_state,
+    Credential, CredentialKey, CredentialStore, Pkce, TokenSet, ensure_valid, random_state,
 };
 use goat_provider::{
-    AuthMethod, ContentBlock, Effort, MessageRole, ModelEvent, ModelInfo, ModelProvider,
-    ModelRequest, ProviderCapabilities, ProviderId, ProviderMessage, now_secs,
+    AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
+    ProviderId, Request, StreamEvent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -109,7 +108,7 @@ fn authorize_url(
     .map_err(|err| AnthropicAuthError::Url(err.to_string()))
 }
 
-pub async fn login(status: &mpsc::Sender<String>) -> Result<OAuthTokenSet, AnthropicAuthError> {
+async fn do_login(status: &mpsc::Sender<String>) -> Result<TokenSet, AnthropicAuthError> {
     let pkce = Pkce::generate();
     let state = random_state();
     let (listener, port) = goat_auth::bind_loopback().await?;
@@ -140,24 +139,12 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
-fn token_set(tokens: TokenResponse, fallback_refresh: Option<&str>) -> OAuthTokenSet {
-    let expires_at = tokens.expires_in.map(|seconds| now_secs() + seconds);
-    OAuthTokenSet {
-        access_token: SecretString::from(tokens.access_token),
-        refresh_token: tokens
-            .refresh_token
-            .map(SecretString::from)
-            .or_else(|| fallback_refresh.map(SecretString::from)),
-        expires_at,
-    }
-}
-
 async fn exchange_code(
     code: &str,
     verifier: &str,
     state: &str,
     redirect_uri: &str,
-) -> Result<OAuthTokenSet, AnthropicAuthError> {
+) -> Result<TokenSet, AnthropicAuthError> {
     let response = auth_client()
         .post(OAUTH_TOKEN)
         .header("Accept", "application/json, text/plain, */*")
@@ -172,12 +159,12 @@ async fn exchange_code(
         }))
         .send()
         .await?;
-    token_response(response)
+    parse_token_response(response)
         .await
-        .map(|tokens| token_set(tokens, None))
+        .map(|t| TokenSet::from_parts(t.access_token, t.refresh_token, t.expires_in, None))
 }
 
-pub async fn refresh_tokens(refresh_token: &str) -> Result<OAuthTokenSet, AnthropicAuthError> {
+async fn do_refresh(refresh_token: String) -> Result<TokenSet, String> {
     let response = auth_client()
         .post(OAUTH_TOKEN)
         .header("Accept", "application/json, text/plain, */*")
@@ -188,13 +175,24 @@ pub async fn refresh_tokens(refresh_token: &str) -> Result<OAuthTokenSet, Anthro
             "client_id": OAUTH_CLIENT_ID,
         }))
         .send()
-        .await?;
-    token_response(response)
         .await
-        .map(|tokens| token_set(tokens, Some(refresh_token)))
+        .map_err(|e| e.to_string())?;
+    parse_token_response(response)
+        .await
+        .map(|t| {
+            TokenSet::from_parts(
+                t.access_token,
+                t.refresh_token,
+                t.expires_in,
+                Some(&refresh_token),
+            )
+        })
+        .map_err(|e| e.to_string())
 }
 
-async fn token_response(response: reqwest::Response) -> Result<TokenResponse, AnthropicAuthError> {
+async fn parse_token_response(
+    response: reqwest::Response,
+) -> Result<TokenResponse, AnthropicAuthError> {
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
@@ -203,35 +201,11 @@ async fn token_response(response: reqwest::Response) -> Result<TokenResponse, An
     response.json().await.map_err(AnthropicAuthError::Http)
 }
 
-fn is_expired(tokens: &OAuthTokenSet) -> bool {
-    tokens.expires_at.is_some_and(|exp| exp <= now_secs() + 60)
-}
-
 async fn current_auth(store: &CredentialStore, key: &CredentialKey) -> Option<Auth> {
     match store.resolve(key, Some(ENV_VAR))? {
-        ResolvedCredential::ApiKey(secret) => Some(Auth::ApiKey(secret.expose().to_owned())),
-        ResolvedCredential::OAuth(tokens) => {
-            let tokens = if is_expired(&tokens) {
-                match tokens.refresh_token.as_ref() {
-                    Some(refresh) => match refresh_tokens(refresh.expose()).await {
-                        Ok(fresh) => {
-                            if let Err(err) =
-                                store.store(key, ResolvedCredential::OAuth(fresh.clone()))
-                            {
-                                tracing::warn!(%err, "failed to persist refreshed anthropic oauth tokens");
-                            }
-                            fresh
-                        }
-                        Err(err) => {
-                            tracing::warn!(%err, "anthropic token refresh failed; treating as logged out");
-                            return None;
-                        }
-                    },
-                    None => tokens,
-                }
-            } else {
-                tokens
-            };
+        Credential::ApiKey(secret) => Some(Auth::ApiKey(secret.expose().to_owned())),
+        Credential::OAuth(tokens) => {
+            let tokens = ensure_valid(tokens, store, key, do_refresh).await?;
             Some(Auth::OAuth(tokens.access_token.expose().to_owned()))
         }
     }
@@ -374,7 +348,7 @@ fn content_block_json(block: &ContentBlock) -> serde_json::Value {
     }
 }
 
-fn message_json(role: &str, message: &ProviderMessage) -> serde_json::Value {
+fn message_json(role: &str, message: &Message) -> serde_json::Value {
     let blocks: Vec<serde_json::Value> = message.content.iter().map(content_block_json).collect();
     json!({ "role": role, "content": blocks })
 }
@@ -457,7 +431,7 @@ fn event_index(data: &str) -> Result<u32, serde_json::Error> {
     serde_json::from_str::<IndexedEvent>(data).map(|event| event.index)
 }
 
-fn split_request(req: &ModelRequest) -> (String, Vec<serde_json::Value>, Vec<serde_json::Value>) {
+fn split_request(req: &Request) -> (String, Vec<serde_json::Value>, Vec<serde_json::Value>) {
     let mut system = String::new();
     let mut messages = Vec::new();
     for message in &req.messages {
@@ -486,7 +460,7 @@ fn split_request(req: &ModelRequest) -> (String, Vec<serde_json::Value>, Vec<ser
     (system, messages, tools)
 }
 
-async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<ModelEvent>) {
+async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<StreamEvent>) {
     let mut stream = response.bytes_stream().eventsource();
     let mut tool_calls: HashMap<u32, (String, String, String)> = HashMap::new();
     while let Some(event) = stream.next().await {
@@ -505,7 +479,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Mode
                             "redacted_thinking" => {
                                 if let Some(data) = start.content_block.data
                                     && events
-                                        .send(ModelEvent::RedactedThinking { data })
+                                        .send(StreamEvent::RedactedThinking { data })
                                         .await
                                         .is_err()
                                 {
@@ -518,12 +492,12 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Mode
                 }
                 "content_block_delta" => {
                     if let Some(text) = parse_text_delta(&event.data) {
-                        if events.send(ModelEvent::TextDelta { text }).await.is_err() {
+                        if events.send(StreamEvent::TextDelta { text }).await.is_err() {
                             return;
                         }
                     } else if let Some(text) = parse_thinking_delta(&event.data) {
                         if events
-                            .send(ModelEvent::ThinkingDelta { text })
+                            .send(StreamEvent::ThinkingDelta { text })
                             .await
                             .is_err()
                         {
@@ -531,7 +505,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Mode
                         }
                     } else if let Some(signature) = parse_signature_delta(&event.data) {
                         if events
-                            .send(ModelEvent::ThinkingSignature { signature })
+                            .send(StreamEvent::ThinkingSignature { signature })
                             .await
                             .is_err()
                         {
@@ -548,7 +522,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Mode
                     if let Ok(stop) = serde_json::from_str::<ContentBlockStop>(&event.data)
                         && let Some((id, name, input)) = tool_calls.remove(&stop.index)
                         && events
-                            .send(ModelEvent::ToolCall { id, name, input })
+                            .send(StreamEvent::ToolCall { id, name, input })
                             .await
                             .is_err()
                     {
@@ -558,7 +532,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Mode
                 "message_stop" => break,
                 "error" => {
                     let _ = events
-                        .send(ModelEvent::Failed {
+                        .send(StreamEvent::Failed {
                             message: event.data,
                         })
                         .await;
@@ -568,7 +542,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Mode
             },
             Err(err) => {
                 let _ = events
-                    .send(ModelEvent::Failed {
+                    .send(StreamEvent::Failed {
                         message: err.to_string(),
                     })
                     .await;
@@ -576,30 +550,30 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Mode
             }
         }
     }
-    let _ = events.send(ModelEvent::Completed).await;
+    let _ = events.send(StreamEvent::Completed).await;
 }
 
-impl ModelProvider for AnthropicProvider {
+impl Provider for AnthropicProvider {
     fn id(&self) -> ProviderId {
         ProviderId::from(PROVIDER_ID)
     }
 
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
             tools: true,
             auth: AuthMethod::ApiKeyOrOAuth,
         }
     }
 
-    fn request(&self, req: ModelRequest, events: mpsc::Sender<ModelEvent>) -> JoinHandle<()> {
+    fn stream(&self, req: Request, tx: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
         let client = self.client.clone();
         let url = format!("{}/messages", self.base_url);
         let store = self.store.clone();
         let key = self.key.clone();
         tokio::spawn(async move {
             let Some(auth) = current_auth(&store, &key).await else {
-                let _ = events
-                    .send(ModelEvent::Failed {
+                let _ = tx
+                    .send(StreamEvent::Failed {
                         message: "not logged in to anthropic".to_owned(),
                     })
                     .await;
@@ -633,8 +607,8 @@ impl ModelProvider for AnthropicProvider {
             let resp = match builder.send().await {
                 Ok(resp) => resp,
                 Err(err) => {
-                    let _ = events
-                        .send(ModelEvent::Failed {
+                    let _ = tx
+                        .send(StreamEvent::Failed {
                             message: err.to_string(),
                         })
                         .await;
@@ -644,14 +618,14 @@ impl ModelProvider for AnthropicProvider {
             if !resp.status().is_success() {
                 let status = resp.status();
                 let detail = resp.text().await.unwrap_or_default();
-                let _ = events
-                    .send(ModelEvent::Failed {
+                let _ = tx
+                    .send(StreamEvent::Failed {
                         message: format!("{status}: {detail}"),
                     })
                     .await;
                 return;
             }
-            stream_messages(resp, &events).await;
+            stream_messages(resp, &tx).await;
         })
     }
 
@@ -700,7 +674,7 @@ impl ModelProvider for AnthropicProvider {
         anthropic_efforts(model)
     }
 
-    fn discover(&self, out: mpsc::Sender<ModelInfo>) -> JoinHandle<()> {
+    fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
         let client = self.client.clone();
         let url = format!("{}/models", self.base_url);
         let store = self.store.clone();
@@ -712,7 +686,7 @@ impl ModelProvider for AnthropicProvider {
             let api_key = match auth {
                 Auth::OAuth(_) => {
                     for &id in CATALOG {
-                        if out.send(ModelInfo { id: id.to_owned() }).await.is_err() {
+                        if out.send(Model { id: id.to_owned() }).await.is_err() {
                             return;
                         }
                     }
@@ -733,11 +707,15 @@ impl ModelProvider for AnthropicProvider {
                 return;
             };
             for model in models.data {
-                if out.send(ModelInfo { id: model.id }).await.is_err() {
+                if out.send(Model { id: model.id }).await.is_err() {
                     return;
                 }
             }
         })
+    }
+
+    fn login(&self, status: mpsc::Sender<String>) -> JoinHandle<Result<TokenSet, String>> {
+        tokio::spawn(async move { do_login(&status).await.map_err(|e| e.to_string()) })
     }
 }
 
@@ -869,5 +847,12 @@ mod tests {
         assert!(cfg.thinking.is_none());
         let none = super::thinking_config("claude-opus-4-8", None);
         assert!(none.thinking.is_none());
+    }
+
+    #[test]
+    fn no_effort_disables_thinking() {
+        let none = super::thinking_config("claude-opus-4-8", None);
+        assert!(none.thinking.is_none());
+        assert!(none.output_config.is_none());
     }
 }

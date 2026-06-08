@@ -1,6 +1,6 @@
 use goat_auth::{CredentialKey, CredentialStore};
 use goat_provider::{AuthMethod, ProviderId};
-use goat_provider_responses::ResponsesProvider;
+use goat_provider_openai_compat::ResponsesProvider;
 
 pub const PROVIDER_ID: &str = "openai";
 const BASE_URL: &str = "https://api.openai.com/v1";

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle};
 
+use crate::common;
+
 #[derive(Serialize)]
 struct ResponsesRequest<'a> {
     model: &'a str,
@@ -333,16 +335,6 @@ fn parse_item_id(data: &str) -> Option<String> {
         .or_else(|| parsed.item.and_then(|item| item.id))
 }
 
-#[derive(Deserialize)]
-struct ModelsResponse {
-    data: Vec<ModelRow>,
-}
-
-#[derive(Deserialize)]
-struct ModelRow {
-    id: String,
-}
-
 pub struct ResponsesProvider {
     id: ProviderId,
     base_url: String,
@@ -365,11 +357,7 @@ impl ResponsesProvider {
             base_url: base_url.into(),
             bearer,
             auth,
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_mins(5))
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .build()
-                .expect("reqwest client"),
+            client: common::http_client(),
             model_filter: None,
             catalog: &[],
         }
@@ -394,41 +382,16 @@ impl Provider for ResponsesProvider {
     }
 
     fn authenticated(&self) -> bool {
-        match self.auth {
-            AuthMethod::None => true,
-            _ => self.bearer.is_some(),
-        }
+        common::authenticated(self.auth, &self.bearer)
     }
 
     fn validate(&self) -> JoinHandle<Result<(), String>> {
-        let client = self.client.clone();
-        let url = format!("{}/models", self.base_url);
-        let bearer = self.bearer.clone();
-        let auth = self.auth;
-        tokio::spawn(async move {
-            if matches!(auth, AuthMethod::None) {
-                return Ok(());
-            }
-            let Some(token) = bearer else {
-                return Err("no credentials".to_owned());
-            };
-            let resp = client
-                .get(&url)
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(|_| "could not reach provider".to_owned())?;
-            let status = resp.status();
-            if status.is_success() {
-                Ok(())
-            } else if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-            {
-                Err("invalid credentials".to_owned())
-            } else {
-                Err(format!("could not reach provider: {status}"))
-            }
-        })
+        common::validate_bearer(
+            self.client.clone(),
+            format!("{}/models", self.base_url),
+            self.auth,
+            self.bearer.clone(),
+        )
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -464,32 +427,13 @@ impl Provider for ResponsesProvider {
     }
 
     fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
-        let client = self.client.clone();
-        let url = format!("{}/models", self.base_url);
-        let bearer = self.bearer.clone();
-        let filter = self.model_filter;
-        tokio::spawn(async move {
-            let mut builder = client.get(&url);
-            if let Some(token) = &bearer {
-                builder = builder.bearer_auth(token);
-            }
-            let Ok(resp) = builder.send().await else {
-                return;
-            };
-            let Ok(models) = resp.json::<ModelsResponse>().await else {
-                return;
-            };
-            for model in models.data {
-                if let Some(keep) = filter
-                    && !keep(&model.id)
-                {
-                    continue;
-                }
-                if out.send(Model { id: model.id }).await.is_err() {
-                    return;
-                }
-            }
-        })
+        common::discover_models(
+            self.client.clone(),
+            format!("{}/models", self.base_url),
+            self.bearer.clone(),
+            self.model_filter,
+            out,
+        )
     }
 }
 

@@ -5,7 +5,11 @@ use ratatui::{
     widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 
-use crate::{app::App, command::CommandMenu, overlay, symbols, theme::Theme};
+use crate::{
+    app::{App, Overlay},
+    overlay, symbols,
+    theme::Theme,
+};
 
 #[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -20,8 +24,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let composer_h = app.composer_height(area.width);
 
-    if let Some(panel_height) = app.command_menu().map(CommandMenu::desired_height) {
-        let panel_h = panel_height
+    if let Overlay::Commands(menu) = app.overlay() {
+        let panel_h = menu
+            .desired_height()
             .min(area.height.saturating_sub(composer_h + 2))
             .max(1);
         let [header, transcript_area, composer_area, panel] = Layout::vertical([
@@ -42,7 +47,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             app.spinner_frame(),
         );
         render_scrollbar(frame, transcript_area, app, theme);
-        if let Some(menu) = app.command_menu() {
+        if let Overlay::Commands(menu) = app.overlay() {
             menu.render(frame, panel, theme);
         }
         app.composer().render(frame, composer_area, theme, true);
@@ -50,37 +55,31 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    if app.config().is_some()
-        || app.picker().is_some()
-        || app.effort_picker().is_some()
-        || app.thread_picker().is_some()
-    {
-        let [header, body, composer] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(composer_h),
-        ])
-        .areas(area);
-        render_header(frame, header, app, theme);
-        app.clamp_scroll(body.height, body.width);
-        app.transcript()
-            .render(frame, body, theme, app.scroll(), app.spinner_frame());
-        render_scrollbar(frame, body, app, theme);
-        if let Some(config) = app.config() {
-            config.render(frame, body, theme);
+    match app.overlay() {
+        Overlay::Config(_) | Overlay::Model(_) | Overlay::Effort(_) | Overlay::Thread(_) => {
+            let [header, body, composer] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(composer_h),
+            ])
+            .areas(area);
+            render_header(frame, header, app, theme);
+            app.clamp_scroll(body.height, body.width);
+            app.transcript()
+                .render(frame, body, theme, app.scroll(), app.spinner_frame());
+            render_scrollbar(frame, body, app, theme);
+            match app.overlay() {
+                Overlay::Config(config) => config.render(frame, body, theme),
+                Overlay::Model(picker) => picker.render(frame, body, theme),
+                Overlay::Effort(picker) => picker.render(frame, body, theme),
+                Overlay::Thread(picker) => picker.render(frame, body, theme),
+                _ => {}
+            }
+            app.composer().render(frame, composer, theme, false);
+            render_toasts(frame, area, app, theme);
+            return;
         }
-        if let Some(picker) = app.picker() {
-            picker.render(frame, body, theme);
-        }
-        if let Some(picker) = app.effort_picker() {
-            picker.render(frame, body, theme);
-        }
-        if let Some(picker) = app.thread_picker() {
-            picker.render(frame, body, theme);
-        }
-        app.composer().render(frame, composer, theme, false);
-        render_toasts(frame, area, app, theme);
-        return;
+        _ => {}
     }
 
     if let Some(cursor) = app.agent_selector() {

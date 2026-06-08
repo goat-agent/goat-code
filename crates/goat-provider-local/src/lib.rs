@@ -14,7 +14,7 @@ pub fn llama_cpp() -> OpenAiCompatProvider {
 
 #[cfg(test)]
 mod tests {
-    use goat_provider::{ModelProvider, ProviderId};
+    use goat_provider::{Provider, ProviderId};
 
     use super::{llama_cpp, lmstudio, ollama};
 

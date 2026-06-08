@@ -18,7 +18,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-28 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
+27 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
 
 **Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
@@ -28,17 +28,16 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-code` — the `goat` binary; wires the channels, logging, and CLI; depends on all.
 
 **Providers**
-- `goat-provider` — the `Provider` trait; leaf.
+- `goat-provider` — the `Provider` trait; leaf. Key types: `Provider`, `Request`, `StreamEvent`, `Message`, `Capabilities`, `Model`, `ProviderId`, `ContentBlock`.
 - `goat-provider-anthropic` — Anthropic Claude API provider.
-- `goat-provider-openai-compat` — shared OpenAI-compatible HTTP logic.
-- `goat-provider-openai` — OpenAI Chat Completions provider.
-- `goat-provider-responses` — OpenAI Responses API provider.
-- `goat-provider-openai-codex` — OpenAI Codex provider.
-- `goat-provider-local` — table-driven local-inference provider (Ollama, LM Studio, llama.cpp).
-- `goat-providers` — provider registry; wires all provider crates.
+- `goat-provider-openai-compat` — OpenAI-family HTTP clients; three modules: `chat` (Chat Completions API, used by local providers), `responses` (Responses API, used by OpenAI and Codex), `common` (shared client/validate/discovery helpers).
+- `goat-provider-openai` — OpenAI provider (wraps `responses` module).
+- `goat-provider-openai-codex` — OpenAI Codex provider (wraps `responses` module).
+- `goat-provider-local` — table-driven local-inference provider (Ollama, LM Studio, llama.cpp); wraps `chat` module.
+- `goat-providers` — provider registry; wires all provider crates. `Registry::new(store)` for default account, `Registry::load(store, account)` for explicit. `Registry::login(provider, status)` dispatches OAuth login through the `Provider::login` trait method.
 
 **Agent**
-- `goat-agent` — `GoatAgent`, the production `Engine` implementation; owns the LLM loop, tool dispatch, and `Vec<ProviderMessage>` history. Also owns the `Agent` delegation tool and `AgentSpec`/`AgentRegistry` (`agent.rs`): built-in `explore` (read-only) and `general`, plus file-defined agents from `.goat/agents/<name>.md` (Claude Code custom-agent frontmatter — `name`/`description`/`tools`/`model`/`effort`).
+- `goat-agent` — `GoatAgent`, the production `Engine` implementation; owns the LLM loop, tool dispatch, and `Vec<Message>` history. Also owns the `Agent` delegation tool and `AgentSpec`/`AgentRegistry` (`agent.rs`): built-in `explore` (read-only) and `general`, plus file-defined agents from `.goat/agents/<name>.md` (Claude Code custom-agent frontmatter — `name`/`description`/`tools`/`model`/`effort`).
 
 **Auth / Store**
 - `goat-auth` — credential store (provider API keys, OAuth tokens).
@@ -76,8 +75,8 @@ The UI and the engine communicate only through `goat-protocol` types over bounde
 
 - `goat-core` stays feature-free forever: it owns the session lifecycle and the `Op → Event` loop and nothing else. Real capability (LLM, tools) plugs in above core by implementing the `Engine` trait. `GoatAgent` is the production engine.
 - `Engine` is an object-safe actor: `fn spawn(self, ops, events) -> JoinHandle`. No `async_trait`, no `Stream`.
-- `GoatAgent` owns a `Vec<ProviderMessage>` history (single source of truth for the LLM context); the TUI keeps an append-only render mirror built from `Event`s. Each message is persisted losslessly as a `Vec<ContentBlock>` JSON `body` (thinking blocks and tool calls/results included), so `/resume` rebuilds both the history and the transcript from the store.
-- Reasoning effort is a per-model property carried on `ModelTarget.effort` (persisted per thread). Providers advertise the valid set per model via `ModelProvider::efforts` and translate the chosen `ModelRequest.effort` themselves — OpenAI/Codex send `reasoning.effort`, Anthropic maps to `output_config.effort`/`thinking.budget_tokens`. Anthropic extended thinking requires the `ContentBlock::Thinking`/`RedactedThinking` blocks to round-trip unchanged in history, which is why they are first-class content blocks every provider must handle.
+- `GoatAgent` owns a `Vec<Message>` history (single source of truth for the LLM context); the TUI keeps an append-only render mirror built from `Event`s. Each message is persisted losslessly as a `Vec<ContentBlock>` JSON `body` (thinking blocks and tool calls/results included), so `/resume` rebuilds both the history and the transcript from the store.
+- Reasoning effort is a per-model property carried on `ModelTarget.effort` (persisted per thread). Providers advertise the valid set per model via `Provider::efforts` and translate the chosen `Request.effort` themselves — OpenAI/Codex send `reasoning.effort`, Anthropic maps to `output_config.effort`/`thinking.budget_tokens`. Anthropic extended thinking requires the `ContentBlock::Thinking`/`RedactedThinking` blocks to round-trip unchanged in history, which is why they are first-class content blocks every provider must handle.
 - The `Agent` tool is engine-level, not a registry tool: the model calls it like a tool, but `GoatAgent` intercepts the call in dispatch and runs the same loop core nested — its own history, restricted tool set (no `Agent`, so no recursion), a child `TaskId`, and no persistence. Several run concurrently via a semaphore-bounded `join_all`, and a parent `CancellationToken` fans out to every child on interrupt. The shared loop core is parameterized by a `Run` (top-level emits + persists; child emits child-tagged events only).
 - The TUI normalizes three event sources into one `AppEvent`, runs a pure `App::update` reducer, and renders on a dirty flag — never on every tick. Child-agent events are routed by `TaskId` to a per-run transcript; a footer agent selector (↓ to focus, arrows, Esc to leave) drills the main area into one run by swapping which transcript renders — the same swap mechanism `/resume` uses.
 - The composer is a first-party widget. Do not add `tui-textarea`; it does not support ratatui 0.30.
