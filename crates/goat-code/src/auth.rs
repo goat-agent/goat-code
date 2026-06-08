@@ -2,7 +2,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use color_eyre::eyre::eyre;
-use goat_auth::{CredentialKey, CredentialKind, CredentialStore, ResolvedCredential, SecretString};
+use goat_auth::{Credential, CredentialKey, CredentialKind, CredentialStore, SecretString};
 use goat_provider::{AuthMethod, ProviderId};
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use tokio::sync::mpsc;
@@ -38,11 +38,12 @@ async fn login(
     account: &str,
     key: Option<String>,
 ) -> color_eyre::Result<()> {
-    let method = Registry::builtin(store)
-        .login_providers()
-        .into_iter()
-        .find(|(id, _)| id == provider)
-        .map(|(_, method)| method)
+    let registry = Registry::new(store);
+    let method = registry
+        .all()
+        .iter()
+        .find(|p| p.id().to_string() == provider)
+        .map(|p| p.capabilities().auth)
         .ok_or_else(|| eyre!("unknown provider: {provider}"))?;
 
     let credential_key = CredentialKey {
@@ -67,13 +68,13 @@ async fn login(
                 println!("{line}");
             }
         });
-        let tokens = goat_providers::oauth_login(provider, &status)
+        let tokens = registry
+            .login(provider, status)
             .await
             .map_err(|err| eyre!(err))?;
-        drop(status);
         let _ = printer.await;
         store
-            .store(&credential_key, ResolvedCredential::OAuth(tokens))
+            .store(&credential_key, Credential::OAuth(tokens))
             .map_err(|err| eyre!(err.to_string()))?;
     } else {
         let secret = match key {
@@ -87,7 +88,7 @@ async fn login(
         store
             .store(
                 &credential_key,
-                ResolvedCredential::ApiKey(SecretString::from(secret)),
+                Credential::ApiKey(SecretString::from(secret)),
             )
             .map_err(|err| eyre!(err.to_string()))?;
     }
@@ -98,7 +99,7 @@ async fn login(
 }
 
 async fn verify(store: &CredentialStore, provider: &str, account: &str) {
-    let registry = Registry::for_account(store, account);
+    let registry = Registry::load(store, account);
     let Some(provider) = registry.get(&ProviderId::from(provider)) else {
         return;
     };

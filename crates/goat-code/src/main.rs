@@ -41,7 +41,7 @@ async fn run_tui() -> color_eyre::Result<()> {
         .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
     let credentials = goat_auth::CredentialStore::new(auth_path);
     let store = goat_store::Store::open(&db_path)?;
-    let registry = goat_providers::Registry::builtin(&credentials);
+    let registry = goat_providers::Registry::new(&credentials);
     let agent = goat_agent::GoatAgent::new(registry, store, credentials, None);
 
     let session = goat_core::Session::spawn(agent);

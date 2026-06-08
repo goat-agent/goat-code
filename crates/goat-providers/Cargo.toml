@@ -15,7 +15,6 @@ goat-provider-openai = { workspace = true }
 goat-provider-openai-codex = { workspace = true }
 goat-provider-anthropic = { workspace = true }
 goat-provider-local = { workspace = true }
-thiserror = { workspace = true }
 
 [lints]
 workspace = true
