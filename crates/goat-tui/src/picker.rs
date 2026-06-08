@@ -7,7 +7,8 @@ use ratatui::{
 };
 
 use crate::{
-    overlay::{centered_rect, clamp_u16, overlay_frame},
+    overlay::{centered_rect, clamp_u16, overflow_hint, overlay_frame, selection_row},
+    symbols,
     theme::Theme,
 };
 
@@ -143,6 +144,7 @@ impl Picker {
         rows.saturating_add(6)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
         let rect = centered_rect(area, 64, self.desired_height());
         let Some(inner) = overlay_frame(frame, rect, theme, None) else {
@@ -175,7 +177,10 @@ impl Picker {
         let mut lines: Vec<Line> = Vec::new();
         if self.matches.is_empty() {
             lines.push(Line::from(Span::styled(
-                " no models yet \u{2014} run /config to connect a provider",
+                format!(
+                    " no models yet {} run /config to connect a provider",
+                    symbols::ui::ELLIPSIS
+                ),
                 theme.muted(),
             )));
         } else {
@@ -184,6 +189,11 @@ impl Picker {
             } else {
                 0
             };
+            let shown = rows.min(self.matches.len().saturating_sub(start));
+            let (hint_above, hint_below) = overflow_hint(start, shown, self.matches.len());
+            if let Some(ref above) = hint_above {
+                lines.push(Line::from(Span::styled(format!(" {above}"), theme.muted())));
+            }
             for (idx, entry) in self.matches.iter().enumerate().skip(start).take(rows) {
                 let selected = idx == self.cursor;
                 let is_current = self
@@ -198,7 +208,6 @@ impl Picker {
                         format!("{w}")
                     }
                 });
-                let marker = if selected { " \u{203a} " } else { "   " };
                 let name = format!("{}/{}", entry.provider, entry.model);
                 let name_style = if selected {
                     theme.key()
@@ -207,22 +216,33 @@ impl Picker {
                 } else {
                     theme.base()
                 };
-                let left_len = marker.chars().count() + name.chars().count();
-                let right_len = ctx.chars().count();
-                let pad = width.saturating_sub(left_len + right_len + 1);
-                lines.push(Line::from(vec![
-                    Span::styled(marker, theme.accent()),
-                    Span::styled(name, name_style),
-                    Span::styled(" ".repeat(pad), theme.base()),
-                    Span::styled(ctx, theme.muted()),
-                ]));
+                let right = if ctx.is_empty() {
+                    None
+                } else {
+                    Some(Span::styled(ctx, theme.muted()))
+                };
+                lines.push(selection_row(
+                    theme,
+                    selected,
+                    width,
+                    vec![Span::styled(name, name_style)],
+                    right,
+                ));
+            }
+            if let Some(ref below) = hint_below {
+                lines.push(Line::from(Span::styled(format!(" {below}"), theme.muted())));
             }
         }
         frame.render_widget(Paragraph::new(lines), list_area);
 
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " \u{2191}\u{2193} navigate   \u{21b5} select   esc close",
+                format!(
+                    " {}{} navigate   {} select   esc close",
+                    symbols::key::ARROW_UP,
+                    symbols::key::ARROW_DOWN,
+                    symbols::key::ENTER
+                ),
                 theme.muted(),
             ))),
             hint_area,
@@ -303,6 +323,7 @@ impl EffortPicker {
             title_area,
         );
 
+        let width = usize::from(list_area.width);
         let rows = usize::from(list_area.height);
         let lines: Vec<Line> = self
             .options
@@ -311,20 +332,26 @@ impl EffortPicker {
             .enumerate()
             .map(|(index, effort)| {
                 let selected = index == self.cursor;
-                Line::from(vec![
-                    Span::styled(if selected { " \u{203a} " } else { "   " }, theme.accent()),
-                    Span::styled(
-                        effort.as_str().to_owned(),
-                        if selected { theme.key() } else { theme.base() },
-                    ),
-                ])
+                let name_style = if selected { theme.key() } else { theme.base() };
+                selection_row(
+                    theme,
+                    selected,
+                    width,
+                    vec![Span::styled(effort.as_str().to_owned(), name_style)],
+                    None,
+                )
             })
             .collect();
         frame.render_widget(Paragraph::new(lines), list_area);
 
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " \u{2191}\u{2193} navigate   \u{21b5} select   esc close",
+                format!(
+                    " {}{} navigate   {} select   esc close",
+                    symbols::key::ARROW_UP,
+                    symbols::key::ARROW_DOWN,
+                    symbols::key::ENTER
+                ),
                 theme.muted(),
             ))),
             hint_area,
@@ -407,30 +434,36 @@ impl ThreadPicker {
             } else {
                 0
             };
+            let shown = rows.min(self.threads.len().saturating_sub(start));
+            let (hint_above, hint_below) = overflow_hint(start, shown, self.threads.len());
+            if let Some(ref above) = hint_above {
+                lines.push(Line::from(Span::styled(format!(" {above}"), theme.muted())));
+            }
             for (idx, thread) in self.threads.iter().enumerate().skip(start).take(rows) {
                 let selected = idx == self.cursor;
-                let marker = if selected {
-                    format!(" \u{203a} {}. ", idx + 1)
-                } else {
-                    format!("   {}. ", idx + 1)
-                };
                 let title_style = if selected { theme.key() } else { theme.base() };
-                let left_len = marker.chars().count() + thread.title.chars().count();
-                let right_len = thread.model.chars().count();
-                let pad = width.saturating_sub(left_len + right_len + 1);
-                lines.push(Line::from(vec![
-                    Span::styled(marker, theme.accent()),
+                let num_label = format!("{}. ", idx + 1);
+                let left = vec![
+                    Span::styled(num_label, theme.muted()),
                     Span::styled(thread.title.clone(), title_style),
-                    Span::styled(" ".repeat(pad), theme.base()),
-                    Span::styled(thread.model.clone(), theme.muted()),
-                ]));
+                ];
+                let right = Some(Span::styled(thread.model.clone(), theme.muted()));
+                lines.push(selection_row(theme, selected, width, left, right));
+            }
+            if let Some(ref below) = hint_below {
+                lines.push(Line::from(Span::styled(format!(" {below}"), theme.muted())));
             }
         }
         frame.render_widget(Paragraph::new(lines), list_area);
 
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " \u{2191}\u{2193} navigate   \u{21b5} resume   esc close",
+                format!(
+                    " {}{} navigate   {} resume   esc close",
+                    symbols::key::ARROW_UP,
+                    symbols::key::ARROW_DOWN,
+                    symbols::key::ENTER
+                ),
                 theme.muted(),
             ))),
             hint_area,
@@ -459,6 +492,7 @@ fn render_account(frame: &mut Frame, inner: Rect, theme: Theme, account: &Accoun
         title_area,
     );
 
+    let width = usize::from(list_area.width);
     let rows = usize::from(list_area.height);
     let lines: Vec<Line> = account
         .choices
@@ -467,20 +501,26 @@ fn render_account(frame: &mut Frame, inner: Rect, theme: Theme, account: &Accoun
         .enumerate()
         .map(|(index, choice)| {
             let selected = index == account.cursor;
-            Line::from(vec![
-                Span::styled(if selected { " \u{203a} " } else { "   " }, theme.accent()),
-                Span::styled(
-                    choice.display.clone(),
-                    if selected { theme.key() } else { theme.base() },
-                ),
-            ])
+            let name_style = if selected { theme.key() } else { theme.base() };
+            selection_row(
+                theme,
+                selected,
+                width,
+                vec![Span::styled(choice.display.clone(), name_style)],
+                None,
+            )
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), list_area);
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " \u{2191}\u{2193} navigate   \u{21b5} select   esc back",
+            format!(
+                " {}{} navigate   {} select   esc back",
+                symbols::key::ARROW_UP,
+                symbols::key::ARROW_DOWN,
+                symbols::key::ENTER
+            ),
             theme.muted(),
         ))),
         hint_area,

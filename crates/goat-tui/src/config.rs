@@ -7,7 +7,8 @@ use ratatui::{
 };
 
 use crate::{
-    overlay::{centered_rect, clamp_u16, overlay_frame},
+    overlay::{centered_rect, clamp_u16, overlay_frame, selection_row},
+    symbols,
     theme::Theme,
 };
 
@@ -353,7 +354,7 @@ impl Config {
                 provider: provider.clone(),
                 method,
                 name: name.clone(),
-                status: Some("opening browser\u{2026}".to_owned()),
+                status: Some(format!("opening browser{}", symbols::ui::ELLIPSIS)),
             };
             ConfigOutcome::AddAccount {
                 provider,
@@ -372,7 +373,7 @@ impl Config {
                 provider: provider.clone(),
                 method,
                 name: name.clone(),
-                status: Some("validating\u{2026}".to_owned()),
+                status: Some(format!("validating{}", symbols::ui::ELLIPSIS)),
             };
             ConfigOutcome::AddAccount {
                 provider,
@@ -508,7 +509,14 @@ impl Config {
                     frame,
                     hint_area,
                     theme,
-                    "  \u{2191}\u{2193} move   \u{23ce} add   \u{232b} remove   \u{2190}\u{2192} section   esc close",
+                    &format!(
+                        "  {}{} move   {} add   {} remove   {} section   esc close",
+                        symbols::key::ARROW_UP,
+                        symbols::key::ARROW_DOWN,
+                        symbols::key::RETURN,
+                        symbols::key::BACKSPACE,
+                        symbols::key::ARROWS_LEFTRIGHT,
+                    ),
                 );
             }
             Section::Appearance => {
@@ -517,7 +525,13 @@ impl Config {
                     frame,
                     hint_area,
                     theme,
-                    "  \u{2191}\u{2193} move   \u{23ce} toggle   \u{2190}\u{2192} section   esc close",
+                    &format!(
+                        "  {}{} move   {} toggle   {} section   esc close",
+                        symbols::key::ARROW_UP,
+                        symbols::key::ARROW_DOWN,
+                        symbols::key::RETURN,
+                        symbols::key::ARROWS_LEFTRIGHT,
+                    ),
                 );
             }
         }
@@ -548,21 +562,26 @@ impl Config {
                 RowKind::Account => {
                     let ai = row.account_index.unwrap_or(0);
                     let account = &entry.accounts[ai];
-                    let marker = if selected { "  \u{203a} " } else { "    " };
                     let name_style = if selected { theme.key() } else { theme.base() };
-                    lines.push(Line::from(vec![
-                        Span::styled(marker, theme.accent()),
-                        Span::styled(format!("{:<18}", account.name), name_style),
-                        Span::styled(method_label(account.method), theme.muted()),
-                    ]));
+                    let left = vec![Span::styled(format!("{:<18}", account.name), name_style)];
+                    let right = Some(Span::styled(method_label(account.method), theme.muted()));
+                    lines.push(selection_row(
+                        theme,
+                        selected,
+                        usize::from(area.width),
+                        left,
+                        right,
+                    ));
                 }
                 RowKind::AddAccount => {
-                    let marker = if selected { "  \u{203a} " } else { "    " };
                     let style = if selected { theme.key() } else { theme.muted() };
-                    lines.push(Line::from(vec![
-                        Span::styled(marker, theme.accent()),
-                        Span::styled("+ add account", style),
-                    ]));
+                    lines.push(selection_row(
+                        theme,
+                        selected,
+                        usize::from(area.width),
+                        vec![Span::styled("+ add account", style)],
+                        None,
+                    ));
                 }
             }
         }
@@ -600,10 +619,18 @@ fn appearance_row(
     first: &str,
     second: &str,
 ) -> Line<'static> {
-    let marker = if selected { "\u{203a} " } else { "  " };
+    let marker = if selected { symbols::ui::CARET } else { "  " };
     let label_style = if selected { theme.key() } else { theme.base() };
-    let first_dot = if first_active { "\u{25cf}" } else { "\u{25cb}" };
-    let second_dot = if first_active { "\u{25cb}" } else { "\u{25cf}" };
+    let first_dot = if first_active {
+        symbols::ui::DOT_FULL
+    } else {
+        symbols::ui::DOT_EMPTY
+    };
+    let second_dot = if first_active {
+        symbols::ui::DOT_EMPTY
+    } else {
+        symbols::ui::DOT_FULL
+    };
     let first_style = if first_active {
         theme.accent()
     } else {
@@ -669,7 +696,10 @@ fn render_adding(
 
     let title = Line::from(vec![
         Span::styled(format!("  {provider}"), theme.key()),
-        Span::styled(" \u{b7} new account", theme.muted()),
+        Span::styled(
+            format!("{} new account", symbols::ui::SEPARATOR),
+            theme.muted(),
+        ),
     ]);
     frame.render_widget(Paragraph::new(title), title_area);
 
@@ -698,7 +728,7 @@ fn render_adding(
         } else {
             theme.muted()
         };
-        let masked = "\u{2022}".repeat(key.chars().count());
+        let masked = symbols::ui::MASK.repeat(key.chars().count());
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("    key    ", key_label_style),
@@ -714,7 +744,7 @@ fn render_adding(
     if let Some(message) = error {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                format!("    \u{2717} {message}"),
+                format!("    {} {message}", symbols::ui::CROSS),
                 theme.error(),
             ))),
             error_area,
@@ -722,11 +752,21 @@ fn render_adding(
     }
 
     let hint = if api_key {
-        "  \u{23ce} save \u{b7} \u{21e5} next field \u{b7} esc cancel"
+        format!(
+            "  {} save{}{} next field{} esc cancel",
+            symbols::key::RETURN,
+            symbols::ui::SEPARATOR,
+            symbols::key::TAB,
+            symbols::ui::SEPARATOR,
+        )
     } else {
-        "  \u{23ce} open browser \u{b7} esc cancel"
+        format!(
+            "  {} open browser{} esc cancel",
+            symbols::key::RETURN,
+            symbols::ui::SEPARATOR,
+        )
     };
-    render_hint(frame, hint_area, theme, hint);
+    render_hint(frame, hint_area, theme, &hint);
 }
 
 fn place_cursor(frame: &mut Frame, area: Rect, prefix: u16, value_len: usize) {
