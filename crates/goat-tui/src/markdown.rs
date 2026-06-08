@@ -159,11 +159,9 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
                 }
                 col_idx = 0;
             }
-            Event::End(TagEnd::TableRow) => {
-                if !in_thead {
-                    table_rows.push(current_row.clone());
-                    current_row.clear();
-                }
+            Event::End(TagEnd::TableRow) if !in_thead => {
+                table_rows.push(current_row.clone());
+                current_row.clear();
             }
             Event::Start(Tag::TableCell) => {
                 current_cell = Vec::new();
@@ -215,10 +213,8 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
                 }
             }
 
-            Event::SoftBreak => {
-                if !in_table {
-                    current_spans.push(Span::raw(" "));
-                }
+            Event::SoftBreak if !in_table => {
+                current_spans.push(Span::raw(" "));
             }
 
             Event::End(TagEnd::Item) | Event::HardBreak => {
