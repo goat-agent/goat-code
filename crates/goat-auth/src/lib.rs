@@ -145,12 +145,22 @@ impl Pkce {
 }
 
 pub fn random_state() -> String {
-    let bytes: [u8; 16] = std::array::from_fn(|_| rand::random::<u8>());
+    let bytes: [u8; 32] = std::array::from_fn(|_| rand::random::<u8>());
     BASE64URL.encode(bytes)
+}
+
+pub async fn bind_loopback() -> Result<(TcpListener, u16), AuthError> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let port = listener.local_addr()?.port();
+    Ok((listener, port))
 }
 
 pub async fn capture_loopback_code(port: u16, expected_state: &str) -> Result<String, AuthError> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+    capture_on(listener, expected_state).await
+}
+
+pub async fn capture_on(listener: TcpListener, expected_state: &str) -> Result<String, AuthError> {
     loop {
         let (mut stream, _) = listener.accept().await?;
         let mut buf = vec![0u8; 8192];

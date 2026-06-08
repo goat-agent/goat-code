@@ -26,6 +26,10 @@ enum Field {
 
 enum InputStage {
     List,
+    Choosing {
+        provider: String,
+        method: AuthMethod,
+    },
     Adding {
         provider: String,
         method: AuthMethod,
@@ -192,6 +196,10 @@ impl Config {
 
     pub fn move_up(&mut self) {
         self.error = None;
+        if let InputStage::Choosing { method, .. } = &mut self.stage {
+            *method = AuthMethod::ApiKey;
+            return;
+        }
         if !matches!(self.stage, InputStage::List) {
             return;
         }
@@ -212,6 +220,10 @@ impl Config {
 
     pub fn move_down(&mut self) {
         self.error = None;
+        if let InputStage::Choosing { method, .. } = &mut self.stage {
+            *method = AuthMethod::OAuth;
+            return;
+        }
         if !matches!(self.stage, InputStage::List) {
             return;
         }
@@ -281,7 +293,7 @@ impl Config {
                     };
                 }
             }
-            InputStage::Waiting { .. } => {}
+            InputStage::Choosing { .. } | InputStage::Waiting { .. } => {}
         }
     }
 
@@ -289,6 +301,7 @@ impl Config {
         self.error = None;
         match &self.stage {
             InputStage::List => self.enter_list(),
+            InputStage::Choosing { .. } => self.enter_choosing(),
             InputStage::Adding { .. } => self.enter_adding(),
             InputStage::Waiting { .. } => ConfigOutcome::Pending,
         }
@@ -305,12 +318,19 @@ impl Config {
                     let entry = &self.providers[row.provider_index];
                     let provider = entry.provider.clone();
                     let method = provider_method(entry);
-                    self.stage = InputStage::Adding {
-                        provider,
-                        method,
-                        name: "default".to_owned(),
-                        key: String::new(),
-                        field: Field::Name,
+                    self.stage = if matches!(method, AuthMethod::ApiKeyOrOAuth) {
+                        InputStage::Choosing {
+                            provider,
+                            method: AuthMethod::ApiKey,
+                        }
+                    } else {
+                        InputStage::Adding {
+                            provider,
+                            method,
+                            name: "default".to_owned(),
+                            key: String::new(),
+                            field: Field::Name,
+                        }
                     };
                 }
                 ConfigOutcome::Pending
@@ -383,6 +403,20 @@ impl Config {
         }
     }
 
+    fn enter_choosing(&mut self) -> ConfigOutcome {
+        let InputStage::Choosing { provider, method } = &self.stage else {
+            return ConfigOutcome::Pending;
+        };
+        self.stage = InputStage::Adding {
+            provider: provider.clone(),
+            method: *method,
+            name: "default".to_owned(),
+            key: String::new(),
+            field: Field::Name,
+        };
+        ConfigOutcome::Pending
+    }
+
     pub fn remove_selected(&mut self) -> ConfigOutcome {
         self.error = None;
         if !matches!(self.section, Section::Providers) {
@@ -414,7 +448,7 @@ impl Config {
     pub fn stage_kind(&self) -> StageKind {
         match self.stage {
             InputStage::List => StageKind::List,
-            InputStage::Adding { .. } => StageKind::Input,
+            InputStage::Choosing { .. } | InputStage::Adding { .. } => StageKind::Input,
             InputStage::Waiting { .. } => StageKind::Waiting,
         }
     }
@@ -427,6 +461,7 @@ impl Config {
                 let content = rows + blanks + 5;
                 clamp_u16(content).clamp(10, 30)
             }
+            InputStage::Choosing { .. } => 8,
             InputStage::Adding { .. } => 9,
             InputStage::Waiting { .. } => 6,
         }
@@ -475,6 +510,9 @@ impl Config {
                 ..
             } => {
                 render_waiting(frame, inner, theme, provider, name, status.as_deref());
+            }
+            InputStage::Choosing { provider, method } => {
+                render_choosing(frame, inner, theme, provider, *method);
             }
         }
     }
@@ -653,15 +691,13 @@ fn method_label(method: AuthMethod) -> &'static str {
     match method {
         AuthMethod::ApiKey => "api key",
         AuthMethod::OAuth => "browser",
+        AuthMethod::ApiKeyOrOAuth => "api key / browser",
         AuthMethod::None => "no auth",
     }
 }
 
 fn provider_method(entry: &AccountEntry) -> AuthMethod {
-    entry
-        .accounts
-        .first()
-        .map_or(AuthMethod::ApiKey, |a| a.method)
+    entry.login
 }
 
 fn render_hint(frame: &mut Frame, area: Rect, theme: Theme, text: &str) {
@@ -799,6 +835,56 @@ fn render_waiting(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+fn render_choosing(
+    frame: &mut Frame,
+    area: Rect,
+    theme: Theme,
+    provider: &str,
+    method: AuthMethod,
+) {
+    let [title_area, _, api_area, browser_area, _, hint_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+
+    let title = Line::from(vec![
+        Span::styled(format!("  {provider}"), theme.key()),
+        Span::styled(" \u{b7} sign in with", theme.muted()),
+    ]);
+    frame.render_widget(Paragraph::new(title), title_area);
+
+    let row = |selected: bool, label: &str| {
+        let (marker, style) = if selected {
+            ("  \u{203a} ", theme.accent())
+        } else {
+            ("    ", theme.base())
+        };
+        Line::from(Span::styled(format!("{marker}{label}"), style))
+    };
+    frame.render_widget(
+        Paragraph::new(row(matches!(method, AuthMethod::ApiKey), "api key")),
+        api_area,
+    );
+    frame.render_widget(
+        Paragraph::new(row(
+            matches!(method, AuthMethod::OAuth),
+            "browser (claude subscription)",
+        )),
+        browser_area,
+    );
+    render_hint(
+        frame,
+        hint_area,
+        theme,
+        "  \u{2191}\u{2193} choose \u{b7} \u{23ce} continue \u{b7} esc cancel",
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use goat_protocol::{AccountEntry, AccountInfo, AuthMethod, LoginCredential};
@@ -815,14 +901,66 @@ mod tests {
                     method: AuthMethod::ApiKey,
                 }],
                 local: false,
+                login: AuthMethod::ApiKey,
             },
             AccountEntry {
                 provider: "ollama".to_owned(),
                 display_name: "ollama".to_owned(),
                 accounts: Vec::new(),
                 local: true,
+                login: AuthMethod::None,
             },
         ]
+    }
+
+    fn oauth_provider() -> Vec<AccountEntry> {
+        vec![AccountEntry {
+            provider: "anthropic".to_owned(),
+            display_name: "anthropic".to_owned(),
+            accounts: Vec::new(),
+            local: false,
+            login: AuthMethod::ApiKeyOrOAuth,
+        }]
+    }
+
+    #[test]
+    fn oauth_choice_then_browser_flow() {
+        let mut config = Config::new(oauth_provider(), true, true);
+        config.enter();
+        assert!(matches!(config.stage, super::InputStage::Choosing { .. }));
+        config.move_down();
+        config.enter();
+        assert!(matches!(
+            config.stage,
+            super::InputStage::Adding {
+                method: AuthMethod::OAuth,
+                ..
+            }
+        ));
+        let out = config.enter();
+        assert!(matches!(
+            out,
+            ConfigOutcome::AddAccount {
+                ref provider,
+                ref credential,
+                ..
+            } if provider == "anthropic" && matches!(credential, LoginCredential::OAuth)
+        ));
+        assert!(matches!(config.stage, super::InputStage::Waiting { .. }));
+    }
+
+    #[test]
+    fn oauth_choice_api_key_branch() {
+        let mut config = Config::new(oauth_provider(), true, true);
+        config.enter();
+        config.enter();
+        assert!(matches!(
+            config.stage,
+            super::InputStage::Adding {
+                method: AuthMethod::ApiKey,
+                ..
+            }
+        ));
     }
 
     #[test]

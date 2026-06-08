@@ -127,6 +127,7 @@ pub enum AuthMethod {
     None,
     ApiKey,
     OAuth,
+    ApiKeyOrOAuth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +148,7 @@ pub struct AccountEntry {
     pub display_name: String,
     pub accounts: Vec<AccountInfo>,
     pub local: bool,
+    pub login: AuthMethod,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
