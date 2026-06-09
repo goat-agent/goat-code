@@ -23,7 +23,7 @@ use goat_provider::{
 };
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use goat_store::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
-use goat_tool::ToolContext;
+use goat_tool::{ToolContext, ToolOutput};
 use goat_tools::ToolRegistry;
 use tokio::{
     sync::{Semaphore, mpsc},
@@ -805,22 +805,20 @@ async fn run_round(
     }
 }
 
-fn tool_outcome(result: &Result<String, String>) -> (ToolOutcome, String) {
+fn tool_outcome(result: &Result<ToolOutput, String>) -> ToolOutcome {
     match result {
-        Ok(text) => (
-            ToolOutcome {
-                ok: true,
-                summary: summarize_line(text),
-            },
-            text.clone(),
-        ),
-        Err(message) => (
-            ToolOutcome {
-                ok: false,
-                summary: Some(message.clone()),
-            },
-            message.clone(),
-        ),
+        Ok(ToolOutput::Text(text)) => ToolOutcome {
+            ok: true,
+            summary: summarize_line(text),
+        },
+        Ok(ToolOutput::Image(_)) => ToolOutcome {
+            ok: true,
+            summary: Some("[image]".to_owned()),
+        },
+        Err(message) => ToolOutcome {
+            ok: false,
+            summary: Some(message.clone()),
+        },
     }
 }
 
@@ -886,7 +884,7 @@ async fn run_regular_tool(
     input_json: &str,
     tool_ctx: &ToolContext,
     token: &CancellationToken,
-) -> Option<Result<String, String>> {
+) -> Option<Result<ToolOutput, String>> {
     let fut = async {
         match ctx.tools.get(name) {
             Some(tool) => tool
@@ -923,16 +921,19 @@ async fn execute_tool(
     tool_ctx: &ToolContext,
     token: &CancellationToken,
 ) -> ToolExecResult {
-    let step = if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
-        match ctx.semaphore.acquire().await {
-            Ok(_permit) if !token.is_cancelled() => {
-                Some(run_delegation(ctx, env, prep.input_json, run.id, token).await)
+    let step: Option<Result<ToolOutput, String>> =
+        if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
+            match ctx.semaphore.acquire().await {
+                Ok(_permit) if !token.is_cancelled() => Some(
+                    run_delegation(ctx, env, prep.input_json, run.id, token)
+                        .await
+                        .map(ToolOutput::text),
+                ),
+                _ => None,
             }
-            _ => None,
-        }
-    } else {
-        run_regular_tool(ctx, prep.name, prep.input_json, tool_ctx, token).await
-    };
+        } else {
+            run_regular_tool(ctx, prep.name, prep.input_json, tool_ctx, token).await
+        };
     let Some(result) = step else {
         let outcome = ToolOutcome {
             ok: false,
@@ -948,17 +949,13 @@ async fn execute_tool(
             })
             .await;
         return ToolExecResult {
-            result_content: ContentBlock::ToolResult {
-                tool_use_id: prep.vendor_id.to_owned(),
-                content: "interrupted".to_owned(),
-                is_error: true,
-            },
+            result_content: ContentBlock::text_result(prep.vendor_id, "interrupted", true),
             cancelled: true,
         };
     };
-    let (outcome, result_text) = tool_outcome(&result);
-    finish_tool_db(ctx, prep.db_id, &outcome).await;
+    let outcome = tool_outcome(&result);
     let is_error = !outcome.ok;
+    finish_tool_db(ctx, prep.db_id, &outcome).await;
     let _ = ctx
         .events
         .send(Event::ToolDone {
@@ -967,10 +964,24 @@ async fn execute_tool(
             outcome,
         })
         .await;
+    let content = match result {
+        Ok(ToolOutput::Text(text)) => {
+            vec![ContentBlock::Text {
+                text: cap_tool_result(text),
+            }]
+        }
+        Ok(ToolOutput::Image(img)) => {
+            vec![ContentBlock::Image {
+                media_type: img.media_type,
+                data: img.data,
+            }]
+        }
+        Err(msg) => vec![ContentBlock::Text { text: msg }],
+    };
     ToolExecResult {
         result_content: ContentBlock::ToolResult {
             tool_use_id: prep.vendor_id.to_owned(),
-            content: cap_tool_result(result_text),
+            content,
             is_error,
         },
         cancelled: false,
@@ -1285,10 +1296,8 @@ async fn process_round_output(
         tracing::warn!(rounds, "tool round cap reached; ending run");
         let synthetic: Vec<ContentBlock> = pending_calls
             .iter()
-            .map(|(vendor_id, _, _)| ContentBlock::ToolResult {
-                tool_use_id: vendor_id.clone(),
-                content: "tool round limit reached".to_owned(),
-                is_error: true,
+            .map(|(vendor_id, _, _)| {
+                ContentBlock::text_result(vendor_id.clone(), "tool round limit reached", true)
             })
             .collect();
         let message = Message {
@@ -1748,6 +1757,7 @@ async fn handle_resume(
                 } => {
                     if let Some((name, input)) = tool_uses.remove(tool_use_id) {
                         tool_seq += 1;
+                        let summary_text = ContentBlock::tool_result_text(content);
                         entries.push(TranscriptEntry::Tool {
                             call: ToolCall {
                                 id: ToolCallId(tool_seq),
@@ -1756,12 +1766,14 @@ async fn handle_resume(
                             },
                             outcome: ToolOutcome {
                                 ok: !is_error,
-                                summary: Some(tool_summary(content)),
+                                summary: Some(tool_summary(&summary_text)),
                             },
                         });
                     }
                 }
-                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
+                ContentBlock::Image { .. }
+                | ContentBlock::Thinking { .. }
+                | ContentBlock::RedactedThinking { .. } => {}
             }
         }
         new_history.push(Message { role, content });

@@ -339,11 +339,23 @@ fn content_block_json(block: &ContentBlock) -> serde_json::Value {
             tool_use_id,
             content,
             is_error,
-        } => json!({
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": content,
-            "is_error": is_error,
+        } => {
+            let content_json: Vec<serde_json::Value> =
+                content.iter().map(content_block_json).collect();
+            json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content_json,
+                "is_error": is_error,
+            })
+        }
+        ContentBlock::Image { media_type, data } => json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
         }),
     }
 }

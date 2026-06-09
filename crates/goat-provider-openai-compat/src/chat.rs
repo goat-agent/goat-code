@@ -112,10 +112,11 @@ fn to_chat_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                     ..
                 } = block
                 {
+                    let output_text = ContentBlock::tool_result_text(content);
                     out.push(json!({
                         "role": "tool",
                         "tool_call_id": tool_use_id,
-                        "content": content,
+                        "content": output_text,
                     }));
                 }
             }
@@ -382,11 +383,7 @@ mod tests {
     fn tool_result_becomes_tool_role_message() {
         let messages = vec![Message {
             role: MessageRole::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "call_1".to_owned(),
-                content: "file body".to_owned(),
-                is_error: false,
-            }],
+            content: vec![ContentBlock::text_result("call_1", "file body", false)],
         }];
         let out = to_chat_messages(&messages);
         assert_eq!(out[0]["role"], "tool");
