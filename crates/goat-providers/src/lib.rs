@@ -19,6 +19,7 @@ impl Registry {
             Arc::new(goat_provider_openai::build(store, account)),
             Arc::new(goat_provider_openai_codex::build(store, account)),
             Arc::new(goat_provider_anthropic::build(store, account)),
+            Arc::new(goat_provider_gemini::build(store, account)),
             Arc::new(goat_provider_local::ollama()),
             Arc::new(goat_provider_local::lmstudio()),
             Arc::new(goat_provider_local::llama_cpp()),
@@ -64,7 +65,7 @@ mod tests {
             std::env::temp_dir().join("goat-providers-registry-test.json"),
         );
         let registry = Registry::new(&store);
-        assert_eq!(registry.all().len(), 6);
+        assert_eq!(registry.all().len(), 7);
         assert!(registry.get(&ProviderId::from("anthropic")).is_some());
         assert!(registry.get(&ProviderId::from("ollama")).is_some());
         assert!(registry.get(&ProviderId::from("does-not-exist")).is_none());

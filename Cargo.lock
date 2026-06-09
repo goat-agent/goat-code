@@ -1301,6 +1301,7 @@ dependencies = [
  "goat-auth",
  "goat-provider",
  "goat-provider-anthropic",
+ "goat-provider-gemini",
  "goat-provider-local",
  "goat-provider-openai",
  "goat-provider-openai-codex",
