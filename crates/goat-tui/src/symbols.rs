@@ -23,6 +23,8 @@ pub mod ui {
     pub const MORE_BELOW: &str = "↓";
     pub const STREAM_CURSOR: &str = "▌";
     pub const MASK: &str = "•";
+    pub const BAR_FULL: &str = "█";
+    pub const BAR_EMPTY: &str = "░";
 }
 
 pub mod key {

@@ -12,6 +12,7 @@ mod theme;
 mod toast;
 mod transcript;
 mod tui;
+pub(crate) mod usage;
 mod view;
 
 pub use app::run;
