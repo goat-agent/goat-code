@@ -1125,13 +1125,6 @@ name = "goat-command"
 version = "0.1.0"
 
 [[package]]
-name = "goat-command-app"
-version = "0.1.0"
-dependencies = [
- "goat-command",
-]
-
-[[package]]
 name = "goat-command-conversation"
 version = "0.1.0"
 dependencies = [
@@ -1157,7 +1150,6 @@ name = "goat-commands"
 version = "0.1.0"
 dependencies = [
  "goat-command",
- "goat-command-app",
  "goat-command-conversation",
  "goat-command-help",
  "goat-command-settings",

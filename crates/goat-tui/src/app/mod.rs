@@ -275,7 +275,6 @@ impl App {
                     .push_notice(crate::command::help_text(&self.commands));
                 Vec::new()
             }
-            CommandEffect::RenameConversation(title) => vec![Op::RenameThread { title }],
             CommandEffect::ClearConversation => {
                 if self.active.is_some() {
                     return Vec::new();
@@ -296,10 +295,6 @@ impl App {
                 Vec::new()
             }
             CommandEffect::Noop => Vec::new(),
-            CommandEffect::Quit => {
-                self.should_quit = true;
-                Vec::new()
-            }
         }
     }
 

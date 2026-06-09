@@ -398,14 +398,8 @@ impl App {
                     self.set_agent_cursor(cursor + 1);
                 }
             }
-            KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
-                self.dirty = true;
-            }
-            KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10);
-                self.dirty = true;
-            }
+            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
+            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
             _ => {}
         }
         Vec::new()

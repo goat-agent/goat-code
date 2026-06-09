@@ -12,7 +12,6 @@ goat-command = { workspace = true }
 goat-command-settings = { workspace = true }
 goat-command-conversation = { workspace = true }
 goat-command-help = { workspace = true }
-goat-command-app = { workspace = true }
 goat-protocol = { workspace = true }
 
 [lints]

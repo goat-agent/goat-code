@@ -31,17 +31,8 @@ fn subsequence_match(query: &str, target: &str) -> Option<Vec<usize>> {
     Some(positions)
 }
 
-fn alias_label(aliases: &[String]) -> String {
-    if aliases.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", aliases.join(", "))
-    }
-}
-
 struct Match {
     name: String,
-    aliases: Vec<String>,
     description: String,
     positions: Vec<usize>,
 }
@@ -65,17 +56,10 @@ impl CommandMenu {
             .specs()
             .into_iter()
             .filter_map(|spec| {
-                let name_positions = subsequence_match(&query, spec.name);
-                let alias_hit = name_positions.is_none()
-                    && spec
-                        .aliases
-                        .iter()
-                        .any(|a| subsequence_match(&query, a).is_some());
-                (name_positions.is_some() || alias_hit).then(|| Match {
+                subsequence_match(&query, spec.name).map(|positions| Match {
                     name: spec.name.to_owned(),
-                    aliases: spec.aliases.iter().map(|a| (*a).to_owned()).collect(),
                     description: spec.description.to_owned(),
-                    positions: name_positions.unwrap_or_default(),
+                    positions,
                 })
             })
             .collect()
@@ -129,9 +113,6 @@ impl CommandMenu {
                     };
                     name_spans.push(Span::styled(ch.to_string(), style));
                 }
-                if !entry.aliases.is_empty() {
-                    name_spans.push(Span::styled(alias_label(&entry.aliases), theme.muted()));
-                }
                 let desc_style = if selected {
                     theme.base()
                 } else {
@@ -163,12 +144,7 @@ impl CommandMenu {
 pub fn help_text(registry: &CommandRegistry) -> String {
     let mut out = String::from("Commands:\n");
     for spec in registry.specs() {
-        let label = if spec.aliases.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", spec.aliases.join(", "))
-        };
-        let _ = writeln!(out, "  /{}{}  {}", spec.name, label, spec.description);
+        let _ = writeln!(out, "  /{}  {}", spec.name, spec.description);
     }
     out.push_str("\nKeybindings:\n");
     out.push_str("  Enter            send message\n");
