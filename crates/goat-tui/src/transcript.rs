@@ -12,6 +12,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{highlight::Highlighter, markdown, symbols, theme::Theme};
 
+pub(crate) struct Working {
+    pub elapsed: Option<u64>,
+    pub label: Option<String>,
+}
+
 type LineCache = RefCell<Option<(u16, u64, usize, Vec<Line<'static>>)>>;
 
 #[derive(Debug)]
@@ -132,6 +137,8 @@ impl Transcript {
             };
             self.items
                 .push(Item::Agent(markdown::render(&text, theme, hl)));
+        } else if interrupted {
+            self.items.push(Item::Notice("interrupted".into()));
         }
     }
 
@@ -173,11 +180,11 @@ impl Transcript {
         }
     }
 
-    pub fn content_height(&self, width: u16, theme: Theme) -> u16 {
+    pub fn content_height(&self, width: u16, theme: Theme, busy: bool) -> u16 {
         if let Some((w, h)) = self.cached_height.get()
             && w == width
         {
-            return h;
+            return h.saturating_add(u16::from(busy));
         }
         let mut lines = self.get_or_build_static_lines(theme, width, symbols::SPINNER[0]);
         lines.extend(self.streaming_lines(theme));
@@ -199,7 +206,7 @@ impl Transcript {
                 .sum::<u16>()
         };
         self.cached_height.set(Some((width, h)));
-        h
+        h.saturating_add(u16::from(busy))
     }
 
     pub fn render(
@@ -209,9 +216,13 @@ impl Transcript {
         theme: Theme,
         scroll: u16,
         spinner: &'static str,
+        working: Option<&Working>,
     ) {
         let mut lines = self.get_or_build_static_lines(theme, area.width, spinner);
         lines.extend(self.streaming_lines(theme));
+        if let Some(w) = working {
+            lines.push(working_line(theme, spinner, w));
+        }
         frame.render_widget(
             Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
@@ -219,6 +230,22 @@ impl Transcript {
             area,
         );
     }
+}
+
+fn working_line(theme: Theme, spinner: &'static str, w: &Working) -> Line<'static> {
+    let mut spans = vec![Span::styled(spinner, theme.accent()), Span::raw(" ")];
+    if let Some(label) = &w.label {
+        spans.push(Span::styled(label.clone(), theme.muted()));
+    } else {
+        spans.push(Span::styled(
+            format!("Working{}", symbols::ui::ELLIPSIS),
+            theme.muted(),
+        ));
+        if let Some(secs) = w.elapsed {
+            spans.push(Span::styled(format!(" {secs}s"), theme.muted()));
+        }
+    }
+    Line::from(spans)
 }
 
 fn build_static_lines(
@@ -464,12 +491,16 @@ mod tests {
         if let Some(Item::Tool {
             status: ToolStatus::Done(o),
             ..
-        }) = t.items.last()
+        }) = t.items.first()
         {
             assert!(!o.ok);
         } else {
             panic!("expected failed tool");
         }
+        assert!(
+            matches!(t.items.last(), Some(Item::Notice(_))),
+            "interrupt with no stream must append Notice"
+        );
     }
 
     #[test]
@@ -487,12 +518,34 @@ mod tests {
     fn content_height_counts_streaming() {
         let mut t = Transcript::default();
         commit(&mut t, "hello world");
-        let h1 = t.content_height(80, Theme::dark());
+        let h1 = t.content_height(80, Theme::dark(), false);
         t.push_delta("line one\nline two\nline three\nline four");
-        let h2 = t.content_height(80, Theme::dark());
+        let h2 = t.content_height(80, Theme::dark(), false);
         assert!(
             h2 > h1,
             "content_height must grow while streaming is active"
+        );
+    }
+
+    #[test]
+    fn content_height_includes_working_line() {
+        let mut t = Transcript::default();
+        commit(&mut t, "hello world");
+        let h_idle = t.content_height(80, Theme::dark(), false);
+        let h_busy = t.content_height(80, Theme::dark(), true);
+        assert!(
+            h_busy > h_idle,
+            "content_height must be larger when busy (working line)"
+        );
+    }
+
+    #[test]
+    fn interrupted_without_stream_pushes_notice() {
+        let mut t = Transcript::default();
+        t.complete(true, &PlainHighlighter, Theme::dark());
+        assert!(
+            matches!(t.items.last(), Some(Item::Notice(_))),
+            "interrupting with no stream must push a Notice item"
         );
     }
 }

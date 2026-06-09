@@ -59,6 +59,7 @@ pub(crate) enum Overlay {
 
 const TICK: Duration = Duration::from_millis(120);
 const QUIT_ARM_TICKS: u16 = 25;
+const CLEAR_ARM_TICKS: u16 = 25;
 
 pub(crate) enum AppEvent {
     Input(CtEvent),
@@ -78,6 +79,7 @@ pub struct App {
     pub(crate) next_task: u64,
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
+    pub(crate) clear_arm: Option<u16>,
     pub(crate) should_quit: bool,
     pub(crate) dirty: bool,
     pub(crate) scroll: u16,
@@ -115,6 +117,7 @@ impl App {
             next_task: 1,
             spinner: 0,
             quit_arm: None,
+            clear_arm: None,
             should_quit: false,
             dirty: true,
             scroll: 0,
@@ -148,6 +151,13 @@ impl App {
                     *ticks = ticks.saturating_sub(1);
                     if *ticks == 0 {
                         self.quit_arm = None;
+                        self.dirty = true;
+                    }
+                }
+                if let Some(ticks) = &mut self.clear_arm {
+                    *ticks = ticks.saturating_sub(1);
+                    if *ticks == 0 {
+                        self.clear_arm = None;
                         self.dirty = true;
                     }
                 }
@@ -485,12 +495,16 @@ impl App {
     pub(crate) fn quit_armed(&self) -> bool {
         self.quit_arm.is_some()
     }
+    pub(crate) fn clear_armed(&self) -> bool {
+        self.clear_arm.is_some()
+    }
     pub(crate) fn spinner_frame(&self) -> &'static str {
         symbols::SPINNER[self.spinner % symbols::SPINNER.len()]
     }
 
     pub(crate) fn content_height(&self, width: u16) -> u16 {
-        self.active_transcript().content_height(width, self.theme)
+        self.active_transcript()
+            .content_height(width, self.theme, self.is_busy())
     }
     pub(crate) fn scroll(&self) -> u16 {
         self.scroll
@@ -706,8 +720,21 @@ mod tests {
         app.composer.insert_str("hi");
         let started = app.submit();
         assert!(matches!(started.as_slice(), [Op::SubmitMessage { .. }]));
-        let ops = app.on_ctrl_c();
+        let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(ops.as_slice(), [Op::Interrupt { .. }]));
+    }
+
+    #[test]
+    fn ctrl_c_while_active_arms_quit_not_interrupt() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("hi");
+        app.submit();
+        let ops = app.on_ctrl_c();
+        assert!(
+            ops.is_empty(),
+            "Ctrl+C during active task must not interrupt"
+        );
+        assert!(app.quit_armed());
     }
 
     #[test]
@@ -719,6 +746,18 @@ mod tests {
         assert!(!app.should_quit);
         app.on_ctrl_c();
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn esc_idle_arms_then_clears() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("hello");
+        app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.clear_armed(), "first Esc must arm clear");
+        assert!(!app.composer.is_empty(), "composer must not be cleared yet");
+        app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.clear_armed(), "second Esc must disarm");
+        assert!(app.composer.is_empty(), "second Esc must clear composer");
     }
 
     #[test]

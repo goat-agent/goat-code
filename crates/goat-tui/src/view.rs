@@ -9,6 +9,7 @@ use crate::{
     app::{App, Overlay},
     overlay, symbols,
     theme::Theme,
+    transcript::Working,
 };
 
 #[allow(clippy::too_many_lines)]
@@ -178,8 +179,18 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
         height: area.height,
     };
     app.clamp_scroll(content.height, content.width);
-    app.transcript()
-        .render(frame, content, theme, app.scroll(), app.spinner_frame());
+    let working = app.is_busy().then(|| Working {
+        elapsed: app.elapsed_secs(),
+        label: app.agent_status(),
+    });
+    app.transcript().render(
+        frame,
+        content,
+        theme,
+        app.scroll(),
+        app.spinner_frame(),
+        working.as_ref(),
+    );
     if app.follow() {
         return;
     }
@@ -276,32 +287,26 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let sep = symbols::ui::SEPARATOR;
     let line = if app.is_busy() {
-        let mut spans = vec![Span::styled(
-            format!(" {} ", app.spinner_frame()),
-            theme.accent(),
-        )];
-        if let Some(status) = app.agent_status() {
-            spans.push(Span::styled(status, theme.muted()));
+        if app.quit_armed() {
+            Line::from(vec![
+                Span::styled(format!(" {}c", symbols::key::CTRL), theme.key()),
+                Span::styled(" again to quit", theme.muted()),
+            ])
         } else {
-            spans.push(Span::styled(
-                format!("Working{}", symbols::ui::ELLIPSIS),
-                theme.muted(),
-            ));
-            if let Some(secs) = app.elapsed_secs() {
-                spans.push(Span::styled(format!(" {secs}s"), theme.muted()));
-            }
+            Line::from(vec![
+                Span::styled(format!(" {}", symbols::key::ESC), theme.key()),
+                Span::styled(" interrupt", theme.muted()),
+            ])
         }
-        spans.push(Span::styled(sep, theme.muted()));
-        spans.push(Span::styled(
-            format!("{}c", symbols::key::CTRL),
-            theme.key(),
-        ));
-        spans.push(Span::styled(" interrupt", theme.muted()));
-        Line::from(spans)
     } else if app.quit_armed() {
         Line::from(vec![
             Span::styled(format!(" {}c", symbols::key::CTRL), theme.key()),
             Span::styled(" again to quit", theme.muted()),
+        ])
+    } else if app.clear_armed() {
+        Line::from(vec![
+            Span::styled(format!(" {}", symbols::key::ESC), theme.key()),
+            Span::styled(" again to clear", theme.muted()),
         ])
     } else {
         let mut spans = vec![

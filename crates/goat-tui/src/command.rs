@@ -173,7 +173,8 @@ pub fn help_text(registry: &CommandRegistry) -> String {
     out.push_str("\nKeybindings:\n");
     out.push_str("  Enter            send message\n");
     out.push_str("  Shift/Alt+Enter  newline\n");
-    out.push_str("  Ctrl-C           interrupt / quit\n");
+    out.push_str("  Esc              interrupt / clear input (x2)\n");
+    out.push_str("  Ctrl-C           clear input / quit (x2)\n");
     out.push_str("  Ctrl-A/E         line start/end\n");
     out.push_str("  Ctrl-W           delete word before\n");
     let _ = writeln!(
