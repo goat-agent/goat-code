@@ -22,7 +22,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 **Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
-- `goat-config` — config, `ThemeChoice`, XDG paths, log directory; no TUI deps; leaf.
+- `goat-config` — config, `ThemeChoice`, `~/.goat-code` paths, log directory; no TUI deps; leaf.
 - `goat-core` — `Session` and the `Engine` trait; depends on `goat-protocol` only.
 - `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol` and `goat-commands`, not `goat-core` or any engine crate.
 - `goat-code` — the `goat` binary; wires the channels, logging, and CLI; depends on all.
