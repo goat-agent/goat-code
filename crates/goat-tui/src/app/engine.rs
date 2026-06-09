@@ -142,6 +142,33 @@ impl App {
                 self.toasts.push(crate::toast::Toast::new(kind, message));
                 self.dirty = true;
             }
+            EngineEvent::Usage {
+                id: _,
+                usage,
+                context_window,
+            } => {
+                if let Some(model) = &self.model {
+                    let key = (model.provider.clone(), model.account.clone());
+                    let total = self.usage_total.entry(key.clone()).or_default();
+                    total.0 += u64::from(usage.input_tokens);
+                    total.1 += u64::from(usage.output_tokens);
+                    self.usage_last.insert(key, usage);
+                }
+                if let Some(w) = context_window {
+                    self.context_window = Some(w);
+                }
+                self.dirty = true;
+            }
+            EngineEvent::RateLimits {
+                provider,
+                account,
+                snapshot,
+                cached_at,
+            } => {
+                self.rate_limits
+                    .insert((provider, account), (snapshot, cached_at));
+                self.dirty = true;
+            }
         }
         if self.follow {
             self.scroll = u16::MAX;

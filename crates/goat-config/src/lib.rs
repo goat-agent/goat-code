@@ -91,6 +91,10 @@ pub fn global_instructions_file() -> Option<PathBuf> {
     app_home().map(|home| home.join(PROJECT_INSTRUCTIONS_FILE))
 }
 
+pub fn rate_limits_path() -> Option<PathBuf> {
+    app_home().map(|home| home.join("rate_limits.json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Config, ThemeChoice};

@@ -1,13 +1,14 @@
 mod engine;
 mod keys;
 
-use std::{path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
 use futures::StreamExt;
 use goat_commands::{CommandEffect, CommandRegistry};
 use goat_protocol::{
-    AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId,
+    AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, Op, RateLimitSnapshot,
+    TaskId, Usage,
 };
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -21,7 +22,9 @@ use crate::{
     symbols,
     theme::Theme,
     transcript::Transcript,
-    tui, view,
+    tui,
+    usage::UsageView,
+    view,
 };
 
 pub(crate) enum ResumeIntent {
@@ -50,6 +53,7 @@ pub(crate) enum Overlay {
     Config(Config),
     Commands(CommandMenu),
     Agents(usize),
+    Usage,
 }
 
 const TICK: Duration = Duration::from_millis(120);
@@ -88,6 +92,10 @@ pub struct App {
     pub(crate) toasts: Vec<crate::toast::Toast>,
     pub(crate) agent_runs: Vec<AgentRunView>,
     pub(crate) main_view: MainView,
+    pub(crate) usage_last: HashMap<(String, String), Usage>,
+    pub(crate) usage_total: HashMap<(String, String), (u64, u64)>,
+    pub(crate) rate_limits: HashMap<(String, String), (RateLimitSnapshot, i64)>,
+    pub(crate) context_window: Option<u32>,
 }
 
 impl App {
@@ -121,6 +129,10 @@ impl App {
             toasts: Vec::new(),
             agent_runs: Vec::new(),
             main_view: MainView::Live,
+            usage_last: HashMap::new(),
+            usage_total: HashMap::new(),
+            rate_limits: HashMap::new(),
+            context_window: None,
         }
     }
 
@@ -293,6 +305,11 @@ impl App {
             }
             CommandEffect::Error(message) => {
                 self.transcript.push_error(message);
+                Vec::new()
+            }
+            CommandEffect::OpenUsage => {
+                self.overlay = Overlay::Usage;
+                self.dirty = true;
                 Vec::new()
             }
             CommandEffect::Noop => Vec::new(),
@@ -558,6 +575,28 @@ impl App {
             .map(|(kind, n)| format!("{n} {kind}"))
             .collect();
         Some(format!("{running} agents · {}", parts.join(", ")))
+    }
+
+    pub(crate) fn build_usage_view(&self) -> UsageView {
+        UsageView::new(
+            self.account_entries.clone(),
+            self.usage_last.clone(),
+            self.usage_total.clone(),
+            self.rate_limits.clone(),
+            self.context_window,
+            self.model.clone(),
+        )
+    }
+
+    pub(crate) fn ctx_indicator(&self) -> Option<(f32, u64, u32)> {
+        let model = self.model.as_ref()?;
+        let window = self.context_window?;
+        let key = (model.provider.clone(), model.account.clone());
+        let usage = self.usage_last.get(&key)?;
+        let used = u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+        let pct = (used as f64 / f64::from(window) * 100.0).min(100.0) as f32;
+        Some((pct, used, window))
     }
 }
 

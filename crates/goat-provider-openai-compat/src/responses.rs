@@ -4,7 +4,7 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, Request, StreamEvent, ToolDefinition,
+    ProviderId, RateLimitSnapshot, Request, StreamEvent, ToolDefinition, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -172,6 +172,7 @@ pub async fn run_request(
     account_id: Option<&str>,
     body: &serde_json::Value,
     events: &mpsc::Sender<StreamEvent>,
+    parse_rate_limits: Option<fn(&reqwest::header::HeaderMap) -> Option<RateLimitSnapshot>>,
 ) {
     let mut builder = client
         .post(url)
@@ -203,6 +204,11 @@ pub async fn run_request(
             })
             .await;
         return;
+    }
+    if let Some(parser) = parse_rate_limits
+        && let Some(snapshot) = parser(resp.headers())
+    {
+        let _ = events.send(StreamEvent::RateLimits { snapshot }).await;
     }
     stream_responses(resp, events).await;
 }
@@ -247,7 +253,12 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Str
                         return;
                     }
                 }
-                "response.completed" => break,
+                "response.completed" => {
+                    if let Some(usage) = parse_completed_usage(&event.data) {
+                        let _ = events.send(StreamEvent::Usage { usage }).await;
+                    }
+                    break;
+                }
                 "response.failed" | "error" => {
                     let _ = events
                         .send(StreamEvent::Failed {
@@ -269,6 +280,49 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Str
         }
     }
     let _ = events.send(StreamEvent::Completed).await;
+}
+
+#[derive(Deserialize)]
+struct CompletedEvent {
+    response: Option<CompletedResponse>,
+}
+
+#[derive(Deserialize)]
+struct CompletedResponse {
+    usage: Option<ResponseUsage>,
+}
+
+#[derive(Deserialize)]
+struct ResponseUsage {
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
+    #[serde(default)]
+    input_tokens_details: InputTokenDetails,
+    #[serde(default)]
+    output_tokens_details: OutputTokenDetails,
+}
+
+#[derive(Default, Deserialize)]
+struct InputTokenDetails {
+    #[serde(default)]
+    cached_tokens: u32,
+}
+
+#[derive(Default, Deserialize)]
+struct OutputTokenDetails {
+    #[serde(default)]
+    reasoning_tokens: u32,
+}
+
+fn parse_completed_usage(data: &str) -> Option<Usage> {
+    let ev = serde_json::from_str::<CompletedEvent>(data).ok()?;
+    let u = ev.response?.usage?;
+    Some(Usage {
+        input_tokens: u.input_tokens.unwrap_or(0),
+        output_tokens: u.output_tokens.unwrap_or(0),
+        cache_read_tokens: u.input_tokens_details.cached_tokens,
+        cache_write_tokens: u.output_tokens_details.reasoning_tokens,
+    })
 }
 
 #[derive(Deserialize)]
@@ -343,6 +397,8 @@ pub struct ResponsesProvider {
     client: reqwest::Client,
     model_filter: Option<fn(&str) -> bool>,
     catalog: &'static [&'static str],
+    rate_limits_parser: Option<fn(&reqwest::header::HeaderMap) -> Option<RateLimitSnapshot>>,
+    context_windows: &'static [(&'static str, u32)],
 }
 
 impl ResponsesProvider {
@@ -360,6 +416,8 @@ impl ResponsesProvider {
             client: common::http_client(),
             model_filter: None,
             catalog: &[],
+            rate_limits_parser: None,
+            context_windows: &[],
         }
     }
 
@@ -372,6 +430,21 @@ impl ResponsesProvider {
     #[must_use]
     pub fn with_catalog(mut self, catalog: &'static [&'static str]) -> Self {
         self.catalog = catalog;
+        self
+    }
+
+    #[must_use]
+    pub fn with_rate_limits_parser(
+        mut self,
+        parser: fn(&reqwest::header::HeaderMap) -> Option<RateLimitSnapshot>,
+    ) -> Self {
+        self.rate_limits_parser = Some(parser);
+        self
+    }
+
+    #[must_use]
+    pub fn with_context_windows(mut self, windows: &'static [(&'static str, u32)]) -> Self {
+        self.context_windows = windows;
         self
     }
 }
@@ -409,10 +482,18 @@ impl Provider for ResponsesProvider {
         responses_efforts(model)
     }
 
+    fn context_window(&self, model: &str) -> Option<u32> {
+        self.context_windows
+            .iter()
+            .find(|(prefix, _)| model.starts_with(prefix))
+            .map(|(_, w)| *w)
+    }
+
     fn stream(&self, req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
         let client = self.client.clone();
         let url = format!("{}/responses", self.base_url);
         let bearer = self.bearer.clone();
+        let rate_limits_parser = self.rate_limits_parser;
         tokio::spawn(async move {
             let body = build_body(
                 &req.model,
@@ -422,7 +503,16 @@ impl Provider for ResponsesProvider {
                 false,
                 req.effort,
             );
-            run_request(&client, &url, bearer.as_deref(), None, &body, &events).await;
+            run_request(
+                &client,
+                &url,
+                bearer.as_deref(),
+                None,
+                &body,
+                &events,
+                rate_limits_parser,
+            )
+            .await;
         })
     }
 

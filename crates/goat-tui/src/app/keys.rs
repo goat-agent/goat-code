@@ -22,6 +22,7 @@ impl App {
                     return result;
                 }
             }
+            Overlay::Usage => return self.on_usage_key(key),
             Overlay::None => {}
         }
         if let Some(ch) = keymap::ctrl_key(&key) {
@@ -404,6 +405,17 @@ impl App {
             }
             KeyCode::PageDown => {
                 self.scroll = self.scroll.saturating_add(10);
+                self.dirty = true;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn on_usage_key(&mut self, key: KeyEvent) -> Vec<Op> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.overlay = Overlay::None;
                 self.dirty = true;
             }
             _ => {}

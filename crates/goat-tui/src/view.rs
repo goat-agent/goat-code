@@ -48,7 +48,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     match app.overlay() {
-        Overlay::Config(_) | Overlay::Model(_) | Overlay::Effort(_) | Overlay::Thread(_) => {
+        Overlay::Config(_)
+        | Overlay::Model(_)
+        | Overlay::Effort(_)
+        | Overlay::Thread(_)
+        | Overlay::Usage => {
             let [header, body, composer] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Min(1),
@@ -62,6 +66,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 Overlay::Model(picker) => picker.render(frame, body, theme),
                 Overlay::Effort(picker) => picker.render(frame, body, theme),
                 Overlay::Thread(picker) => picker.render(frame, body, theme),
+                Overlay::Usage => {
+                    let view = app.build_usage_view();
+                    view.render(frame, body, theme);
+                }
                 _ => {}
             }
             app.composer().render(frame, composer, theme, false);
@@ -179,23 +187,69 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
     );
 }
 
+fn ctx_color(pct: f32, theme: Theme) -> ratatui::style::Style {
+    if pct >= 90.0 {
+        theme.error()
+    } else if pct >= 70.0 {
+        theme.role_tool()
+    } else {
+        theme.muted()
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn format_k(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.0}k", (n as f64 / 1_000.0).round())
+    } else {
+        format!("{n}")
+    }
+}
+
 fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
-    let mut spans = vec![Span::styled(format!(" {}", app.cwd()), theme.muted())];
+    let mut left_spans = vec![Span::styled(format!(" {}", app.cwd()), theme.muted())];
     if let Some(model) = app.current_model() {
-        spans.push(Span::styled("  \u{00b7}  ", theme.muted()));
+        left_spans.push(Span::styled("  \u{00b7}  ", theme.muted()));
         let model_label = if app.provider_has_multiple_accounts(&model.provider) {
             format!("{}:{}/{}", model.provider, model.account, model.model)
         } else {
             format!("{}/{}", model.provider, model.model)
         };
-        spans.push(Span::styled(model_label, theme.key()));
+        left_spans.push(Span::styled(model_label, theme.key()));
         if let Some(effort) = model.effort {
-            spans.push(Span::styled(
+            left_spans.push(Span::styled(
                 format!("{}{}", symbols::ui::SEPARATOR, effort),
                 theme.accent(),
             ));
         }
     }
+
+    let mut right_spans: Vec<Span> = Vec::new();
+    if let Some((pct, used, window)) = app.ctx_indicator() {
+        let color = ctx_color(pct, theme);
+        let area_w = usize::from(area.width);
+        let left_w: usize = left_spans.iter().map(|s| s.content.len()).sum();
+        let sep = symbols::ui::MIDDOT;
+        let fused = format_k(used);
+        let fwin = format_k(u64::from(window));
+        let short_text = format!(" ctx {pct:>3.0}%");
+        let long_text = format!(" ctx {pct:>3.0}% {sep} {fused}/{fwin}");
+        let ctx_str = if area_w.saturating_sub(left_w) >= long_text.len() + 2 {
+            long_text
+        } else {
+            short_text
+        };
+        let pad = area_w
+            .saturating_sub(left_w + ctx_str.len())
+            .saturating_sub(1);
+        right_spans.push(Span::raw(" ".repeat(pad)));
+        right_spans.push(Span::styled(ctx_str, color));
+    }
+
+    let mut spans = left_spans;
+    spans.extend(right_spans);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
