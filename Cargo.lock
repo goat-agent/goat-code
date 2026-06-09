@@ -1218,6 +1218,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "goat-provider-gemini"
+version = "0.1.0"
+dependencies = [
+ "eventsource-stream",
+ "futures",
+ "goat-auth",
+ "goat-provider",
+ "open",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "goat-provider-local"
 version = "0.1.0"
 dependencies = [
@@ -1284,6 +1301,7 @@ dependencies = [
  "goat-auth",
  "goat-provider",
  "goat-provider-anthropic",
+ "goat-provider-gemini",
  "goat-provider-local",
  "goat-provider-openai",
  "goat-provider-openai-codex",

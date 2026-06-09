@@ -4,7 +4,7 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, Request, StreamEvent,
+    ProviderId, Request, StreamEvent, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -51,10 +51,16 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<serde_json::Value>,
     stream: bool,
+    stream_options: StreamOptions,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 fn chat_effort_wire(effort: Effort) -> Option<&'static str> {
@@ -149,6 +155,13 @@ fn to_chat_tools(req: &Request) -> Vec<serde_json::Value> {
 struct ChatChunk {
     #[serde(default)]
     choices: Vec<ChatChoice>,
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Deserialize)]
+struct ChatUsage {
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +222,7 @@ fn drain_tool_calls(tool_calls: &mut ToolAccumulator) -> Vec<StreamEvent> {
 async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<StreamEvent>) {
     let mut stream = response.bytes_stream().eventsource();
     let mut tool_calls: ToolAccumulator = HashMap::new();
+    let mut last_usage: Option<ChatUsage> = None;
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => {
@@ -218,6 +232,9 @@ async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<StreamEv
                 let Ok(chunk) = serde_json::from_str::<ChatChunk>(&event.data) else {
                     continue;
                 };
+                if chunk.usage.is_some() {
+                    last_usage = chunk.usage;
+                }
                 let Some(choice) = chunk.choices.into_iter().next() else {
                     continue;
                 };
@@ -249,6 +266,15 @@ async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<StreamEv
         if events.send(call).await.is_err() {
             return;
         }
+    }
+    if let Some(u) = last_usage {
+        let usage = Usage {
+            input_tokens: u.prompt_tokens.unwrap_or(0),
+            output_tokens: u.completion_tokens.unwrap_or(0),
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        let _ = events.send(StreamEvent::Usage { usage }).await;
     }
     let _ = events.send(StreamEvent::Completed).await;
 }
@@ -291,6 +317,9 @@ impl Provider for OpenAiCompatProvider {
                 model: &req.model,
                 messages: to_chat_messages(&req.messages),
                 stream: true,
+                stream_options: StreamOptions {
+                    include_usage: true,
+                },
                 tools: to_chat_tools(&req),
                 reasoning_effort: req.effort.and_then(chat_effort_wire),
             };
