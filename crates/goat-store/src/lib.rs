@@ -306,6 +306,17 @@ impl Store {
         .await
     }
 
+    pub async fn update_thread_title(&self, id: i64, title: String) -> Result<(), StoreError> {
+        self.run(move |conn| {
+            conn.execute(
+                "UPDATE threads SET title = ?2 WHERE id = ?1",
+                params![id, title],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn create_turn(&self, turn: NewTurn) -> Result<i64, StoreError> {
         self.run(move |conn| {
             conn.execute(
