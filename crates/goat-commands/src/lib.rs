@@ -20,7 +20,11 @@ impl CommandRegistry {
     }
 
     pub fn resolve(&self, name: &str, args: &str) -> CommandEffect {
-        if let Some(command) = self.builtins.iter().find(|command| command.name() == name) {
+        if let Some(command) = self
+            .builtins
+            .iter()
+            .find(|command| command.name() == name || command.aliases().contains(&name))
+        {
             return command.run(args);
         }
         if self.skills.iter().any(|skill| skill.name == name) {
@@ -33,10 +37,12 @@ impl CommandRegistry {
         let builtins = self.builtins.iter().map(|command| CommandSpec {
             name: command.name(),
             description: command.description(),
+            aliases: command.aliases(),
         });
         let skills = self.skills.iter().map(|skill| CommandSpec {
             name: &skill.name,
             description: &skill.description,
+            aliases: &[],
         });
         builtins.chain(skills).collect()
     }
