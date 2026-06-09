@@ -36,6 +36,7 @@ goat-command = { path = "crates/goat-command" }
 goat-command-settings = { path = "crates/goat-command-settings" }
 goat-command-conversation = { path = "crates/goat-command-conversation" }
 goat-command-help = { path = "crates/goat-command-help" }
+goat-command-app = { path = "crates/goat-command-app" }
 goat-commands = { path = "crates/goat-commands" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
