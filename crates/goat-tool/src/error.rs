@@ -35,16 +35,25 @@ pub enum ToolError {
     Spawn { source: std::io::Error },
     #[error("could not resolve working directory: {source}")]
     Cwd { source: std::io::Error },
+    #[error("{message}")]
+    Execution { message: String },
 }
 
-pub fn outcome_from(result: &Result<String, ToolError>) -> (ToolOutcome, String) {
+pub fn outcome_from(result: &Result<crate::ToolOutput, ToolError>) -> (ToolOutcome, String) {
     match result {
-        Ok(text) => (
+        Ok(crate::ToolOutput::Text(text)) => (
             ToolOutcome {
                 ok: true,
                 summary: summarize(text),
             },
             text.clone(),
+        ),
+        Ok(crate::ToolOutput::Image(_)) => (
+            ToolOutcome {
+                ok: true,
+                summary: Some("[image]".to_owned()),
+            },
+            "[image]".to_owned(),
         ),
         Err(err) => {
             let msg = err.to_string();

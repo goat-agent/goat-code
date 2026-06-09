@@ -7,4 +7,4 @@ pub mod tool;
 pub use context::ToolContext;
 pub use error::{ToolError, outcome_from};
 pub use spec::ToolSpec;
-pub use tool::{Tool, ToolFuture};
+pub use tool::{Tool, ToolFuture, ToolImage, ToolOutput};
