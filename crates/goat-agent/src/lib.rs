@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 
 mod agent;
 mod instructions;
+mod rate_limit_cache;
 
 pub use agent::{AgentRegistry, AgentSpec, ToolSelection};
 
@@ -122,6 +123,8 @@ struct Ctx<'a> {
     instructions: Option<&'a str>,
     semaphore: &'a Arc<Semaphore>,
     child_ids: &'a AtomicU64,
+    rl_cache: &'a std::sync::Mutex<rate_limit_cache::RateLimitCache>,
+    rl_path: Option<&'a std::path::Path>,
 }
 
 enum Flow {
@@ -165,6 +168,10 @@ impl<'a> Run<'a> {
             Report::Child => None,
         }
     }
+
+    fn is_top(&self) -> bool {
+        matches!(self.report, Report::Top(_))
+    }
 }
 
 struct LoopEnv<'a> {
@@ -187,6 +194,8 @@ struct RoundResult {
     thinking: Option<(String, String)>,
     redacted: Vec<String>,
     pending_calls: Vec<(String, String, String)>,
+    usage: Option<goat_provider::Usage>,
+    rate_limits: Option<goat_provider::RateLimitSnapshot>,
 }
 
 struct ToolExecResult {
@@ -328,6 +337,25 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
         })
         .await;
 
+    let rl_path = goat_config::rate_limits_path();
+    let rl_cache_data = rl_path
+        .as_deref()
+        .map(rate_limit_cache::RateLimitCache::load)
+        .unwrap_or_default();
+    for (provider, account, entry) in rl_cache_data.entries() {
+        let _ = events
+            .send(Event::RateLimits {
+                provider: provider.to_owned(),
+                account: account.to_owned(),
+                snapshot: goat_protocol::RateLimitSnapshot {
+                    windows: entry.windows.clone(),
+                },
+                cached_at: entry.cached_at,
+            })
+            .await;
+    }
+    let rl_cache = std::sync::Mutex::new(rl_cache_data);
+
     while let Some(op) = ops.recv().await {
         match op {
             Op::SubmitMessage { id, text } => {
@@ -342,6 +370,8 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     instructions: project_instructions.as_deref(),
                     semaphore: &semaphore,
                     child_ids: &child_ids,
+                    rl_cache: &rl_cache,
+                    rl_path: rl_path.as_deref(),
                 };
                 if let Flow::Shutdown = handle_turn(
                     &ctx,
@@ -663,11 +693,12 @@ fn model_entry(
     model: &str,
     accounts: &[String],
     efforts: Vec<Effort>,
+    context_window: Option<u32>,
 ) -> ModelEntry {
     ModelEntry {
         provider: provider_id.to_owned(),
         model: model.to_owned(),
-        context_window: None,
+        context_window,
         efforts,
         accounts: accounts
             .iter()
@@ -698,6 +729,7 @@ fn catalog_only(registry: &Registry, credentials: &CredentialStore) -> Vec<Model
                 id,
                 &accounts,
                 provider.efforts(id),
+                provider.context_window(id),
             ));
         }
     }
@@ -731,6 +763,7 @@ async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> V
                 id,
                 &accounts,
                 provider.efforts(id),
+                provider.context_window(id),
             ));
         }
 
@@ -739,7 +772,14 @@ async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> V
                 continue;
             }
             let efforts = provider.efforts(&info.id);
-            entries.push(model_entry(&provider_id, &info.id, &accounts, efforts));
+            let ctx_win = provider.context_window(&info.id);
+            entries.push(model_entry(
+                &provider_id,
+                &info.id,
+                &accounts,
+                efforts,
+                ctx_win,
+            ));
         }
     }
     entries
@@ -759,6 +799,8 @@ async fn run_round(
     let mut signature = String::new();
     let mut redacted: Vec<String> = Vec::new();
     let mut pending_calls: Vec<(String, String, String)> = Vec::new();
+    let mut usage: Option<goat_provider::Usage> = None;
+    let mut rate_limits: Option<goat_provider::RateLimitSnapshot> = None;
     let end = loop {
         tokio::select! {
             biased;
@@ -790,6 +832,12 @@ async fn run_round(
                 Some(StreamEvent::ToolCall { id: vendor_id, name, input }) => {
                     pending_calls.push((vendor_id, name, input));
                 }
+                Some(StreamEvent::Usage { usage: u }) => {
+                    usage = Some(u);
+                }
+                Some(StreamEvent::RateLimits { snapshot }) => {
+                    rate_limits = Some(snapshot);
+                }
                 Some(StreamEvent::Completed) | None => break RoundEnd::Completed,
                 Some(StreamEvent::Failed { message }) => break RoundEnd::Failed(message),
             }
@@ -802,6 +850,8 @@ async fn run_round(
         thinking,
         redacted,
         pending_calls,
+        usage,
+        rate_limits,
     }
 }
 
@@ -1219,7 +1269,7 @@ async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &TurnEnd, ids: &TurnI
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn process_round_output(
     ctx: &Ctx<'_>,
     run: &Run<'_>,
@@ -1231,6 +1281,48 @@ async fn process_round_output(
     tool_ctx: &ToolContext,
     token: &CancellationToken,
 ) -> RoundOutcome {
+    if let Some(usage) = round.usage
+        && run.is_top()
+    {
+        let context_window = env.provider.context_window(&env.target.model);
+        let _ = ctx
+            .events
+            .send(Event::Usage {
+                id: run.id,
+                usage,
+                context_window,
+            })
+            .await;
+    }
+    if let Some(snapshot) = round.rate_limits
+        && run.is_top()
+    {
+        let now = now_ms() / 1000;
+        {
+            let mut cache = ctx
+                .rl_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cache.upsert(
+                &env.target.provider,
+                &env.target.account,
+                snapshot.windows.clone(),
+                now,
+            );
+            if let Some(path) = ctx.rl_path {
+                cache.save(path);
+            }
+        }
+        let _ = ctx
+            .events
+            .send(Event::RateLimits {
+                provider: env.target.provider.clone(),
+                account: env.target.account.clone(),
+                snapshot,
+                cached_at: now,
+            })
+            .await;
+    }
     let raw = round.raw;
     let pending_calls = round.pending_calls;
     let shown_text = (!raw.is_empty()).then(|| raw.clone());
@@ -2064,7 +2156,9 @@ mod tests {
                 | Event::LoginStatus { .. }
                 | Event::AccountsChanged { .. }
                 | Event::SkillsChanged { .. }
-                | Event::TextDone { .. } => {}
+                | Event::TextDone { .. }
+                | Event::Usage { .. }
+                | Event::RateLimits { .. } => {}
                 Event::TaskStarted { .. } => started = true,
                 Event::TextDelta { chunk, .. } => deltas.push_str(&chunk),
                 Event::TaskDone { interrupted, .. } => {
