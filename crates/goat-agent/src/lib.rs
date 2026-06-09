@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     path::Path,
     sync::{
@@ -14,9 +14,9 @@ use goat_auth::{
 };
 use goat_core::Engine;
 use goat_protocol::{
-    AccountChoice, AccountEntry, AccountInfo, AuthMethod, Effort, Event, LoginCredential,
-    LoginProvider, ModelEntry, ModelTarget, NotifyKind, Op, SkillInfo, TaskId, ThreadSummary,
-    ToolCall, ToolCallId, ToolOutcome, TranscriptEntry,
+    AccountChoice, AccountEntry, AccountInfo, AskQuestion, AuthMethod, Effort, Event,
+    LoginCredential, LoginProvider, ModelEntry, ModelTarget, NotifyKind, Op, SkillInfo, TaskId,
+    ThreadSummary, ToolCall, ToolCallId, ToolOutcome, TranscriptEntry,
 };
 use goat_provider::{
     ContentBlock, Message, MessageRole, Provider, Request, StreamEvent, ToolDefinition,
@@ -26,7 +26,7 @@ use goat_store::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
 use goat_tool::ToolContext;
 use goat_tools::ToolRegistry;
 use tokio::{
-    sync::{Semaphore, mpsc},
+    sync::{Mutex, Semaphore, mpsc, oneshot},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -39,6 +39,7 @@ pub use agent::{AgentRegistry, AgentSpec, ToolSelection};
 const MAX_TOOL_ROUNDS: usize = 20;
 const MAX_CONCURRENT_AGENTS: usize = 8;
 const AGENT_TOOL_NAME: &str = "Agent";
+const ASK_TOOL_NAME: &str = "Ask";
 const CHILD_ID_BASE: u64 = 1 << 32;
 const SYSTEM_PROMPT: &str = "You are Goat, an expert software engineering assistant. You help users understand, build, and improve software by reading code, running tools, and providing accurate, actionable guidance. When using tools, prefer targeted reads and searches over broad exploration. Always verify your understanding before making changes.";
 
@@ -122,6 +123,7 @@ struct Ctx<'a> {
     instructions: Option<&'a str>,
     semaphore: &'a Arc<Semaphore>,
     child_ids: &'a AtomicU64,
+    asks: &'a Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>>,
 }
 
 enum Flow {
@@ -322,6 +324,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     let project_instructions = instructions::load_project_instructions(&cwd);
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_AGENTS));
     let child_ids = AtomicU64::new(CHILD_ID_BASE);
+    let asks: Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>> = Mutex::new(HashMap::new());
     let _ = events
         .send(Event::SkillsChanged {
             skills: skills.clone(),
@@ -342,6 +345,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     instructions: project_instructions.as_deref(),
                     semaphore: &semaphore,
                     child_ids: &child_ids,
+                    asks: &asks,
                 };
                 if let Flow::Shutdown = handle_turn(
                     &ctx,
@@ -357,7 +361,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     break;
                 }
             }
-            Op::Interrupt { .. } | Op::SetTheme { .. } => {}
+            Op::Interrupt { .. } | Op::SetTheme { .. } | Op::Answer { .. } => {}
             Op::Clear => {
                 history.clear();
                 thread_id = None;
@@ -923,7 +927,9 @@ async fn execute_tool(
     tool_ctx: &ToolContext,
     token: &CancellationToken,
 ) -> ToolExecResult {
-    let step = if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
+    let step = if prep.name == ASK_TOOL_NAME && env.allow_delegate {
+        Some(run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token).await)
+    } else if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
         match ctx.semaphore.acquire().await {
             Ok(_permit) if !token.is_cancelled() => {
                 Some(run_delegation(ctx, env, prep.input_json, run.id, token).await)
@@ -1346,10 +1352,48 @@ fn build_tool_defs(
             input_schema: spec.parameters,
         })
         .collect();
-    if allow_delegate && !ctx.agents.is_empty() {
-        defs.push(agent_tool_def(ctx));
+    if allow_delegate {
+        if !ctx.agents.is_empty() {
+            defs.push(agent_tool_def(ctx));
+        }
+        defs.push(ask_tool_def());
     }
     defs
+}
+
+fn ask_tool_def() -> ToolDefinition {
+    ToolDefinition {
+        name: ASK_TOOL_NAME.to_owned(),
+        description: "Pause execution and ask the user one or more questions, each with optional choice options. Returns the user's answers as a JSON array of strings in the same order as the questions. Use when you need the user's input or a decision before proceeding.".to_owned(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": { "type": "string" },
+                            "options": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": { "type": "string" },
+                                        "description": { "type": "string" }
+                                    },
+                                    "required": ["label"]
+                                }
+                            }
+                        },
+                        "required": ["question"]
+                    }
+                }
+            },
+            "required": ["questions"]
+        }),
+    }
 }
 
 fn agent_tool_def(ctx: &Ctx<'_>) -> ToolDefinition {
@@ -1527,6 +1571,52 @@ async fn run_delegation(
         })
         .await;
     result
+}
+
+async fn run_ask(
+    ctx: &Ctx<'_>,
+    run: &Run<'_>,
+    input_json: &str,
+    call_id: ToolCallId,
+    token: &CancellationToken,
+) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        questions: Vec<AskQuestion>,
+    }
+    let args: Input =
+        serde_json::from_str(input_json).map_err(|err| format!("invalid Ask input: {err}"))?;
+    if args.questions.is_empty() {
+        return Err("questions must not be empty".to_owned());
+    }
+    let (tx, rx) = oneshot::channel::<Vec<String>>();
+    ctx.asks.lock().await.insert(call_id, tx);
+    let _ = ctx
+        .events
+        .send(Event::AskStarted {
+            id: run.id,
+            call: call_id,
+            questions: args.questions,
+        })
+        .await;
+    let result = tokio::select! {
+        biased;
+        () = token.cancelled() => {
+            ctx.asks.lock().await.remove(&call_id);
+            let _ = ctx
+                .events
+                .send(Event::AskDismissed { id: run.id, call: call_id })
+                .await;
+            return Err("interrupted".to_owned());
+        }
+        res = rx => res,
+    };
+    match result {
+        Ok(answers) => {
+            serde_json::to_string(&answers).map_err(|err| format!("serialize error: {err}"))
+        }
+        Err(_) => Err("answer channel closed".to_owned()),
+    }
 }
 
 fn delegation_label(prompt: &str) -> String {
@@ -1837,6 +1927,11 @@ async fn handle_turn(
                 biased;
                 result = &mut core => break result,
                 maybe_op = ops.recv() => match maybe_op {
+                    Some(Op::Answer { call, answers, .. }) => {
+                        if let Some(tx) = ctx.asks.lock().await.remove(&call) {
+                            let _ = tx.send(answers);
+                        }
+                    }
                     Some(Op::Interrupt { id: target_id }) if target_id == id => token.cancel(),
                     Some(Op::Shutdown) | None => {
                         shutdown = true;

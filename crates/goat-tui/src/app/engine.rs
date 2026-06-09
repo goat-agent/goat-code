@@ -1,7 +1,7 @@
 use goat_protocol::{Event as EngineEvent, Op, TaskId, TranscriptEntry};
 
 use super::{App, Overlay, ResumeIntent};
-use crate::picker::ThreadPicker;
+use crate::picker::{AskPicker, ThreadPicker};
 
 impl App {
     #[allow(clippy::too_many_lines)]
@@ -141,6 +141,18 @@ impl App {
             EngineEvent::Notify { kind, message } => {
                 self.toasts.push(crate::toast::Toast::new(kind, message));
                 self.dirty = true;
+            }
+            EngineEvent::AskStarted {
+                call, questions, ..
+            } => {
+                self.overlay = Overlay::Ask(AskPicker::new(questions), call);
+                self.dirty = true;
+            }
+            EngineEvent::AskDismissed { .. } => {
+                if matches!(self.overlay, Overlay::Ask(..)) {
+                    self.overlay = Overlay::None;
+                    self.dirty = true;
+                }
             }
         }
         if self.follow {
