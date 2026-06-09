@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 pub use goat_auth::{TokenSet, now_secs};
-pub use goat_protocol::{AuthMethod, Effort};
+pub use goat_protocol::{AuthMethod, Effort, RateLimitSnapshot, RateWindow, Usage};
 
 use std::fmt;
 
@@ -108,7 +108,7 @@ pub struct Capabilities {
     pub auth: AuthMethod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StreamEvent {
     TextDelta {
         text: String,
@@ -131,6 +131,12 @@ pub enum StreamEvent {
     Failed {
         message: String,
     },
+    Usage {
+        usage: Usage,
+    },
+    RateLimits {
+        snapshot: RateLimitSnapshot,
+    },
 }
 
 pub trait Provider: Send + Sync + 'static {
@@ -150,6 +156,10 @@ pub trait Provider: Send + Sync + 'static {
     fn validate(&self) -> JoinHandle<Result<(), String>> {
         tokio::spawn(async { Ok(()) })
     }
+    fn context_window(&self, _model: &str) -> Option<u32> {
+        None
+    }
+
     fn login(&self, status: mpsc::Sender<String>) -> JoinHandle<Result<TokenSet, String>> {
         let _ = status;
         tokio::spawn(async { Err("login not supported".into()) })
