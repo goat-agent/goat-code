@@ -80,6 +80,9 @@ pub enum ConfigOutcome {
     SetMouseCapture {
         enabled: bool,
     },
+    SetComputerUse {
+        enabled: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -103,11 +106,17 @@ pub struct Config {
     stage: InputStage,
     dark_theme: bool,
     mouse_capture: bool,
+    computer_use: bool,
     error: Option<String>,
 }
 
 impl Config {
-    pub fn new(providers: Vec<AccountEntry>, dark_theme: bool, mouse_capture: bool) -> Self {
+    pub fn new(
+        providers: Vec<AccountEntry>,
+        dark_theme: bool,
+        mouse_capture: bool,
+        computer_use: bool,
+    ) -> Self {
         let mut config = Self {
             section: Section::Providers,
             providers,
@@ -115,6 +124,7 @@ impl Config {
             stage: InputStage::List,
             dark_theme,
             mouse_capture,
+            computer_use,
             error: None,
         };
         config.cursor = config.first_selectable();
@@ -191,7 +201,7 @@ impl Config {
                 .provider_rows()
                 .get(index)
                 .is_some_and(|row| row.kind != RowKind::ProviderHeader),
-            Section::Appearance => index <= 1,
+            Section::Appearance => index <= 2,
         }
     }
 
@@ -252,7 +262,7 @@ impl Config {
                 }
             }
             Section::Appearance => {
-                if self.cursor < 1 {
+                if self.cursor < 2 {
                     self.cursor += 1;
                 }
             }
@@ -357,6 +367,11 @@ impl Config {
                     let enabled = !self.mouse_capture;
                     self.mouse_capture = enabled;
                     ConfigOutcome::SetMouseCapture { enabled }
+                }
+                2 => {
+                    let enabled = !self.computer_use;
+                    self.computer_use = enabled;
+                    ConfigOutcome::SetComputerUse { enabled }
                 }
                 _ => ConfigOutcome::Pending,
             },
@@ -658,6 +673,14 @@ impl Config {
                 "on",
                 "off",
             ),
+            appearance_row(
+                theme,
+                self.cursor == 2,
+                "computer use",
+                self.computer_use,
+                "on",
+                "off",
+            ),
         ];
         frame.render_widget(Paragraph::new(lines), area);
     }
@@ -942,7 +965,7 @@ mod tests {
 
     #[test]
     fn oauth_choice_then_browser_flow() {
-        let mut config = Config::new(oauth_provider(), true, true);
+        let mut config = Config::new(oauth_provider(), true, true, false);
         config.enter();
         assert!(matches!(config.stage, super::InputStage::Choosing { .. }));
         config.move_down();
@@ -968,7 +991,7 @@ mod tests {
 
     #[test]
     fn oauth_choice_api_key_branch() {
-        let mut config = Config::new(oauth_provider(), true, true);
+        let mut config = Config::new(oauth_provider(), true, true, false);
         config.enter();
         config.enter();
         assert!(matches!(
@@ -982,7 +1005,7 @@ mod tests {
 
     #[test]
     fn tab_switches_section() {
-        let mut config = Config::new(make_providers(), true, true);
+        let mut config = Config::new(make_providers(), true, true, false);
         assert_eq!(config.section, super::Section::Providers);
         config.tab();
         assert_eq!(config.section, super::Section::Appearance);
@@ -992,7 +1015,7 @@ mod tests {
 
     #[test]
     fn move_down_skips_provider_headers() {
-        let config_rows = Config::new(make_providers(), true, true);
+        let config_rows = Config::new(make_providers(), true, true, false);
         assert_eq!(config_rows.cursor, 1);
         let mut config = config_rows;
         config.move_down();
@@ -1003,7 +1026,7 @@ mod tests {
 
     #[test]
     fn add_account_flow_api_key() {
-        let mut config = Config::new(make_providers(), true, true);
+        let mut config = Config::new(make_providers(), true, true, false);
         config.move_down();
         let out = config.enter();
         assert!(matches!(out, ConfigOutcome::Pending));
@@ -1033,7 +1056,7 @@ mod tests {
 
     #[test]
     fn remove_account_row() {
-        let mut config = Config::new(make_providers(), true, true);
+        let mut config = Config::new(make_providers(), true, true, false);
         let out = config.remove_selected();
         assert!(matches!(
             out,
@@ -1044,7 +1067,7 @@ mod tests {
 
     #[test]
     fn theme_toggle_in_appearance() {
-        let mut config = Config::new(make_providers(), true, true);
+        let mut config = Config::new(make_providers(), true, true, false);
         config.tab();
         let out = config.enter();
         assert!(matches!(out, ConfigOutcome::SetTheme { dark: false }));
@@ -1053,7 +1076,7 @@ mod tests {
 
     #[test]
     fn backspace_clears_input() {
-        let mut config = Config::new(make_providers(), true, true);
+        let mut config = Config::new(make_providers(), true, true, false);
         config.move_down();
         config.enter();
         for _ in 0.."default".len() {
@@ -1071,7 +1094,7 @@ mod tests {
 
     #[test]
     fn tab_switches_field_in_adding() {
-        let mut config = Config::new(make_providers(), true, true);
+        let mut config = Config::new(make_providers(), true, true, false);
         config.move_down();
         config.enter();
         if let super::InputStage::Adding { field, .. } = &config.stage {

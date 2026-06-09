@@ -15,6 +15,12 @@ impl ToolRegistry {
         Self { tools }
     }
 
+    #[must_use]
+    pub fn with(mut self, tool: Box<dyn Tool>) -> Self {
+        self.tools.insert(tool.name(), tool);
+        self
+    }
+
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(AsRef::as_ref)
     }

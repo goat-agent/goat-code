@@ -95,13 +95,27 @@ fn append_message_items(
                 content,
                 ..
             } => {
+                let image = content.iter().find_map(|b| match b {
+                    ContentBlock::Image { media_type, data } => Some((media_type, data)),
+                    _ => None,
+                });
+                let output = if let Some((media_type, data)) = image {
+                    json!([{
+                        "type": "input_image",
+                        "image_url": format!("data:{media_type};base64,{data}"),
+                    }])
+                } else {
+                    json!(ContentBlock::tool_result_text(content))
+                };
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": tool_use_id,
-                    "output": content,
+                    "output": output,
                 }));
             }
-            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
+            ContentBlock::Image { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. } => {}
         }
     }
     if !text.is_empty() {
@@ -594,11 +608,7 @@ mod tests {
         };
         let result = Message {
             role: MessageRole::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "call_1".to_owned(),
-                content: "file body".to_owned(),
-                is_error: false,
-            }],
+            content: vec![ContentBlock::text_result("call_1", "file body", false)],
         };
         let body = build_body("gpt-5.5", &[assistant, result], &[], None, false, None);
         assert_eq!(body["input"][0]["type"], "function_call");

@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use goat_tool::{
-    Tool, ToolContext, ToolError, ToolFuture,
+    Tool, ToolContext, ToolError, ToolFuture, ToolOutput,
     path::{relative_display, resolve_in_cwd},
 };
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
@@ -68,8 +68,8 @@ impl Tool for GrepTool {
             .await;
 
             match join {
-                Ok(result) => result,
-                Err(err) => Ok(format!("search task failed: {err}")),
+                Ok(result) => result.map(ToolOutput::text),
+                Err(err) => Ok(ToolOutput::text(format!("search task failed: {err}"))),
             }
         })
     }
@@ -155,7 +155,7 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "alpha\nbeta needle\ngamma\n").unwrap();
         let ctx = ctx(dir.path());
         let out = GrepTool.run(r#"{"pattern":"needle"}"#, &ctx).await.unwrap();
-        assert!(out.contains("a.txt:2: beta needle"));
+        assert!(out.as_text().unwrap().contains("a.txt:2: beta needle"));
     }
 
     #[tokio::test]
@@ -164,7 +164,7 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "nothing here\n").unwrap();
         let ctx = ctx(dir.path());
         let out = GrepTool.run(r#"{"pattern":"absent"}"#, &ctx).await.unwrap();
-        assert_eq!(out, "no matches");
+        assert_eq!(out.as_text().unwrap(), "no matches");
     }
 
     #[tokio::test]
@@ -176,7 +176,8 @@ mod tests {
         std::fs::write(dir.path().join("kept.txt"), "needle\n").unwrap();
         let ctx = ctx(dir.path());
         let out = GrepTool.run(r#"{"pattern":"needle"}"#, &ctx).await.unwrap();
-        assert!(out.contains("kept.txt"));
-        assert!(!out.contains("skipped"));
+        let text = out.as_text().unwrap();
+        assert!(text.contains("kept.txt"));
+        assert!(!text.contains("skipped"));
     }
 }

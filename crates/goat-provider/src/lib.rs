@@ -1,10 +1,28 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 pub use goat_auth::{TokenSet, now_secs};
 pub use goat_protocol::{AuthMethod, Effort, RateLimitSnapshot, RateWindow, Usage};
 
 use std::fmt;
+
+fn deser_tool_result_content<'de, D>(d: D) -> Result<Vec<ContentBlock>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let v = serde_json::Value::deserialize(d)?;
+    match v {
+        serde_json::Value::String(s) => Ok(vec![ContentBlock::Text { text: s }]),
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .map(|item| serde_json::from_value(item).map_err(D::Error::custom))
+            .collect(),
+        other => Err(D::Error::custom(format!(
+            "expected string or array for tool_result content, got {other}"
+        ))),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProviderId(pub String);
@@ -56,9 +74,39 @@ pub enum ContentBlock {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        #[serde(deserialize_with = "deser_tool_result_content")]
+        content: Vec<ContentBlock>,
         is_error: bool,
     },
+    Image {
+        media_type: String,
+        data: String,
+    },
+}
+
+impl ContentBlock {
+    pub fn text_result(
+        tool_use_id: impl Into<String>,
+        text: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        Self::ToolResult {
+            tool_use_id: tool_use_id.into(),
+            content: vec![Self::Text { text: text.into() }],
+            is_error,
+        }
+    }
+
+    pub fn tool_result_text(content: &[ContentBlock]) -> String {
+        content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

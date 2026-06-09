@@ -149,10 +149,11 @@ fn content_block_to_part(
                 .get(tool_use_id.as_str())
                 .cloned()
                 .unwrap_or_else(|| tool_use_id.clone());
+            let output_text = ContentBlock::tool_result_text(content);
             let response_body = if *is_error {
-                json!({ "error": content })
+                json!({ "error": output_text })
             } else {
-                json!({ "output": content })
+                json!({ "output": output_text })
             };
             let fr = if is_synthetic_id(tool_use_id) {
                 json!({ "functionResponse": { "name": func_name, "response": response_body } })
@@ -167,6 +168,10 @@ fn content_block_to_part(
             };
             (Some("user".to_owned()), fr)
         }
+        ContentBlock::Image { media_type, data } => (
+            None,
+            json!({ "inlineData": { "mimeType": media_type, "data": data } }),
+        ),
     }
 }
 
@@ -489,11 +494,11 @@ mod tests {
             },
             Message {
                 role: MessageRole::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "real-id-1".to_owned(),
-                    content: "file content".to_owned(),
-                    is_error: false,
-                }],
+                content: vec![ContentBlock::text_result(
+                    "real-id-1".to_owned(),
+                    "file content",
+                    false,
+                )],
             },
         ]);
         let inner = build_request(&req);
@@ -517,11 +522,7 @@ mod tests {
             },
             Message {
                 role: MessageRole::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "goat-1".to_owned(),
-                    content: "ok".to_owned(),
-                    is_error: false,
-                }],
+                content: vec![ContentBlock::text_result("goat-1".to_owned(), "ok", false)],
             },
         ]);
         let inner = build_request(&req);

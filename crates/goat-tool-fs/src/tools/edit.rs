@@ -1,4 +1,4 @@
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, path::resolve_in_cwd};
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, path::resolve_in_cwd};
 use serde::Deserialize;
 
 use crate::tools::relative_display;
@@ -69,7 +69,9 @@ impl Tool for EditTool {
                     source,
                 })?;
             let rel = relative_display(&ctx.cwd, &resolved);
-            Ok(format!("replaced {count} occurrence(s) in {rel}"))
+            Ok(ToolOutput::text(format!(
+                "replaced {count} occurrence(s) in {rel}"
+            )))
         })
     }
 }
@@ -95,7 +97,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.contains("replaced 1 occurrence(s) in a.txt"));
+        assert!(
+            out.as_text()
+                .unwrap()
+                .contains("replaced 1 occurrence(s) in a.txt")
+        );
         let result = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
         assert_eq!(result, "hello there");
     }
@@ -140,7 +146,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.contains("replaced 3 occurrence(s)"));
+        assert!(out.as_text().unwrap().contains("replaced 3 occurrence(s)"));
         let result = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
         assert_eq!(result, "b b b");
     }

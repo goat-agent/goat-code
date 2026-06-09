@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use goat_tool::{
-    Tool, ToolContext, ToolError, ToolFuture,
+    Tool, ToolContext, ToolError, ToolFuture, ToolOutput,
     path::{relative_display, resolve_in_cwd},
 };
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
@@ -49,8 +49,8 @@ impl Tool for GlobTool {
             let join = tokio::task::spawn_blocking(move || walk(&cwd, &root, &args.pattern)).await;
 
             match join {
-                Ok(result) => result,
-                Err(err) => Ok(format!("glob task failed: {err}")),
+                Ok(result) => result.map(ToolOutput::text),
+                Err(err) => Ok(ToolOutput::text(format!("glob task failed: {err}"))),
             }
         })
     }
@@ -108,9 +108,10 @@ mod tests {
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
         let ctx = ctx(dir.path());
         let out = GlobTool.run(r#"{"pattern":"*.rs"}"#, &ctx).await.unwrap();
-        assert!(out.contains("a.rs"));
-        assert!(out.contains("b.rs"));
-        assert!(!out.contains("c.txt"));
+        let text = out.as_text().unwrap();
+        assert!(text.contains("a.rs"));
+        assert!(text.contains("b.rs"));
+        assert!(!text.contains("c.txt"));
     }
 
     #[tokio::test]
@@ -119,7 +120,7 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         let ctx = ctx(dir.path());
         let out = GlobTool.run(r#"{"pattern":"*.rs"}"#, &ctx).await.unwrap();
-        assert_eq!(out, "no files");
+        assert_eq!(out.as_text().unwrap(), "no files");
     }
 
     #[tokio::test]
@@ -131,7 +132,8 @@ mod tests {
         std::fs::write(dir.path().join("kept.rs"), "").unwrap();
         let ctx = ctx(dir.path());
         let out = GlobTool.run(r#"{"pattern":"*.rs"}"#, &ctx).await.unwrap();
-        assert!(out.contains("kept.rs"));
-        assert!(!out.contains("built.rs"));
+        let text = out.as_text().unwrap();
+        assert!(text.contains("kept.rs"));
+        assert!(!text.contains("built.rs"));
     }
 }

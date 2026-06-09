@@ -90,6 +90,7 @@ pub struct App {
     pub(crate) pending_resume: Option<ResumeIntent>,
     pub(crate) account_entries: Vec<AccountEntry>,
     pub(crate) mouse_capture: bool,
+    pub(crate) computer_use: bool,
     pub(crate) commands: CommandRegistry,
     pub(crate) task_start: Option<std::time::Instant>,
     pub(crate) toasts: Vec<crate::toast::Toast>,
@@ -128,6 +129,8 @@ impl App {
             pending_resume: None,
             account_entries: Vec::new(),
             mouse_capture: true,
+            computer_use: goat_config::Config::load().computer_use_enabled,
+
             commands: CommandRegistry::builtin(),
             task_start: None,
             toasts: Vec::new(),
@@ -293,6 +296,7 @@ impl App {
                     self.account_entries.clone(),
                     self.theme.is_dark(),
                     self.mouse_capture,
+                    self.computer_use,
                 ));
                 Vec::new()
             }
@@ -360,6 +364,13 @@ impl App {
             }
             ConfigOutcome::SetMouseCapture { enabled } => {
                 self.mouse_capture = enabled;
+                Vec::new()
+            }
+            ConfigOutcome::SetComputerUse { enabled } => {
+                self.computer_use = enabled;
+                let mut cfg = goat_config::Config::load();
+                cfg.computer_use_enabled = enabled;
+                let _ = cfg.save();
                 Vec::new()
             }
         }

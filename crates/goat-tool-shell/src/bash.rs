@@ -1,6 +1,6 @@
 use std::{fmt::Write as _, process::Stdio, time::Duration};
 
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture};
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput};
 use serde::Deserialize;
 use tokio::{io::AsyncReadExt, process::Command, time};
 
@@ -98,7 +98,12 @@ impl Tool for BashTool {
             };
 
             let code = status.ok().and_then(|s| s.code());
-            Ok(build_output(&stdout, &stderr, code, ctx.max_output_bytes))
+            Ok(ToolOutput::text(build_output(
+                &stdout,
+                &stderr,
+                code,
+                ctx.max_output_bytes,
+            )))
         })
     }
 }
@@ -139,7 +144,7 @@ mod tests {
             .run(r#"{"command":"echo hello"}"#, &ctx())
             .await
             .unwrap();
-        assert!(out.contains("hello"));
+        assert!(out.as_text().unwrap().contains("hello"));
     }
 
     #[tokio::test]
@@ -148,7 +153,7 @@ mod tests {
             .run(r#"{"command":"exit 1"}"#, &ctx())
             .await
             .unwrap();
-        assert!(out.contains("exit code: 1"));
+        assert!(out.as_text().unwrap().contains("exit code: 1"));
     }
 
     #[tokio::test]
