@@ -275,6 +275,7 @@ pub struct EffortPicker {
     label: String,
     options: Vec<Effort>,
     cursor: usize,
+    scroll: usize,
 }
 
 impl EffortPicker {
@@ -286,16 +287,32 @@ impl EffortPicker {
             label,
             options,
             cursor,
+            scroll: 0,
         }
     }
 
+    fn cap(&self) -> usize {
+        self.options.len().min(8)
+    }
+
     pub fn move_up(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor -= 1;
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        }
     }
 
     pub fn move_down(&mut self) {
-        if self.cursor + 1 < self.options.len() {
-            self.cursor += 1;
+        if self.cursor + 1 >= self.options.len() {
+            return;
+        }
+        self.cursor += 1;
+        let cap = self.cap();
+        if self.cursor >= self.scroll + cap {
+            self.scroll = self.cursor + 1 - cap;
         }
     }
 
@@ -308,9 +325,7 @@ impl EffortPicker {
     }
 
     pub fn desired_height(&self) -> u16 {
-        clamp_u16(self.options.len().max(1))
-            .min(10)
-            .saturating_add(5)
+        clamp_u16(self.cap().max(1)).saturating_add(6)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
@@ -336,12 +351,15 @@ impl EffortPicker {
         );
 
         let width = usize::from(list_area.width);
-        let rows = usize::from(list_area.height);
+        let rows = usize::from(list_area.height).max(1);
+        let scroll = self.scroll.min(self.cursor);
+
         let lines: Vec<Line> = self
             .options
             .iter()
-            .take(rows)
             .enumerate()
+            .skip(scroll)
+            .take(rows)
             .map(|(index, effort)| {
                 let selected = index == self.cursor;
                 let name_style = if selected { theme.key() } else { theme.base() };
@@ -379,20 +397,49 @@ pub enum ThreadOutcome {
 pub struct ThreadPicker {
     threads: Vec<ThreadSummary>,
     cursor: usize,
+    scroll: usize,
 }
 
 impl ThreadPicker {
     pub fn new(threads: Vec<ThreadSummary>) -> Self {
-        Self { threads, cursor: 0 }
+        Self {
+            threads,
+            cursor: 0,
+            scroll: 0,
+        }
+    }
+
+    fn cap(&self) -> usize {
+        self.threads.len().min(8)
+    }
+
+    fn visible_items(&self) -> usize {
+        let cap = self.cap();
+        if self.threads.len() > 8 {
+            cap.saturating_sub(2)
+        } else {
+            cap
+        }
     }
 
     pub fn move_up(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor -= 1;
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        }
     }
 
     pub fn move_down(&mut self) {
-        if self.cursor + 1 < self.threads.len() {
-            self.cursor += 1;
+        if self.cursor + 1 >= self.threads.len() {
+            return;
+        }
+        self.cursor += 1;
+        let vis = self.visible_items();
+        if self.cursor >= self.scroll + vis {
+            self.scroll = self.cursor + 1 - vis;
         }
     }
 
@@ -405,9 +452,7 @@ impl ThreadPicker {
     }
 
     pub fn desired_height(&self) -> u16 {
-        clamp_u16(self.threads.len().max(1))
-            .min(12)
-            .saturating_add(5)
+        clamp_u16(self.cap().max(1)).saturating_add(6)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
@@ -433,7 +478,8 @@ impl ThreadPicker {
         );
 
         let width = usize::from(list_area.width);
-        let rows = usize::from(list_area.height);
+        let rows = usize::from(list_area.height).max(1);
+        let scroll = self.scroll.min(self.cursor);
         let mut lines: Vec<Line> = Vec::new();
         if self.threads.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -441,29 +487,38 @@ impl ThreadPicker {
                 theme.muted(),
             )));
         } else {
-            let start = if self.cursor >= rows {
-                self.cursor + 1 - rows
+            let above_rows = usize::from(scroll > 0);
+            let budget = rows.saturating_sub(above_rows);
+            let remaining = self.threads.len().saturating_sub(scroll);
+            let has_below = remaining > budget;
+            let take = if has_below {
+                budget.saturating_sub(1)
             } else {
-                0
+                budget.min(remaining)
             };
-            let shown = rows.min(self.threads.len().saturating_sub(start));
-            let (hint_above, hint_below) = overflow_hint(start, shown, self.threads.len());
-            if let Some(ref above) = hint_above {
-                lines.push(Line::from(Span::styled(format!(" {above}"), theme.muted())));
+
+            if scroll > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!(" {} {} more", symbols::ui::MORE_ABOVE, scroll),
+                    theme.muted(),
+                )));
             }
-            for (idx, thread) in self.threads.iter().enumerate().skip(start).take(rows) {
+            for (idx, thread) in self.threads.iter().enumerate().skip(scroll).take(take) {
                 let selected = idx == self.cursor;
                 let title_style = if selected { theme.key() } else { theme.base() };
-                let num_label = format!("{}. ", idx + 1);
                 let left = vec![
-                    Span::styled(num_label, theme.muted()),
+                    Span::styled(format!("{}. ", idx + 1), theme.muted()),
                     Span::styled(thread.title.clone(), title_style),
                 ];
                 let right = Some(Span::styled(thread.model.clone(), theme.muted()));
                 lines.push(selection_row(theme, selected, width, left, right));
             }
-            if let Some(ref below) = hint_below {
-                lines.push(Line::from(Span::styled(format!(" {below}"), theme.muted())));
+            if has_below {
+                let hidden = self.threads.len() - scroll - take;
+                lines.push(Line::from(Span::styled(
+                    format!(" {} {} more", symbols::ui::MORE_BELOW, hidden),
+                    theme.muted(),
+                )));
             }
         }
         frame.render_widget(Paragraph::new(lines), list_area);
