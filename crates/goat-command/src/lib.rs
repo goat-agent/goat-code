@@ -14,7 +14,6 @@ pub enum CommandEffect {
     OpenConfig,
     ShowHelp,
     ClearConversation,
-    RenameConversation(String),
     Submit(String),
     Notice(String),
     Error(String),
