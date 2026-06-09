@@ -1,5 +1,5 @@
 [package]
-name = "goat-providers"
+name = "goat-provider-gemini"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,12 +10,15 @@ publish = false
 [dependencies]
 goat-provider = { workspace = true }
 goat-auth = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+eventsource-stream = { workspace = true }
 tokio = { workspace = true }
-goat-provider-openai = { workspace = true }
-goat-provider-openai-codex = { workspace = true }
-goat-provider-anthropic = { workspace = true }
-goat-provider-gemini = { workspace = true }
-goat-provider-local = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+open = { workspace = true }
 
 [lints]
 workspace = true

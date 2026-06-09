@@ -18,7 +18,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-27 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
+28 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
 
 **Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
@@ -30,6 +30,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 **Providers**
 - `goat-provider` — the `Provider` trait; leaf. Key types: `Provider`, `Request`, `StreamEvent`, `Message`, `Capabilities`, `Model`, `ProviderId`, `ContentBlock`.
 - `goat-provider-anthropic` — Anthropic Claude API provider.
+- `goat-provider-gemini` — Google Gemini provider; API key (Generative Language API) or OAuth (Code Assist free tier, gemini-cli compatible); four modules: `lib` (provider orchestration), `wire` (Gemini request/response format), `oauth` (Google OAuth PKCE flow), `codeassist` (Code Assist envelope + project onboarding).
 - `goat-provider-openai-compat` — OpenAI-family HTTP clients; three modules: `chat` (Chat Completions API, used by local providers), `responses` (Responses API, used by OpenAI and Codex), `common` (shared client/validate/discovery helpers).
 - `goat-provider-openai` — OpenAI provider (wraps `responses` module).
 - `goat-provider-openai-codex` — OpenAI Codex provider (wraps `responses` module).
