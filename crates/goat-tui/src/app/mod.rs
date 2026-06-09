@@ -295,10 +295,6 @@ impl App {
                 Vec::new()
             }
             CommandEffect::Noop => Vec::new(),
-            CommandEffect::Quit => {
-                self.should_quit = true;
-                Vec::new()
-            }
         }
     }
 

@@ -20,11 +20,7 @@ impl CommandRegistry {
     }
 
     pub fn resolve(&self, name: &str, args: &str) -> CommandEffect {
-        if let Some(command) = self
-            .builtins
-            .iter()
-            .find(|command| command.name() == name || command.aliases().contains(&name))
-        {
+        if let Some(command) = self.builtins.iter().find(|command| command.name() == name) {
             return command.run(args);
         }
         if self.skills.iter().any(|skill| skill.name == name) {
@@ -37,12 +33,10 @@ impl CommandRegistry {
         let builtins = self.builtins.iter().map(|command| CommandSpec {
             name: command.name(),
             description: command.description(),
-            aliases: command.aliases(),
         });
         let skills = self.skills.iter().map(|skill| CommandSpec {
             name: &skill.name,
             description: &skill.description,
-            aliases: &[],
         });
         builtins.chain(skills).collect()
     }
@@ -58,7 +52,6 @@ fn builtin_commands() -> Vec<Box<dyn Command>> {
     let mut commands = goat_command_settings::all();
     commands.extend(goat_command_conversation::all());
     commands.extend(goat_command_help::all());
-    commands.extend(goat_command_app::all());
     commands
 }
 
@@ -95,13 +88,6 @@ mod tests {
             registry.resolve("help", ""),
             CommandEffect::ShowHelp
         ));
-        assert!(matches!(registry.resolve("exit", ""), CommandEffect::Quit));
-    }
-
-    #[test]
-    fn exit_alias_quit_resolves_to_quit() {
-        let registry = CommandRegistry::builtin();
-        assert!(matches!(registry.resolve("quit", ""), CommandEffect::Quit));
     }
 
     #[test]
@@ -158,18 +144,6 @@ mod tests {
         }]);
         let names: Vec<&str> = registry.specs().into_iter().map(|spec| spec.name).collect();
         assert!(names.contains(&"help"));
-        assert!(names.contains(&"exit"));
         assert!(names.contains(&"demo"));
-    }
-
-    #[test]
-    fn exit_spec_carries_quit_alias() {
-        let registry = CommandRegistry::builtin();
-        let exit_spec = registry
-            .specs()
-            .into_iter()
-            .find(|s| s.name == "exit")
-            .expect("exit spec missing");
-        assert!(exit_spec.aliases.contains(&"quit"));
     }
 }
