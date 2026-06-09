@@ -1,5 +1,5 @@
 [package]
-name = "goat-commands"
+name = "goat-command-app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,6 @@ publish = false
 
 [dependencies]
 goat-command = { workspace = true }
-goat-command-settings = { workspace = true }
-goat-command-conversation = { workspace = true }
-goat-command-help = { workspace = true }
-goat-command-app = { workspace = true }
-goat-protocol = { workspace = true }
 
 [lints]
 workspace = true
