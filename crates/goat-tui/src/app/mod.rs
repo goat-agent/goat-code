@@ -8,7 +8,7 @@ use futures::StreamExt;
 use goat_commands::{CommandEffect, CommandRegistry};
 use goat_protocol::{
     AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, Op, RateLimitSnapshot,
-    TaskId, Usage,
+    TaskId, ToolCallId, Usage,
 };
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -18,7 +18,7 @@ use crate::{
     composer::Composer,
     config::{Config, ConfigOutcome},
     highlight::SyntectHighlighter,
-    picker::{EffortPicker, Picker, ThreadPicker},
+    picker::{AskPicker, EffortPicker, Picker, ThreadPicker},
     symbols,
     theme::Theme,
     transcript::Transcript,
@@ -53,6 +53,7 @@ pub(crate) enum Overlay {
     Config(Config),
     Commands(CommandMenu),
     Agents(usize),
+    Ask(AskPicker, ToolCallId),
     Usage,
 }
 
@@ -169,6 +170,9 @@ impl App {
                         for ch in text.chars() {
                             config.on_char(ch);
                         }
+                    }
+                    Overlay::Ask(picker, _) => {
+                        picker.insert_str(&text);
                     }
                     _ => {
                         self.composer.insert_str(&text);

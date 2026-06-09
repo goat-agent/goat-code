@@ -24,6 +24,26 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let composer_h = app.composer_height(area.width);
 
+    if let Overlay::Ask(picker, _) = app.overlay() {
+        let panel_h = picker
+            .desired_height()
+            .min(area.height.saturating_sub(2))
+            .max(3);
+        let [header, transcript_area, _panel] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(panel_h),
+        ])
+        .areas(area);
+        render_header(frame, header, app, theme);
+        render_transcript(frame, transcript_area, app, theme);
+        if let Overlay::Ask(picker, _) = app.overlay() {
+            picker.render(frame, area, theme);
+        }
+        render_toasts(frame, area, app, theme);
+        return;
+    }
+
     if let Overlay::Commands(menu) = app.overlay() {
         let panel_h = menu
             .desired_height()

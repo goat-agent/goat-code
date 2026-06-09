@@ -219,6 +219,11 @@ pub enum Op {
     RenameThread {
         title: String,
     },
+    Answer {
+        id: TaskId,
+        call: ToolCallId,
+        answers: Vec<String>,
+    },
     Shutdown,
 }
 
@@ -306,6 +311,15 @@ pub enum Event {
         kind: NotifyKind,
         message: String,
     },
+    AskStarted {
+        id: TaskId,
+        call: ToolCallId,
+        questions: Vec<AskQuestion>,
+    },
+    AskDismissed {
+        id: TaskId,
+        call: ToolCallId,
+    },
     Usage {
         id: TaskId,
         usage: Usage,
@@ -317,4 +331,18 @@ pub enum Event {
         snapshot: RateLimitSnapshot,
         cached_at: i64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskQuestion {
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<AskOption>,
 }
