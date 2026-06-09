@@ -83,6 +83,14 @@ pub fn agents_dir() -> Option<PathBuf> {
 
 pub const PROJECT_AGENTS_SUBDIR: &str = ".goat/agents";
 
+pub const PROJECT_INSTRUCTIONS_FILE: &str = "AGENTS.md";
+pub const PROJECT_INSTRUCTIONS_OVERRIDE_FILE: &str = "AGENTS.override.md";
+pub const INSTRUCTIONS_MAX_BYTES: usize = 32 * 1024;
+
+pub fn global_instructions_file() -> Option<PathBuf> {
+    app_home().map(|home| home.join(PROJECT_INSTRUCTIONS_FILE))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Config, ThemeChoice};
