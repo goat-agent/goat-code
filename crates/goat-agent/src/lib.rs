@@ -388,6 +388,9 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 )
                 .await;
             }
+            Op::RenameThread { title } => {
+                handle_rename(&store, thread_id, title, &events).await;
+            }
             Op::Shutdown => break,
         }
     }
@@ -1620,6 +1623,42 @@ async fn handle_list_threads(store: &Store, events: &mpsc::Sender<Event>) {
     let _ = events
         .send(Event::ThreadsListed { threads: summaries })
         .await;
+}
+
+async fn handle_rename(
+    store: &Store,
+    thread_id: Option<i64>,
+    title: String,
+    events: &mpsc::Sender<Event>,
+) {
+    let Some(tid) = thread_id else {
+        let _ = events
+            .send(Event::Notify {
+                kind: NotifyKind::Error,
+                message: "no active conversation to rename".to_owned(),
+            })
+            .await;
+        return;
+    };
+    match store.update_thread_title(tid, title.clone()).await {
+        Ok(()) => {
+            let _ = events
+                .send(Event::Notify {
+                    kind: NotifyKind::Success,
+                    message: format!("renamed to \"{title}\""),
+                })
+                .await;
+        }
+        Err(err) => {
+            tracing::warn!(%err, "failed to rename thread");
+            let _ = events
+                .send(Event::Notify {
+                    kind: NotifyKind::Error,
+                    message: "failed to rename conversation".to_owned(),
+                })
+                .await;
+        }
+    }
 }
 
 fn tool_summary(content: &str) -> String {
