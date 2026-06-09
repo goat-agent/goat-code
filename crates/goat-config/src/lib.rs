@@ -14,6 +14,7 @@ pub enum ThemeChoice {
 #[serde(default)]
 pub struct Config {
     pub theme: ThemeChoice,
+    pub computer_use_enabled: bool,
 }
 
 impl Config {
@@ -115,6 +116,7 @@ mod tests {
     fn round_trips_through_json() {
         let cfg = Config {
             theme: ThemeChoice::Light,
+            computer_use_enabled: false,
         };
         let raw = serde_json::to_string(&cfg).unwrap();
         assert_eq!(Config::from_json(&raw).unwrap(), cfg);
