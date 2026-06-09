@@ -1,4 +1,4 @@
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture};
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput};
 use serde::Deserialize;
 
 pub struct SkillTool;
@@ -32,7 +32,7 @@ impl Tool for SkillTool {
             let args: Input = serde_json::from_str(input)?;
             let skills = goat_skill::load(&ctx.cwd);
             match skills.get(&args.name) {
-                Some(skill) => Ok(skill.body.clone()),
+                Some(skill) => Ok(ToolOutput::text(skill.body.clone())),
                 None => Err(ToolError::UnknownSkill { name: args.name }),
             }
         })
@@ -64,7 +64,7 @@ mod tests {
         );
         let ctx = ToolContext::new(dir.path()).unwrap();
         let out = SkillTool.run(r#"{"name":"demo"}"#, &ctx).await.unwrap();
-        assert_eq!(out, "The full instructions.");
+        assert_eq!(out.as_text().unwrap(), "The full instructions.");
     }
 
     #[tokio::test]

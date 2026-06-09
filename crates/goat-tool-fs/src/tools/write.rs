@@ -1,4 +1,4 @@
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, path::resolve_in_cwd};
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, path::resolve_in_cwd};
 use serde::Deserialize;
 
 use crate::tools::relative_display;
@@ -51,7 +51,7 @@ impl Tool for WriteTool {
                     source,
                 })?;
             let rel = relative_display(&ctx.cwd, &resolved);
-            Ok(format!("wrote {bytes} bytes to {rel}"))
+            Ok(ToolOutput::text(format!("wrote {bytes} bytes to {rel}")))
         })
     }
 }
@@ -73,7 +73,7 @@ mod tests {
             .run(r#"{"path":"out.txt","content":"hello"}"#, &ctx)
             .await
             .unwrap();
-        assert!(out.contains("wrote 5 bytes to out.txt"));
+        assert!(out.as_text().unwrap().contains("wrote 5 bytes to out.txt"));
         let written = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
         assert_eq!(written, "hello");
     }

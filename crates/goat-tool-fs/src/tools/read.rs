@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, path::resolve_in_cwd};
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, path::resolve_in_cwd};
 use serde::Deserialize;
 
 pub struct ReadTool;
@@ -72,7 +72,7 @@ impl Tool for ReadTool {
                 out.truncate(boundary);
                 out.push_str("\n[output truncated]\n");
             }
-            Ok(out)
+            Ok(ToolOutput::text(out))
         })
     }
 }
@@ -94,9 +94,10 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
         let ctx = ctx(dir.path());
         let out = ReadTool.run(r#"{"path":"a.txt"}"#, &ctx).await.unwrap();
-        assert!(out.contains("     1\tone"));
-        assert!(out.contains("     2\ttwo"));
-        assert!(out.contains("     3\tthree"));
+        let text = out.as_text().unwrap();
+        assert!(text.contains("     1\tone"));
+        assert!(text.contains("     2\ttwo"));
+        assert!(text.contains("     3\tthree"));
     }
 
     #[tokio::test]
@@ -108,10 +109,11 @@ mod tests {
             .run(r#"{"path":"a.txt","offset":2,"limit":2}"#, &ctx)
             .await
             .unwrap();
-        assert!(out.contains("     2\t2"));
-        assert!(out.contains("     3\t3"));
-        assert!(!out.contains("     1\t1"));
-        assert!(!out.contains("     4\t4"));
+        let text = out.as_text().unwrap();
+        assert!(text.contains("     2\t2"));
+        assert!(text.contains("     3\t3"));
+        assert!(!text.contains("     1\t1"));
+        assert!(!text.contains("     4\t4"));
     }
 
     #[tokio::test]
@@ -121,7 +123,7 @@ mod tests {
         std::fs::write(dir.path().join("big.txt"), &big).unwrap();
         let ctx = ctx(dir.path());
         let out = ReadTool.run(r#"{"path":"big.txt"}"#, &ctx).await.unwrap();
-        assert!(out.contains("[output truncated]"));
+        assert!(out.as_text().unwrap().contains("[output truncated]"));
     }
 
     #[tokio::test]
@@ -145,9 +147,10 @@ mod tests {
             .run(r#"{"path":"big.txt","offset":100,"limit":5}"#, &ctx)
             .await
             .unwrap();
-        assert!(out.contains("   100\tline 100"));
-        assert!(out.contains("   104\tline 104"));
-        assert!(!out.contains("     1\tline 1"));
-        assert!(!out.contains("   105\tline 105"));
+        let text = out.as_text().unwrap();
+        assert!(text.contains("   100\tline 100"));
+        assert!(text.contains("   104\tline 104"));
+        assert!(!text.contains("     1\tline 1"));
+        assert!(!text.contains("   105\tline 105"));
     }
 }
