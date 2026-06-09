@@ -95,9 +95,17 @@ impl GoatAgent {
         credentials: CredentialStore,
         target: Option<ModelTarget>,
     ) -> Self {
+        let config = goat_config::Config::load();
+        let mut tools = ToolRegistry::builtin();
+        if config.computer_use_enabled {
+            match goat_tool_computer::desktop_tool() {
+                Ok(ct) => tools = tools.with(Box::new(ct)),
+                Err(err) => tracing::warn!("computer use unavailable: {err}"),
+            }
+        }
         Self {
             registry,
-            tools: ToolRegistry::builtin(),
+            tools,
             store,
             credentials,
             target,
