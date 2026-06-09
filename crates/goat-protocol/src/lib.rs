@@ -196,6 +196,9 @@ pub enum Op {
     Resume {
         thread_id: i64,
     },
+    RenameThread {
+        title: String,
+    },
     Shutdown,
 }
 
