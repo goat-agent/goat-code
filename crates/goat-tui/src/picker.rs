@@ -275,6 +275,7 @@ pub struct EffortPicker {
     label: String,
     options: Vec<Effort>,
     cursor: usize,
+    scroll: usize,
 }
 
 impl EffortPicker {
@@ -286,16 +287,32 @@ impl EffortPicker {
             label,
             options,
             cursor,
+            scroll: 0,
         }
     }
 
+    fn cap(&self) -> usize {
+        self.options.len().min(8)
+    }
+
     pub fn move_up(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor -= 1;
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        }
     }
 
     pub fn move_down(&mut self) {
-        if self.cursor + 1 < self.options.len() {
-            self.cursor += 1;
+        if self.cursor + 1 >= self.options.len() {
+            return;
+        }
+        self.cursor += 1;
+        let cap = self.cap();
+        if self.cursor >= self.scroll + cap {
+            self.scroll = self.cursor + 1 - cap;
         }
     }
 
@@ -308,9 +325,7 @@ impl EffortPicker {
     }
 
     pub fn desired_height(&self) -> u16 {
-        clamp_u16(self.options.len().max(1))
-            .min(10)
-            .saturating_add(5)
+        clamp_u16(self.cap().max(1)).saturating_add(6)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
@@ -336,12 +351,15 @@ impl EffortPicker {
         );
 
         let width = usize::from(list_area.width);
-        let rows = usize::from(list_area.height);
+        let rows = usize::from(list_area.height).max(1);
+        let scroll = self.scroll.min(self.cursor);
+
         let lines: Vec<Line> = self
             .options
             .iter()
-            .take(rows)
             .enumerate()
+            .skip(scroll)
+            .take(rows)
             .map(|(index, effort)| {
                 let selected = index == self.cursor;
                 let name_style = if selected { theme.key() } else { theme.base() };
