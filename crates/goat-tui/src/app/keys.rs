@@ -1,11 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use goat_protocol::Op;
 
-use super::{App, Overlay, QUIT_ARM_TICKS};
+use super::{App, CLEAR_ARM_TICKS, Overlay, QUIT_ARM_TICKS};
 use crate::{
     config::ConfigOutcome,
     keymap,
-    picker::{EffortOutcome, PickerOutcome, ThreadOutcome},
+    picker::{AskOutcome, EffortOutcome, PickerOutcome, ThreadOutcome},
 };
 
 impl App {
@@ -17,11 +17,13 @@ impl App {
             Overlay::Thread(_) => return self.on_thread_picker_key(key),
             Overlay::Config(_) => return self.on_config_key(key),
             Overlay::Agents(_) => return self.on_agent_selector_key(key),
+            Overlay::Ask(_, _) => return self.on_ask_picker_key(key),
             Overlay::Commands(_) => {
                 if let Some(result) = self.on_command_menu_key(key) {
                     return result;
                 }
             }
+            Overlay::Usage => return self.on_usage_key(key),
             Overlay::None => {}
         }
         if let Some(ch) = keymap::ctrl_key(&key) {
@@ -29,6 +31,7 @@ impl App {
                 return self.on_ctrl_c();
             }
             self.quit_arm = None;
+            self.clear_arm = None;
             match ch {
                 'a' => {
                     self.dirty |= self.composer.move_home();
@@ -46,6 +49,9 @@ impl App {
             return Vec::new();
         }
         self.quit_arm = None;
+        if !matches!(key.code, KeyCode::Esc) {
+            self.clear_arm = None;
+        }
         self.on_normal_key(key)
     }
 
@@ -94,6 +100,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn on_normal_key(&mut self, key: KeyEvent) -> Vec<Op> {
         match key.code {
             KeyCode::PageUp => {
@@ -179,9 +186,21 @@ impl App {
                 Vec::new()
             }
             KeyCode::Esc => {
-                self.overlay = Overlay::None;
-                self.composer.clear();
                 self.dirty = true;
+                if let Some(id) = self.active {
+                    self.clear_arm = None;
+                    return vec![Op::Interrupt { id }];
+                }
+                self.overlay = Overlay::None;
+                if self.composer.is_empty() {
+                    self.clear_arm = None;
+                    return Vec::new();
+                }
+                if self.clear_arm.take().is_some() {
+                    self.composer.clear();
+                } else {
+                    self.clear_arm = Some(CLEAR_ARM_TICKS);
+                }
                 Vec::new()
             }
             KeyCode::Char(c) => {
@@ -370,14 +389,110 @@ impl App {
         Vec::new()
     }
 
-    pub(crate) fn on_ctrl_c(&mut self) -> Vec<Op> {
+    pub(crate) fn on_ask_picker_key(&mut self, key: KeyEvent) -> Vec<Op> {
         self.dirty = true;
+        if let Some(ch) = keymap::ctrl_key(&key) {
+            if ch == 'c' {
+                self.overlay = Overlay::None;
+                if let Some(id) = self.active {
+                    return vec![Op::Interrupt { id }];
+                }
+            }
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Esc => return self.ask_esc(),
+            KeyCode::Up => {
+                if let Overlay::Ask(ref mut picker, _) = self.overlay {
+                    picker.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Overlay::Ask(ref mut picker, _) = self.overlay {
+                    picker.move_down();
+                }
+            }
+            KeyCode::Left => {
+                if let Overlay::Ask(ref mut picker, _) = self.overlay {
+                    picker.go_back();
+                }
+            }
+            KeyCode::Right => {
+                let outcome = if let Overlay::Ask(ref mut picker, call) = self.overlay {
+                    match picker.skip() {
+                        AskOutcome::Submit(answers) => Some((call, answers)),
+                        AskOutcome::Pending | AskOutcome::NoOp => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some((call, answers)) = outcome {
+                    self.overlay = Overlay::None;
+                    if let Some(id) = self.active {
+                        return vec![Op::Answer { id, call, answers }];
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Overlay::Ask(ref mut picker, _) = self.overlay {
+                    picker.backspace();
+                }
+            }
+            KeyCode::Enter => return self.ask_enter(),
+            KeyCode::Char(c) => {
+                if let Overlay::Ask(ref mut picker, _) = self.overlay {
+                    picker.on_char(c);
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn ask_esc(&mut self) -> Vec<Op> {
+        let handled = if let Overlay::Ask(ref mut picker, _) = self.overlay {
+            picker.is_confirming() || picker.is_typing()
+        } else {
+            false
+        };
+        if handled {
+            if let Overlay::Ask(ref mut picker, _) = self.overlay {
+                picker.go_back();
+            }
+            return Vec::new();
+        }
+        self.overlay = Overlay::None;
         if let Some(id) = self.active {
             return vec![Op::Interrupt { id }];
         }
+        Vec::new()
+    }
+
+    fn ask_enter(&mut self) -> Vec<Op> {
+        let submit = if let Overlay::Ask(ref mut picker, call) = self.overlay {
+            match picker.choose() {
+                AskOutcome::Submit(answers) => Some((call, answers)),
+                AskOutcome::Pending | AskOutcome::NoOp => None,
+            }
+        } else {
+            None
+        };
+        if let Some((call, answers)) = submit {
+            self.overlay = Overlay::None;
+            if let Some(id) = self.active {
+                return vec![Op::Answer { id, call, answers }];
+            }
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn on_ctrl_c(&mut self) -> Vec<Op> {
+        self.dirty = true;
+        self.clear_arm = None;
         if self.quit_arm.is_some() {
             self.should_quit = true;
         } else {
+            self.composer.clear();
             self.quit_arm = Some(QUIT_ARM_TICKS);
         }
         Vec::new()
@@ -404,6 +519,17 @@ impl App {
             }
             KeyCode::PageDown => {
                 self.scroll = self.scroll.saturating_add(10);
+                self.dirty = true;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn on_usage_key(&mut self, key: KeyEvent) -> Vec<Op> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.overlay = Overlay::None;
                 self.dirty = true;
             }
             _ => {}

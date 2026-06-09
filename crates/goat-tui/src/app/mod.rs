@@ -1,13 +1,14 @@
 mod engine;
 mod keys;
 
-use std::{path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
 use futures::StreamExt;
 use goat_commands::{CommandEffect, CommandRegistry};
 use goat_protocol::{
-    AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId,
+    AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, Op, RateLimitSnapshot,
+    TaskId, ToolCallId, Usage,
 };
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -17,11 +18,13 @@ use crate::{
     composer::Composer,
     config::{Config, ConfigOutcome},
     highlight::SyntectHighlighter,
-    picker::{EffortPicker, Picker, ThreadPicker},
+    picker::{AskPicker, EffortPicker, Picker, ThreadPicker},
     symbols,
     theme::Theme,
     transcript::Transcript,
-    tui, view,
+    tui,
+    usage::UsageView,
+    view,
 };
 
 pub(crate) enum ResumeIntent {
@@ -50,10 +53,13 @@ pub(crate) enum Overlay {
     Config(Config),
     Commands(CommandMenu),
     Agents(usize),
+    Ask(AskPicker, ToolCallId),
+    Usage,
 }
 
 const TICK: Duration = Duration::from_millis(120);
 const QUIT_ARM_TICKS: u16 = 25;
+const CLEAR_ARM_TICKS: u16 = 25;
 
 pub(crate) enum AppEvent {
     Input(CtEvent),
@@ -73,6 +79,7 @@ pub struct App {
     pub(crate) next_task: u64,
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
+    pub(crate) clear_arm: Option<u16>,
     pub(crate) should_quit: bool,
     pub(crate) dirty: bool,
     pub(crate) scroll: u16,
@@ -89,6 +96,10 @@ pub struct App {
     pub(crate) toasts: Vec<crate::toast::Toast>,
     pub(crate) agent_runs: Vec<AgentRunView>,
     pub(crate) main_view: MainView,
+    pub(crate) usage_last: HashMap<(String, String), Usage>,
+    pub(crate) usage_total: HashMap<(String, String), (u64, u64)>,
+    pub(crate) rate_limits: HashMap<(String, String), (RateLimitSnapshot, i64)>,
+    pub(crate) context_window: Option<u32>,
 }
 
 impl App {
@@ -107,6 +118,7 @@ impl App {
             next_task: 1,
             spinner: 0,
             quit_arm: None,
+            clear_arm: None,
             should_quit: false,
             dirty: true,
             scroll: 0,
@@ -124,6 +136,10 @@ impl App {
             toasts: Vec::new(),
             agent_runs: Vec::new(),
             main_view: MainView::Live,
+            usage_last: HashMap::new(),
+            usage_total: HashMap::new(),
+            rate_limits: HashMap::new(),
+            context_window: None,
         }
     }
 
@@ -138,6 +154,13 @@ impl App {
                     *ticks = ticks.saturating_sub(1);
                     if *ticks == 0 {
                         self.quit_arm = None;
+                        self.dirty = true;
+                    }
+                }
+                if let Some(ticks) = &mut self.clear_arm {
+                    *ticks = ticks.saturating_sub(1);
+                    if *ticks == 0 {
+                        self.clear_arm = None;
                         self.dirty = true;
                     }
                 }
@@ -160,6 +183,9 @@ impl App {
                         for ch in text.chars() {
                             config.on_char(ch);
                         }
+                    }
+                    Overlay::Ask(picker, _) => {
+                        picker.insert_str(&text);
                     }
                     _ => {
                         self.composer.insert_str(&text);
@@ -297,6 +323,11 @@ impl App {
             }
             CommandEffect::Error(message) => {
                 self.transcript.push_error(message);
+                Vec::new()
+            }
+            CommandEffect::OpenUsage => {
+                self.overlay = Overlay::Usage;
+                self.dirty = true;
                 Vec::new()
             }
             CommandEffect::Noop => Vec::new(),
@@ -475,12 +506,16 @@ impl App {
     pub(crate) fn quit_armed(&self) -> bool {
         self.quit_arm.is_some()
     }
+    pub(crate) fn clear_armed(&self) -> bool {
+        self.clear_arm.is_some()
+    }
     pub(crate) fn spinner_frame(&self) -> &'static str {
         symbols::SPINNER[self.spinner % symbols::SPINNER.len()]
     }
 
     pub(crate) fn content_height(&self, width: u16) -> u16 {
-        self.active_transcript().content_height(width, self.theme)
+        self.active_transcript()
+            .content_height(width, self.theme, self.is_busy())
     }
     pub(crate) fn scroll(&self) -> u16 {
         self.scroll
@@ -569,6 +604,28 @@ impl App {
             .map(|(kind, n)| format!("{n} {kind}"))
             .collect();
         Some(format!("{running} agents · {}", parts.join(", ")))
+    }
+
+    pub(crate) fn build_usage_view(&self) -> UsageView {
+        UsageView::new(
+            self.account_entries.clone(),
+            self.usage_last.clone(),
+            self.usage_total.clone(),
+            self.rate_limits.clone(),
+            self.context_window,
+            self.model.clone(),
+        )
+    }
+
+    pub(crate) fn ctx_indicator(&self) -> Option<(f32, u64, u32)> {
+        let model = self.model.as_ref()?;
+        let window = self.context_window?;
+        let key = (model.provider.clone(), model.account.clone());
+        let usage = self.usage_last.get(&key)?;
+        let used = u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+        let pct = (used as f64 / f64::from(window) * 100.0).min(100.0) as f32;
+        Some((pct, used, window))
     }
 }
 
@@ -674,8 +731,21 @@ mod tests {
         app.composer.insert_str("hi");
         let started = app.submit();
         assert!(matches!(started.as_slice(), [Op::SubmitMessage { .. }]));
-        let ops = app.on_ctrl_c();
+        let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(ops.as_slice(), [Op::Interrupt { .. }]));
+    }
+
+    #[test]
+    fn ctrl_c_while_active_arms_quit_not_interrupt() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("hi");
+        app.submit();
+        let ops = app.on_ctrl_c();
+        assert!(
+            ops.is_empty(),
+            "Ctrl+C during active task must not interrupt"
+        );
+        assert!(app.quit_armed());
     }
 
     #[test]
@@ -687,6 +757,18 @@ mod tests {
         assert!(!app.should_quit);
         app.on_ctrl_c();
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn esc_idle_arms_then_clears() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("hello");
+        app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.clear_armed(), "first Esc must arm clear");
+        assert!(!app.composer.is_empty(), "composer must not be cleared yet");
+        app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.clear_armed(), "second Esc must disarm");
+        assert!(app.composer.is_empty(), "second Esc must clear composer");
     }
 
     #[test]

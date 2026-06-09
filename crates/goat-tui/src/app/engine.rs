@@ -1,7 +1,7 @@
 use goat_protocol::{Event as EngineEvent, Op, TaskId, TranscriptEntry};
 
 use super::{App, Overlay, ResumeIntent};
-use crate::picker::ThreadPicker;
+use crate::picker::{AskPicker, ThreadPicker};
 
 impl App {
     #[allow(clippy::too_many_lines)]
@@ -140,6 +140,45 @@ impl App {
             }
             EngineEvent::Notify { kind, message } => {
                 self.toasts.push(crate::toast::Toast::new(kind, message));
+                self.dirty = true;
+            }
+            EngineEvent::AskStarted {
+                call, questions, ..
+            } => {
+                self.overlay = Overlay::Ask(AskPicker::new(questions), call);
+                self.dirty = true;
+            }
+            EngineEvent::AskDismissed { .. } => {
+                if matches!(self.overlay, Overlay::Ask(..)) {
+                    self.overlay = Overlay::None;
+                    self.dirty = true;
+                }
+            }
+            EngineEvent::Usage {
+                id: _,
+                usage,
+                context_window,
+            } => {
+                if let Some(model) = &self.model {
+                    let key = (model.provider.clone(), model.account.clone());
+                    let total = self.usage_total.entry(key.clone()).or_default();
+                    total.0 += u64::from(usage.input_tokens);
+                    total.1 += u64::from(usage.output_tokens);
+                    self.usage_last.insert(key, usage);
+                }
+                if let Some(w) = context_window {
+                    self.context_window = Some(w);
+                }
+                self.dirty = true;
+            }
+            EngineEvent::RateLimits {
+                provider,
+                account,
+                snapshot,
+                cached_at,
+            } => {
+                self.rate_limits
+                    .insert((provider, account), (snapshot, cached_at));
                 self.dirty = true;
             }
         }

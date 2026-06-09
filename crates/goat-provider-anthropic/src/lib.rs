@@ -7,7 +7,7 @@ use goat_auth::{
 };
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, Request, StreamEvent,
+    ProviderId, RateLimitSnapshot, RateWindow, Request, StreamEvent, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -39,6 +39,8 @@ pub enum AnthropicAuthError {
     #[error("auth error: {0}")]
     Auth(#[from] goat_auth::AuthError),
 }
+
+const ANTHROPIC_CONTEXT_WINDOW: u32 = 200_000;
 
 const CATALOG: &[&str] = &[
     "claude-opus-4-8",
@@ -294,6 +296,87 @@ fn thinking_config(model: &str, effort: Option<Effort>) -> ThinkingConfig {
     }
 }
 
+fn parse_anthropic_unified_ratelimits(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<RateLimitSnapshot> {
+    let mut windows = Vec::new();
+
+    if let Some(window) = parse_unified_window(headers, "5h", "5h") {
+        windows.push(window);
+    }
+    if let Some(window) = parse_unified_window(headers, "7d", "weekly") {
+        windows.push(window);
+    }
+
+    if windows.is_empty() {
+        None
+    } else {
+        Some(RateLimitSnapshot { windows })
+    }
+}
+
+fn parse_unified_window(
+    headers: &reqwest::header::HeaderMap,
+    period: &str,
+    label: &str,
+) -> Option<RateWindow> {
+    let util_key = format!("anthropic-ratelimit-unified-{period}-utilization");
+    let reset_key = format!("anthropic-ratelimit-unified-{period}-reset");
+
+    let raw = headers.get(&util_key).and_then(|v| v.to_str().ok())?;
+    let fraction: f32 = raw.trim_end_matches('%').parse().ok()?;
+    #[allow(clippy::cast_possible_truncation)]
+    let used_percent = if raw.ends_with('%') {
+        fraction
+    } else {
+        fraction * 100.0
+    };
+
+    let resets_at = headers
+        .get(&reset_key)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i64>().ok().or_else(|| parse_rfc3339_unix(s)));
+
+    Some(RateWindow {
+        label: label.to_owned(),
+        used_percent,
+        resets_at,
+    })
+}
+
+fn parse_rfc3339_unix(s: &str) -> Option<i64> {
+    let s = if let Some(pos) = s.find('+') {
+        &s[..pos]
+    } else {
+        s.trim_end_matches('Z')
+    };
+    let (date, time) = s.split_once('T')?;
+    let mut dp = date.splitn(3, '-');
+    let year: i64 = dp.next()?.parse().ok()?;
+    let month: i64 = dp.next()?.parse().ok()?;
+    let day: i64 = dp.next()?.parse().ok()?;
+    let mut tp = time.splitn(3, ':');
+    let hour: i64 = tp.next()?.parse().ok()?;
+    let min: i64 = tp.next()?.parse().ok()?;
+    #[allow(clippy::cast_possible_truncation)]
+    let sec: i64 = tp.next()?.trim_end_matches('Z').parse::<f64>().ok()? as i64;
+    Some(gregorian_to_unix(year, month, day, hour, min, sec))
+}
+
+fn gregorian_to_unix(year: i64, month: i64, day: i64, h: i64, m: i64, s: i64) -> i64 {
+    let (y, mo) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * mo + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    days * 86_400 + h * 3_600 + m * 60 + s
+}
+
 fn anthropic_efforts(model: &str) -> Vec<Effort> {
     let id = model.to_ascii_lowercase();
     if id.contains("opus-4-8") || id.contains("opus-4-7") {
@@ -376,6 +459,39 @@ struct DeltaBody {
     partial_json: Option<String>,
     thinking: Option<String>,
     signature: Option<String>,
+}
+
+#[allow(clippy::struct_field_names)]
+#[derive(Default, Deserialize)]
+struct MessageStartUsage {
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
+}
+
+#[derive(Deserialize)]
+struct MessageStart {
+    message: MessageStartMessage,
+}
+
+#[derive(Deserialize)]
+struct MessageStartMessage {
+    #[serde(default)]
+    usage: MessageStartUsage,
+}
+
+#[derive(Default, Deserialize)]
+struct MessageDeltaUsage {
+    #[serde(default)]
+    output_tokens: u32,
+}
+
+#[derive(Deserialize)]
+struct MessageDelta {
+    usage: Option<MessageDeltaUsage>,
 }
 
 #[derive(Deserialize)]
@@ -472,12 +588,31 @@ fn split_request(req: &Request) -> (String, Vec<serde_json::Value>, Vec<serde_js
     (system, messages, tools)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<StreamEvent>) {
     let mut stream = response.bytes_stream().eventsource();
     let mut tool_calls: HashMap<u32, (String, String, String)> = HashMap::new();
+    let mut usage = Usage::default();
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => match event.event.as_str() {
+                "message_start" => {
+                    if let Ok(start) = serde_json::from_str::<MessageStart>(&event.data) {
+                        let u = &start.message.usage;
+                        usage.input_tokens = u.input_tokens
+                            + u.cache_creation_input_tokens
+                            + u.cache_read_input_tokens;
+                        usage.cache_read_tokens = u.cache_read_input_tokens;
+                        usage.cache_write_tokens = u.cache_creation_input_tokens;
+                    }
+                }
+                "message_delta" => {
+                    if let Ok(delta) = serde_json::from_str::<MessageDelta>(&event.data)
+                        && let Some(u) = delta.usage
+                    {
+                        usage.output_tokens = u.output_tokens;
+                    }
+                }
                 "content_block_start" => {
                     if let Ok(start) = serde_json::from_str::<ContentBlockStart>(&event.data) {
                         match start.content_block.kind.as_str() {
@@ -541,7 +676,10 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
                         return;
                     }
                 }
-                "message_stop" => break,
+                "message_stop" => {
+                    let _ = events.send(StreamEvent::Usage { usage }).await;
+                    break;
+                }
                 "error" => {
                     let _ = events
                         .send(StreamEvent::Failed {
@@ -637,6 +775,11 @@ impl Provider for AnthropicProvider {
                     .await;
                 return;
             }
+            if matches!(auth, Auth::OAuth(_))
+                && let Some(snapshot) = parse_anthropic_unified_ratelimits(resp.headers())
+            {
+                let _ = tx.send(StreamEvent::RateLimits { snapshot }).await;
+            }
             stream_messages(resp, &tx).await;
         })
     }
@@ -676,6 +819,10 @@ impl Provider for AnthropicProvider {
                 Err(format!("could not reach provider: {status}"))
             }
         })
+    }
+
+    fn context_window(&self, _model: &str) -> Option<u32> {
+        Some(ANTHROPIC_CONTEXT_WINDOW)
     }
 
     fn catalog(&self) -> &'static [&'static str] {

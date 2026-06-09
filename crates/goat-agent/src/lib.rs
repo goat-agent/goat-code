@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     path::Path,
     sync::{
@@ -14,9 +14,9 @@ use goat_auth::{
 };
 use goat_core::Engine;
 use goat_protocol::{
-    AccountChoice, AccountEntry, AccountInfo, AuthMethod, Effort, Event, LoginCredential,
-    LoginProvider, ModelEntry, ModelTarget, NotifyKind, Op, SkillInfo, TaskId, ThreadSummary,
-    ToolCall, ToolCallId, ToolOutcome, TranscriptEntry,
+    AccountChoice, AccountEntry, AccountInfo, AskQuestion, AuthMethod, Effort, Event,
+    LoginCredential, LoginProvider, ModelEntry, ModelTarget, NotifyKind, Op, SkillInfo, TaskId,
+    ThreadSummary, ToolCall, ToolCallId, ToolOutcome, TranscriptEntry,
 };
 use goat_provider::{
     ContentBlock, Message, MessageRole, Provider, Request, StreamEvent, ToolDefinition,
@@ -26,19 +26,21 @@ use goat_store::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
 use goat_tool::{ToolContext, ToolOutput};
 use goat_tools::ToolRegistry;
 use tokio::{
-    sync::{Semaphore, mpsc},
+    sync::{Mutex, Semaphore, mpsc, oneshot},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 
 mod agent;
 mod instructions;
+mod rate_limit_cache;
 
 pub use agent::{AgentRegistry, AgentSpec, ToolSelection};
 
 const MAX_TOOL_ROUNDS: usize = 20;
 const MAX_CONCURRENT_AGENTS: usize = 8;
 const AGENT_TOOL_NAME: &str = "Agent";
+const ASK_TOOL_NAME: &str = "Ask";
 const CHILD_ID_BASE: u64 = 1 << 32;
 const SYSTEM_PROMPT: &str = "You are Goat, an expert software engineering assistant. You help users understand, build, and improve software by reading code, running tools, and providing accurate, actionable guidance. When using tools, prefer targeted reads and searches over broad exploration. Always verify your understanding before making changes.";
 
@@ -130,6 +132,9 @@ struct Ctx<'a> {
     instructions: Option<&'a str>,
     semaphore: &'a Arc<Semaphore>,
     child_ids: &'a AtomicU64,
+    asks: &'a Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>>,
+    rl_cache: &'a std::sync::Mutex<rate_limit_cache::RateLimitCache>,
+    rl_path: Option<&'a std::path::Path>,
 }
 
 enum Flow {
@@ -173,6 +178,10 @@ impl<'a> Run<'a> {
             Report::Child => None,
         }
     }
+
+    fn is_top(&self) -> bool {
+        matches!(self.report, Report::Top(_))
+    }
 }
 
 struct LoopEnv<'a> {
@@ -195,6 +204,8 @@ struct RoundResult {
     thinking: Option<(String, String)>,
     redacted: Vec<String>,
     pending_calls: Vec<(String, String, String)>,
+    usage: Option<goat_provider::Usage>,
+    rate_limits: Option<goat_provider::RateLimitSnapshot>,
 }
 
 struct ToolExecResult {
@@ -330,11 +341,31 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     let project_instructions = instructions::load_project_instructions(&cwd);
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_AGENTS));
     let child_ids = AtomicU64::new(CHILD_ID_BASE);
+    let asks: Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>> = Mutex::new(HashMap::new());
     let _ = events
         .send(Event::SkillsChanged {
             skills: skills.clone(),
         })
         .await;
+
+    let rl_path = goat_config::rate_limits_path();
+    let rl_cache_data = rl_path
+        .as_deref()
+        .map(rate_limit_cache::RateLimitCache::load)
+        .unwrap_or_default();
+    for (provider, account, entry) in rl_cache_data.entries() {
+        let _ = events
+            .send(Event::RateLimits {
+                provider: provider.to_owned(),
+                account: account.to_owned(),
+                snapshot: goat_protocol::RateLimitSnapshot {
+                    windows: entry.windows.clone(),
+                },
+                cached_at: entry.cached_at,
+            })
+            .await;
+    }
+    let rl_cache = std::sync::Mutex::new(rl_cache_data);
 
     while let Some(op) = ops.recv().await {
         match op {
@@ -350,6 +381,9 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     instructions: project_instructions.as_deref(),
                     semaphore: &semaphore,
                     child_ids: &child_ids,
+                    asks: &asks,
+                    rl_cache: &rl_cache,
+                    rl_path: rl_path.as_deref(),
                 };
                 if let Flow::Shutdown = handle_turn(
                     &ctx,
@@ -365,7 +399,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     break;
                 }
             }
-            Op::Interrupt { .. } | Op::SetTheme { .. } => {}
+            Op::Interrupt { .. } | Op::SetTheme { .. } | Op::Answer { .. } => {}
             Op::Clear => {
                 history.clear();
                 thread_id = None;
@@ -671,11 +705,12 @@ fn model_entry(
     model: &str,
     accounts: &[String],
     efforts: Vec<Effort>,
+    context_window: Option<u32>,
 ) -> ModelEntry {
     ModelEntry {
         provider: provider_id.to_owned(),
         model: model.to_owned(),
-        context_window: None,
+        context_window,
         efforts,
         accounts: accounts
             .iter()
@@ -706,6 +741,7 @@ fn catalog_only(registry: &Registry, credentials: &CredentialStore) -> Vec<Model
                 id,
                 &accounts,
                 provider.efforts(id),
+                provider.context_window(id),
             ));
         }
     }
@@ -739,6 +775,7 @@ async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> V
                 id,
                 &accounts,
                 provider.efforts(id),
+                provider.context_window(id),
             ));
         }
 
@@ -747,7 +784,14 @@ async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> V
                 continue;
             }
             let efforts = provider.efforts(&info.id);
-            entries.push(model_entry(&provider_id, &info.id, &accounts, efforts));
+            let ctx_win = provider.context_window(&info.id);
+            entries.push(model_entry(
+                &provider_id,
+                &info.id,
+                &accounts,
+                efforts,
+                ctx_win,
+            ));
         }
     }
     entries
@@ -767,6 +811,8 @@ async fn run_round(
     let mut signature = String::new();
     let mut redacted: Vec<String> = Vec::new();
     let mut pending_calls: Vec<(String, String, String)> = Vec::new();
+    let mut usage: Option<goat_provider::Usage> = None;
+    let mut rate_limits: Option<goat_provider::RateLimitSnapshot> = None;
     let end = loop {
         tokio::select! {
             biased;
@@ -798,6 +844,12 @@ async fn run_round(
                 Some(StreamEvent::ToolCall { id: vendor_id, name, input }) => {
                     pending_calls.push((vendor_id, name, input));
                 }
+                Some(StreamEvent::Usage { usage: u }) => {
+                    usage = Some(u);
+                }
+                Some(StreamEvent::RateLimits { snapshot }) => {
+                    rate_limits = Some(snapshot);
+                }
                 Some(StreamEvent::Completed) | None => break RoundEnd::Completed,
                 Some(StreamEvent::Failed { message }) => break RoundEnd::Failed(message),
             }
@@ -810,6 +862,8 @@ async fn run_round(
         thinking,
         redacted,
         pending_calls,
+        usage,
+        rate_limits,
     }
 }
 
@@ -930,7 +984,13 @@ async fn execute_tool(
     token: &CancellationToken,
 ) -> ToolExecResult {
     let step: Option<Result<ToolOutput, String>> =
-        if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
+        if prep.name == ASK_TOOL_NAME && env.allow_delegate {
+            Some(
+                run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token)
+                    .await
+                    .map(ToolOutput::text),
+            )
+        } else if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
             match ctx.semaphore.acquire().await {
                 Ok(_permit) if !token.is_cancelled() => Some(
                     run_delegation(ctx, env, prep.input_json, run.id, token)
@@ -1238,7 +1298,7 @@ async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &TurnEnd, ids: &TurnI
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn process_round_output(
     ctx: &Ctx<'_>,
     run: &Run<'_>,
@@ -1250,6 +1310,48 @@ async fn process_round_output(
     tool_ctx: &ToolContext,
     token: &CancellationToken,
 ) -> RoundOutcome {
+    if let Some(usage) = round.usage
+        && run.is_top()
+    {
+        let context_window = env.provider.context_window(&env.target.model);
+        let _ = ctx
+            .events
+            .send(Event::Usage {
+                id: run.id,
+                usage,
+                context_window,
+            })
+            .await;
+    }
+    if let Some(snapshot) = round.rate_limits
+        && run.is_top()
+    {
+        let now = now_ms() / 1000;
+        {
+            let mut cache = ctx
+                .rl_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cache.upsert(
+                &env.target.provider,
+                &env.target.account,
+                snapshot.windows.clone(),
+                now,
+            );
+            if let Some(path) = ctx.rl_path {
+                cache.save(path);
+            }
+        }
+        let _ = ctx
+            .events
+            .send(Event::RateLimits {
+                provider: env.target.provider.clone(),
+                account: env.target.account.clone(),
+                snapshot,
+                cached_at: now,
+            })
+            .await;
+    }
     let raw = round.raw;
     let pending_calls = round.pending_calls;
     let shown_text = (!raw.is_empty()).then(|| raw.clone());
@@ -1363,10 +1465,48 @@ fn build_tool_defs(
             input_schema: spec.parameters,
         })
         .collect();
-    if allow_delegate && !ctx.agents.is_empty() {
-        defs.push(agent_tool_def(ctx));
+    if allow_delegate {
+        if !ctx.agents.is_empty() {
+            defs.push(agent_tool_def(ctx));
+        }
+        defs.push(ask_tool_def());
     }
     defs
+}
+
+fn ask_tool_def() -> ToolDefinition {
+    ToolDefinition {
+        name: ASK_TOOL_NAME.to_owned(),
+        description: "Pause execution and ask the user one or more questions, each with optional choice options. Returns the user's answers as a JSON array of strings in the same order as the questions. Use when you need the user's input or a decision before proceeding.".to_owned(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": { "type": "string" },
+                            "options": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": { "type": "string" },
+                                        "description": { "type": "string" }
+                                    },
+                                    "required": ["label"]
+                                }
+                            }
+                        },
+                        "required": ["question"]
+                    }
+                }
+            },
+            "required": ["questions"]
+        }),
+    }
 }
 
 fn agent_tool_def(ctx: &Ctx<'_>) -> ToolDefinition {
@@ -1544,6 +1684,52 @@ async fn run_delegation(
         })
         .await;
     result
+}
+
+async fn run_ask(
+    ctx: &Ctx<'_>,
+    run: &Run<'_>,
+    input_json: &str,
+    call_id: ToolCallId,
+    token: &CancellationToken,
+) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        questions: Vec<AskQuestion>,
+    }
+    let args: Input =
+        serde_json::from_str(input_json).map_err(|err| format!("invalid Ask input: {err}"))?;
+    if args.questions.is_empty() {
+        return Err("questions must not be empty".to_owned());
+    }
+    let (tx, rx) = oneshot::channel::<Vec<String>>();
+    ctx.asks.lock().await.insert(call_id, tx);
+    let _ = ctx
+        .events
+        .send(Event::AskStarted {
+            id: run.id,
+            call: call_id,
+            questions: args.questions,
+        })
+        .await;
+    let result = tokio::select! {
+        biased;
+        () = token.cancelled() => {
+            ctx.asks.lock().await.remove(&call_id);
+            let _ = ctx
+                .events
+                .send(Event::AskDismissed { id: run.id, call: call_id })
+                .await;
+            return Err("interrupted".to_owned());
+        }
+        res = rx => res,
+    };
+    match result {
+        Ok(answers) => {
+            serde_json::to_string(&answers).map_err(|err| format!("serialize error: {err}"))
+        }
+        Err(_) => Err("answer channel closed".to_owned()),
+    }
 }
 
 fn delegation_label(prompt: &str) -> String {
@@ -1857,6 +2043,11 @@ async fn handle_turn(
                 biased;
                 result = &mut core => break result,
                 maybe_op = ops.recv() => match maybe_op {
+                    Some(Op::Answer { call, answers, .. }) => {
+                        if let Some(tx) = ctx.asks.lock().await.remove(&call) {
+                            let _ = tx.send(answers);
+                        }
+                    }
                     Some(Op::Interrupt { id: target_id }) if target_id == id => token.cancel(),
                     Some(Op::Shutdown) | None => {
                         shutdown = true;
@@ -2084,7 +2275,9 @@ mod tests {
                 | Event::LoginStatus { .. }
                 | Event::AccountsChanged { .. }
                 | Event::SkillsChanged { .. }
-                | Event::TextDone { .. } => {}
+                | Event::TextDone { .. }
+                | Event::Usage { .. }
+                | Event::RateLimits { .. } => {}
                 Event::TaskStarted { .. } => started = true,
                 Event::TextDelta { chunk, .. } => deltas.push_str(&chunk),
                 Event::TaskDone { interrupted, .. } => {

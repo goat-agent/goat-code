@@ -23,10 +23,13 @@ pub mod ui {
     pub const MORE_BELOW: &str = "↓";
     pub const STREAM_CURSOR: &str = "▌";
     pub const MASK: &str = "•";
+    pub const BAR_FULL: &str = "█";
+    pub const BAR_EMPTY: &str = "░";
 }
 
 pub mod key {
     pub const CTRL: &str = "⌃";
+    pub const ESC: &str = "⎋";
     pub const SHIFT: &str = "⇧";
     pub const ENTER: &str = "↵";
     pub const TAB: &str = "⇥";

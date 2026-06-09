@@ -2,6 +2,26 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RateWindow {
+    pub label: String,
+    pub used_percent: f32,
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RateLimitSnapshot {
+    pub windows: Vec<RateWindow>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TaskId(pub u64);
 
@@ -199,6 +219,11 @@ pub enum Op {
     RenameThread {
         title: String,
     },
+    Answer {
+        id: TaskId,
+        call: ToolCallId,
+        answers: Vec<String>,
+    },
     Shutdown,
 }
 
@@ -210,7 +235,7 @@ pub enum NotifyKind {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     TaskStarted {
         id: TaskId,
@@ -286,4 +311,38 @@ pub enum Event {
         kind: NotifyKind,
         message: String,
     },
+    AskStarted {
+        id: TaskId,
+        call: ToolCallId,
+        questions: Vec<AskQuestion>,
+    },
+    AskDismissed {
+        id: TaskId,
+        call: ToolCallId,
+    },
+    Usage {
+        id: TaskId,
+        usage: Usage,
+        context_window: Option<u32>,
+    },
+    RateLimits {
+        provider: String,
+        account: String,
+        snapshot: RateLimitSnapshot,
+        cached_at: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskQuestion {
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<AskOption>,
 }

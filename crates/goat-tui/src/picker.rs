@@ -3,8 +3,10 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, BorderType, Paragraph},
 };
+use unicode_normalization::UnicodeNormalization;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     overlay::{centered_rect, clamp_u16, overflow_hint, overlay_frame, selection_row},
@@ -592,6 +594,375 @@ fn render_account(frame: &mut Frame, inner: Rect, theme: Theme, account: &Accoun
         )),
         hint_area,
     );
+}
+
+pub enum AskOutcome {
+    NoOp,
+    Pending,
+    Submit(Vec<String>),
+}
+
+pub struct AskPicker {
+    pub questions: Vec<goat_protocol::AskQuestion>,
+    pub cursor: usize,
+    current_q: usize,
+    answers: Vec<Option<String>>,
+    typing: bool,
+    input: String,
+    confirming: bool,
+}
+
+impl AskPicker {
+    pub fn new(questions: Vec<goat_protocol::AskQuestion>) -> Self {
+        let count = questions.len();
+        Self {
+            questions,
+            cursor: 0,
+            current_q: 0,
+            answers: vec![None; count],
+            typing: false,
+            input: String::new(),
+            confirming: false,
+        }
+    }
+
+    pub fn is_confirming(&self) -> bool {
+        self.confirming
+    }
+
+    pub fn is_typing(&self) -> bool {
+        self.typing
+    }
+
+    pub fn insert_str(&mut self, text: &str) {
+        let on_input_row = self.cursor == self.questions[self.current_q].options.len();
+        if self.typing || on_input_row {
+            self.typing = true;
+            for ch in text.nfc() {
+                self.input.push(ch);
+            }
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        if self.confirming {
+            return;
+        }
+        if self.typing {
+            self.typing = false;
+        }
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        if self.confirming {
+            return;
+        }
+        if self.typing {
+            self.typing = false;
+        }
+        let max = self.questions[self.current_q].options.len();
+        if self.cursor < max {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn on_char(&mut self, ch: char) {
+        if self.confirming {
+            return;
+        }
+        let on_input_row = self.cursor == self.questions[self.current_q].options.len();
+        if self.typing || on_input_row {
+            self.typing = true;
+            self.input.push(ch);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if self.typing {
+            self.input.pop();
+        }
+    }
+
+    pub fn choose(&mut self) -> AskOutcome {
+        if self.confirming {
+            return self.finish();
+        }
+        let type_own_idx = self.questions[self.current_q].options.len();
+        if self.cursor == type_own_idx {
+            if !self.input.is_empty() {
+                let answer = std::mem::take(&mut self.input);
+                self.typing = false;
+                return self.record_answer(answer);
+            }
+            self.typing = true;
+            return AskOutcome::Pending;
+        }
+        if let Some(opt) = self.questions[self.current_q].options.get(self.cursor) {
+            let answer = opt.label.clone();
+            self.cursor = 0;
+            return self.record_answer(answer);
+        }
+        AskOutcome::NoOp
+    }
+
+    pub fn skip(&mut self) -> AskOutcome {
+        if self.confirming {
+            return AskOutcome::NoOp;
+        }
+        self.typing = false;
+        self.input.clear();
+        self.advance()
+    }
+
+    pub fn go_back(&mut self) {
+        if self.confirming {
+            self.confirming = false;
+            let last = self.questions.len().saturating_sub(1);
+            self.current_q = last;
+            self.restore_cursor(last);
+            return;
+        }
+        if self.typing {
+            self.typing = false;
+            return;
+        }
+        if self.current_q > 0 {
+            self.current_q -= 1;
+            self.restore_cursor(self.current_q);
+        }
+    }
+
+    fn restore_cursor(&mut self, q_idx: usize) {
+        self.typing = false;
+        self.input.clear();
+        self.cursor = 0;
+        if let Some(Some(saved)) = self.answers.get(q_idx).cloned() {
+            let pos = self.questions[q_idx]
+                .options
+                .iter()
+                .position(|o| o.label == saved);
+            if let Some(pos) = pos {
+                self.cursor = pos;
+            } else {
+                self.input = saved;
+                self.cursor = self.questions[q_idx].options.len();
+            }
+        }
+    }
+
+    fn record_answer(&mut self, answer: String) -> AskOutcome {
+        self.answers[self.current_q] = Some(answer);
+        self.advance()
+    }
+
+    fn advance(&mut self) -> AskOutcome {
+        if self.current_q + 1 < self.questions.len() {
+            self.current_q += 1;
+            self.cursor = 0;
+            self.typing = false;
+            self.input.clear();
+            AskOutcome::Pending
+        } else if self.questions.len() > 1 {
+            self.confirming = true;
+            AskOutcome::Pending
+        } else {
+            self.finish()
+        }
+    }
+
+    fn finish(&self) -> AskOutcome {
+        let answers = self
+            .answers
+            .iter()
+            .map(|a| a.clone().unwrap_or_default())
+            .collect();
+        AskOutcome::Submit(answers)
+    }
+
+    pub fn desired_height(&self) -> u16 {
+        if self.confirming {
+            let rows = clamp_u16(self.questions.len() * 2);
+            rows.saturating_add(6)
+        } else {
+            let q = &self.questions[self.current_q];
+            let rows = clamp_u16(q.options.len() + 1).min(12);
+            rows.saturating_add(6)
+        }
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
+        let panel_h = self.desired_height();
+        let [_, outer] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(panel_h)]).areas(area);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border())
+            .style(theme.base());
+        let inner = block.inner(outer);
+        frame.render_widget(block, outer);
+        if self.confirming {
+            self.render_confirm(frame, inner, theme);
+        } else {
+            let [title_area, _, list_area, _, hint_area] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
+            self.render_title(frame, title_area, theme);
+            self.render_list(frame, list_area, theme);
+            self.render_hint(frame, hint_area, theme);
+        }
+    }
+
+    fn render_title(&self, frame: &mut Frame, area: Rect, theme: Theme) {
+        let q = &self.questions[self.current_q];
+        let total = self.questions.len();
+        let dots = if total > 1 {
+            let dot_str: Vec<&str> = (0..total)
+                .map(|i| {
+                    if i == self.current_q {
+                        symbols::ui::DOT_FULL
+                    } else {
+                        symbols::ui::DOT_EMPTY
+                    }
+                })
+                .collect();
+            format!("  {}", dot_str.join(" "))
+        } else {
+            String::new()
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!(" {}", q.question), theme.base()),
+                Span::styled(dots, theme.muted()),
+            ])),
+            area,
+        );
+    }
+
+    fn render_list(&self, frame: &mut Frame, area: Rect, theme: Theme) {
+        let q = &self.questions[self.current_q];
+        let width = usize::from(area.width);
+        let type_own_idx = q.options.len();
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, opt) in q.options.iter().enumerate() {
+            let selected = i == self.cursor;
+            let label_style = theme.base();
+            let right = opt
+                .description
+                .as_deref()
+                .map(|d| Span::styled(d.to_owned(), theme.muted()));
+            lines.push(selection_row(
+                theme,
+                selected,
+                width,
+                vec![Span::styled(opt.label.clone(), label_style)],
+                right,
+            ));
+        }
+        let input_selected = self.cursor == type_own_idx;
+        let input_content = if self.typing || !self.input.is_empty() {
+            Span::styled(format!(" {}", self.input), theme.base())
+        } else {
+            Span::styled(" type your answer", theme.muted())
+        };
+        lines.push(selection_row(
+            theme,
+            input_selected,
+            width,
+            vec![input_content],
+            None,
+        ));
+        frame.render_widget(Paragraph::new(lines), area);
+        if self.typing && input_selected {
+            let row_y = area.y + clamp_u16(type_own_idx);
+            let col = 4 + UnicodeWidthStr::width(self.input.as_str());
+            let x = area.x + clamp_u16(col);
+            frame.set_cursor_position((x.min(area.right().saturating_sub(1)), row_y));
+        }
+    }
+
+    fn render_confirm(&self, frame: &mut Frame, area: Rect, theme: Theme) {
+        let [title_area, _, list_area, _, hint_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(" Confirm", theme.muted()))),
+            title_area,
+        );
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, q) in self.questions.iter().enumerate() {
+            let answer = self.answers[i].as_deref().filter(|s| !s.is_empty());
+            let (answer_text, answer_style) = match answer {
+                Some(a) => (a.to_owned(), theme.base()),
+                None => ("—".to_owned(), theme.muted()),
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {}", q.question),
+                theme.muted(),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("    {answer_text}"),
+                answer_style,
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines), list_area);
+        frame.render_widget(
+            Paragraph::new(hint_line(
+                &[
+                    (symbols::key::ENTER, " submit"),
+                    ("←", " edit"),
+                    ("esc", " cancel"),
+                ],
+                symbols::ui::SEPARATOR,
+                theme,
+            )),
+            hint_area,
+        );
+    }
+
+    fn render_hint(&self, frame: &mut Frame, area: Rect, theme: Theme) {
+        let total = self.questions.len();
+        let hint = if self.typing {
+            hint_line(
+                &[(symbols::key::ENTER, " confirm"), ("esc", " back")],
+                symbols::ui::SEPARATOR,
+                theme,
+            )
+        } else if total > 1 {
+            hint_line(
+                &[
+                    (symbols::key::ARROWS_UPDOWN, " navigate"),
+                    (symbols::key::ENTER, " next"),
+                    ("→", " skip"),
+                    ("←", " back"),
+                    ("esc", " cancel"),
+                ],
+                symbols::ui::SEPARATOR,
+                theme,
+            )
+        } else {
+            hint_line(
+                &[
+                    (symbols::key::ARROWS_UPDOWN, " navigate"),
+                    (symbols::key::ENTER, " select"),
+                    ("esc", " cancel"),
+                ],
+                symbols::ui::SEPARATOR,
+                theme,
+            )
+        };
+        frame.render_widget(Paragraph::new(hint), area);
+    }
 }
 
 #[cfg(test)]
