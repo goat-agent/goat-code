@@ -32,7 +32,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 mod agent;
-mod instructions;
 
 pub use agent::{AgentRegistry, AgentSpec, ToolSelection};
 
@@ -42,32 +41,18 @@ const AGENT_TOOL_NAME: &str = "Agent";
 const CHILD_ID_BASE: u64 = 1 << 32;
 const SYSTEM_PROMPT: &str = "You are Goat, an expert software engineering assistant. You help users understand, build, and improve software by reading code, running tools, and providing accurate, actionable guidance. When using tools, prefer targeted reads and searches over broad exploration. Always verify your understanding before making changes.";
 
-fn build_system_prompt(skills: &[SkillInfo], instructions: Option<&str>) -> String {
-    let mut prompt = String::from(SYSTEM_PROMPT);
-    if !skills.is_empty() {
-        prompt.push_str(
-            "\n\nAvailable skills. Call the Skill tool with a skill's name to load its full instructions before following it:",
-        );
-        for skill in skills {
-            let _ = write!(prompt, "\n- {}: {}", skill.name, skill.description);
-        }
+fn build_system_prompt(skills: &[SkillInfo]) -> String {
+    if skills.is_empty() {
+        return SYSTEM_PROMPT.to_owned();
     }
-    if let Some(content) = instructions {
-        let _ = write!(
-            prompt,
-            "\n\n# Project instructions (AGENTS.md)\n\n{content}"
-        );
+    let mut prompt = String::from(SYSTEM_PROMPT);
+    prompt.push_str(
+        "\n\nAvailable skills. Call the Skill tool with a skill's name to load its full instructions before following it:",
+    );
+    for skill in skills {
+        let _ = write!(prompt, "\n- {}: {}", skill.name, skill.description);
     }
     prompt
-}
-
-fn compose_child_system(base_prompt: &str, instructions: Option<&str>) -> String {
-    match instructions {
-        None => base_prompt.to_owned(),
-        Some(content) => {
-            format!("{base_prompt}\n\n# Project instructions (AGENTS.md)\n\n{content}")
-        }
-    }
 }
 
 fn load_skill_infos(cwd: &std::path::Path) -> Vec<SkillInfo> {
@@ -119,7 +104,6 @@ struct Ctx<'a> {
     store: &'a Store,
     events: &'a mpsc::Sender<Event>,
     skills: &'a [SkillInfo],
-    instructions: Option<&'a str>,
     semaphore: &'a Arc<Semaphore>,
     child_ids: &'a AtomicU64,
 }
@@ -319,7 +303,6 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     let cwd = std::env::current_dir().unwrap_or_default();
     let skills = load_skill_infos(&cwd);
     let agents = AgentRegistry::load(&cwd);
-    let project_instructions = instructions::load_project_instructions(&cwd);
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_AGENTS));
     let child_ids = AtomicU64::new(CHILD_ID_BASE);
     let _ = events
@@ -339,7 +322,6 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     store: &store,
                     events: &events,
                     skills: &skills,
-                    instructions: project_instructions.as_deref(),
                     semaphore: &semaphore,
                     child_ids: &child_ids,
                 };
@@ -398,7 +380,6 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 handle_resume(
                     &store,
                     &skills,
-                    project_instructions.as_deref(),
                     tid,
                     &mut target,
                     &mut history,
@@ -1488,10 +1469,7 @@ async fn run_delegation(
     };
     let tool_defs = build_tool_defs(ctx, provider.as_ref(), Some(&spec.tools), false);
     let mut history = vec![
-        Message::text(
-            MessageRole::System,
-            compose_child_system(&spec.prompt, ctx.instructions),
-        ),
+        Message::text(MessageRole::System, spec.prompt.clone()),
         Message::text(MessageRole::User, args.prompt.clone()),
     ];
     let child_id = TaskId(ctx.child_ids.fetch_add(1, Ordering::Relaxed));
@@ -1697,7 +1675,6 @@ fn tool_summary(content: &str) -> String {
 async fn handle_resume(
     store: &Store,
     skills: &[SkillInfo],
-    instructions: Option<&str>,
     tid: i64,
     target: &mut Option<ModelTarget>,
     history: &mut Vec<Message>,
@@ -1716,7 +1693,7 @@ async fn handle_resume(
     let messages = store.get_messages(tid).await.unwrap_or_default();
     let mut new_history = vec![Message::text(
         MessageRole::System,
-        build_system_prompt(skills, instructions),
+        build_system_prompt(skills),
     )];
     let mut entries: Vec<TranscriptEntry> = Vec::new();
     let mut tool_uses: std::collections::HashMap<String, (String, String)> =
@@ -1805,7 +1782,7 @@ async fn handle_turn(
     if history.is_empty() {
         history.push(Message::text(
             MessageRole::System,
-            build_system_prompt(ctx.skills, ctx.instructions),
+            build_system_prompt(ctx.skills),
         ));
     }
     history.push(Message::text(MessageRole::User, text.clone()));
@@ -2082,34 +2059,18 @@ mod tests {
 
     #[test]
     fn system_prompt_without_skills_is_base() {
-        assert_eq!(super::build_system_prompt(&[], None), super::SYSTEM_PROMPT);
+        assert_eq!(super::build_system_prompt(&[]), super::SYSTEM_PROMPT);
     }
 
     #[test]
     fn system_prompt_lists_skills() {
-        let prompt = super::build_system_prompt(
-            &[goat_protocol::SkillInfo {
-                name: "demo".to_owned(),
-                description: "does the demo".to_owned(),
-            }],
-            None,
-        );
+        let prompt = super::build_system_prompt(&[goat_protocol::SkillInfo {
+            name: "demo".to_owned(),
+            description: "does the demo".to_owned(),
+        }]);
         assert!(prompt.contains("demo"));
         assert!(prompt.contains("does the demo"));
         assert!(prompt.contains("Skill tool"));
-    }
-
-    #[test]
-    fn system_prompt_includes_project_instructions() {
-        let prompt = super::build_system_prompt(&[], Some("always use snake_case"));
-        assert!(prompt.contains("always use snake_case"));
-        assert!(prompt.contains("Project instructions"));
-    }
-
-    #[test]
-    fn system_prompt_no_instructions_omits_section() {
-        let prompt = super::build_system_prompt(&[], None);
-        assert!(!prompt.contains("Project instructions"));
     }
 
     #[tokio::test]
