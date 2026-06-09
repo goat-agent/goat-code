@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use goat_protocol::Op;
 
-use super::{App, Overlay, QUIT_ARM_TICKS};
+use super::{App, CLEAR_ARM_TICKS, Overlay, QUIT_ARM_TICKS};
 use crate::{
     config::ConfigOutcome,
     keymap,
@@ -31,6 +31,7 @@ impl App {
                 return self.on_ctrl_c();
             }
             self.quit_arm = None;
+            self.clear_arm = None;
             match ch {
                 'a' => {
                     self.dirty |= self.composer.move_home();
@@ -48,6 +49,9 @@ impl App {
             return Vec::new();
         }
         self.quit_arm = None;
+        if !matches!(key.code, KeyCode::Esc) {
+            self.clear_arm = None;
+        }
         self.on_normal_key(key)
     }
 
@@ -96,6 +100,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn on_normal_key(&mut self, key: KeyEvent) -> Vec<Op> {
         match key.code {
             KeyCode::PageUp => {
@@ -181,9 +186,21 @@ impl App {
                 Vec::new()
             }
             KeyCode::Esc => {
-                self.overlay = Overlay::None;
-                self.composer.clear();
                 self.dirty = true;
+                if let Some(id) = self.active {
+                    self.clear_arm = None;
+                    return vec![Op::Interrupt { id }];
+                }
+                self.overlay = Overlay::None;
+                if self.composer.is_empty() {
+                    self.clear_arm = None;
+                    return Vec::new();
+                }
+                if self.clear_arm.take().is_some() {
+                    self.composer.clear();
+                } else {
+                    self.clear_arm = Some(CLEAR_ARM_TICKS);
+                }
                 Vec::new()
             }
             KeyCode::Char(c) => {
@@ -471,19 +488,11 @@ impl App {
 
     pub(crate) fn on_ctrl_c(&mut self) -> Vec<Op> {
         self.dirty = true;
-        if matches!(self.overlay, Overlay::Ask(..)) {
-            self.overlay = Overlay::None;
-            if let Some(id) = self.active {
-                return vec![Op::Interrupt { id }];
-            }
-            return Vec::new();
-        }
-        if let Some(id) = self.active {
-            return vec![Op::Interrupt { id }];
-        }
+        self.clear_arm = None;
         if self.quit_arm.is_some() {
             self.should_quit = true;
         } else {
+            self.composer.clear();
             self.quit_arm = Some(QUIT_ARM_TICKS);
         }
         Vec::new()
