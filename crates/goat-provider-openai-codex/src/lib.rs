@@ -25,6 +25,8 @@ const DEFAULT_INSTRUCTIONS: &str = "You are goat, a coding assistant running in 
 const DEVICE_USERCODE: &str = "https://auth.openai.com/deviceauth/usercode";
 
 const CATALOG: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+
+const CONTEXT_WINDOWS: &[(&str, u32)] = &[("gpt-5", 272_000)];
 const DEVICE_TOKEN: &str = "https://auth.openai.com/deviceauth/token";
 const DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
 
@@ -348,6 +350,13 @@ impl Provider for CodexProvider {
         tokio::spawn(async move { login(&status).await.map_err(|e| e.to_string()) })
     }
 
+    fn context_window(&self, model: &str) -> Option<u32> {
+        CONTEXT_WINDOWS
+            .iter()
+            .find(|(prefix, _)| model.starts_with(prefix))
+            .map(|(_, w)| *w)
+    }
+
     fn stream(&self, req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
         let client = self.client.clone();
         let url = format!("{BASE}/responses");
@@ -377,6 +386,7 @@ impl Provider for CodexProvider {
                 account.as_deref(),
                 &body,
                 &events,
+                Some(goat_provider_openai_compat::parse_codex_ratelimits),
             )
             .await;
         })

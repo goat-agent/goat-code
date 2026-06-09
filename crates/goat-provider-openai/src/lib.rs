@@ -15,6 +15,13 @@ const CATALOG: &[&str] = &[
     "o4-mini",
 ];
 
+const CONTEXT_WINDOWS: &[(&str, u32)] = &[
+    ("gpt-5", 400_000),
+    ("gpt-4.1", 1_047_576),
+    ("o3", 200_000),
+    ("o4", 200_000),
+];
+
 const NON_CHAT_MARKERS: [&str; 15] = [
     "image",
     "audio",
@@ -59,6 +66,7 @@ pub fn build(store: &CredentialStore, account: &str) -> ResponsesProvider {
     )
     .with_model_filter(is_chat_model)
     .with_catalog(CATALOG)
+    .with_context_windows(CONTEXT_WINDOWS)
 }
 
 #[cfg(test)]
