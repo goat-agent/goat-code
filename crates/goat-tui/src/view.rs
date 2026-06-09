@@ -38,15 +38,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .areas(area);
 
         render_header(frame, header, app, theme);
-        app.clamp_scroll(transcript_area.height, transcript_area.width);
-        app.transcript().render(
-            frame,
-            transcript_area,
-            theme,
-            app.scroll(),
-            app.spinner_frame(),
-        );
-        render_scrollbar(frame, transcript_area, app, theme);
+        render_transcript(frame, transcript_area, app, theme);
         if let Overlay::Commands(menu) = app.overlay() {
             menu.render(frame, panel, theme);
         }
@@ -64,10 +56,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             ])
             .areas(area);
             render_header(frame, header, app, theme);
-            app.clamp_scroll(body.height, body.width);
-            app.transcript()
-                .render(frame, body, theme, app.scroll(), app.spinner_frame());
-            render_scrollbar(frame, body, app, theme);
+            render_transcript(frame, body, app, theme);
             match app.overlay() {
                 Overlay::Config(config) => config.render(frame, body, theme),
                 Overlay::Model(picker) => picker.render(frame, body, theme),
@@ -94,10 +83,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ])
         .areas(area);
         render_header(frame, header, app, theme);
-        app.clamp_scroll(body.height, body.width);
-        app.transcript()
-            .render(frame, body, theme, app.scroll(), app.spinner_frame());
-        render_scrollbar(frame, body, app, theme);
+        render_transcript(frame, body, app, theme);
         render_agent_panel(frame, panel, app, theme, cursor);
         app.composer().render(frame, composer, theme, false);
         render_toasts(frame, area, app, theme);
@@ -113,10 +99,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     .areas(area);
 
     render_header(frame, header, app, theme);
-    app.clamp_scroll(body.height, body.width);
-    app.transcript()
-        .render(frame, body, theme, app.scroll(), app.spinner_frame());
-    render_scrollbar(frame, body, app, theme);
+    render_transcript(frame, body, app, theme);
     app.composer().render(frame, composer, theme, true);
     render_footer(frame, footer, app, theme);
     render_toasts(frame, area, app, theme);
@@ -156,22 +139,42 @@ fn render_toasts(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     crate::toast::render(frame, area, theme, app.toasts());
 }
 
-fn render_scrollbar(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+const PAD_LEFT: u16 = 1;
+const GUTTER: u16 = 2;
+
+fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
+    let content = Rect {
+        x: area.x + PAD_LEFT,
+        y: area.y,
+        width: area.width.saturating_sub(PAD_LEFT + GUTTER),
+        height: area.height,
+    };
+    app.clamp_scroll(content.height, content.width);
+    app.transcript()
+        .render(frame, content, theme, app.scroll(), app.spinner_frame());
     if app.follow() {
         return;
     }
-    let content_len = app.content_height(area.width);
-    if content_len <= area.height {
+    let content_len = app.content_height(content.width);
+    if content_len <= content.height {
         return;
     }
+    let bar = Rect {
+        x: area.x + area.width.saturating_sub(1),
+        y: area.y,
+        width: 1,
+        height: content.height,
+    };
     let mut state = ScrollbarState::new(content_len as usize)
         .position(app.scroll() as usize)
-        .viewport_content_length(area.height as usize);
+        .viewport_content_length(content.height as usize);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
             .track_symbol(None)
             .thumb_style(theme.muted()),
-        area,
+        bar,
         &mut state,
     );
 }

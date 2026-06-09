@@ -160,13 +160,27 @@ impl Transcript {
         built
     }
 
+    fn streaming_lines(&self, theme: Theme) -> Vec<Line<'static>> {
+        if let Some(buffer) = &self.streaming {
+            let mut streamed = labelled(buffer, symbols::marker::AGENT, theme.role_agent(), theme);
+            if let Some(last) = streamed.last_mut() {
+                last.spans
+                    .push(Span::styled(symbols::ui::STREAM_CURSOR, theme.accent()));
+            }
+            streamed
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn content_height(&self, width: u16, theme: Theme) -> u16 {
         if let Some((w, h)) = self.cached_height.get()
             && w == width
         {
             return h;
         }
-        let lines = self.get_or_build_static_lines(theme, width, symbols::SPINNER[0]);
+        let mut lines = self.get_or_build_static_lines(theme, width, symbols::SPINNER[0]);
+        lines.extend(self.streaming_lines(theme));
         let h = if width == 0 {
             u16::try_from(lines.len()).unwrap_or(u16::MAX)
         } else {
@@ -197,14 +211,7 @@ impl Transcript {
         spinner: &'static str,
     ) {
         let mut lines = self.get_or_build_static_lines(theme, area.width, spinner);
-        if let Some(buffer) = &self.streaming {
-            let mut streamed = labelled(buffer, symbols::marker::AGENT, theme.role_agent(), theme);
-            if let Some(last) = streamed.last_mut() {
-                last.spans
-                    .push(Span::styled(symbols::ui::STREAM_CURSOR, theme.accent()));
-            }
-            lines.extend(streamed);
-        }
+        lines.extend(self.streaming_lines(theme));
         frame.render_widget(
             Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
@@ -474,5 +481,18 @@ mod tests {
         t.finish_tool(ToolCallId(10), failed("err"));
         assert!(matches!(&t.items[0], Item::Tool { status: ToolStatus::Done(o), .. } if !o.ok));
         assert!(matches!(&t.items[1], Item::Tool { status: ToolStatus::Done(o), .. } if o.ok));
+    }
+
+    #[test]
+    fn content_height_counts_streaming() {
+        let mut t = Transcript::default();
+        commit(&mut t, "hello world");
+        let h1 = t.content_height(80, Theme::dark());
+        t.push_delta("line one\nline two\nline three\nline four");
+        let h2 = t.content_height(80, Theme::dark());
+        assert!(
+            h2 > h1,
+            "content_height must grow while streaming is active"
+        );
     }
 }
