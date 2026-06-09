@@ -18,6 +18,7 @@ pub enum CommandEffect {
     Notice(String),
     Error(String),
     Noop,
+    Quit,
 }
 
 pub trait Command: Send + Sync {

@@ -58,6 +58,7 @@ fn builtin_commands() -> Vec<Box<dyn Command>> {
     let mut commands = goat_command_settings::all();
     commands.extend(goat_command_conversation::all());
     commands.extend(goat_command_help::all());
+    commands.extend(goat_command_app::all());
     commands
 }
 
@@ -94,6 +95,13 @@ mod tests {
             registry.resolve("help", ""),
             CommandEffect::ShowHelp
         ));
+        assert!(matches!(registry.resolve("exit", ""), CommandEffect::Quit));
+    }
+
+    #[test]
+    fn exit_alias_quit_resolves_to_quit() {
+        let registry = CommandRegistry::builtin();
+        assert!(matches!(registry.resolve("quit", ""), CommandEffect::Quit));
     }
 
     #[test]
@@ -150,6 +158,18 @@ mod tests {
         }]);
         let names: Vec<&str> = registry.specs().into_iter().map(|spec| spec.name).collect();
         assert!(names.contains(&"help"));
+        assert!(names.contains(&"exit"));
         assert!(names.contains(&"demo"));
+    }
+
+    #[test]
+    fn exit_spec_carries_quit_alias() {
+        let registry = CommandRegistry::builtin();
+        let exit_spec = registry
+            .specs()
+            .into_iter()
+            .find(|s| s.name == "exit")
+            .expect("exit spec missing");
+        assert!(exit_spec.aliases.contains(&"quit"));
     }
 }
