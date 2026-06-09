@@ -37,7 +37,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-providers` — provider registry; wires all provider crates. `Registry::new(store)` for default account, `Registry::load(store, account)` for explicit. `Registry::login(provider, status)` dispatches OAuth login through the `Provider::login` trait method.
 
 **Agent**
-- `goat-agent` — `GoatAgent`, the production `Engine` implementation; owns the LLM loop, tool dispatch, and `Vec<Message>` history. Also owns the `Agent` delegation tool and `AgentSpec`/`AgentRegistry` (`agent.rs`): built-in `explore` (read-only) and `general`, plus file-defined agents from `.goat/agents/<name>.md` (Claude Code custom-agent frontmatter — `name`/`description`/`tools`/`model`/`effort`).
+- `goat-agent` — `GoatAgent`, the production `Engine` implementation; owns the LLM loop, tool dispatch, and `Vec<Message>` history. Also owns the `Agent` delegation tool and `AgentSpec`/`AgentRegistry` (`agent.rs`): built-in `explore` (read-only) and `general`, plus file-defined agents from `.goat/agents/<name>.md` (Claude Code custom-agent frontmatter — `name`/`description`/`tools`/`model`/`effort`). Project instruction loading lives in `instructions.rs`.
 
 **Auth / Store**
 - `goat-auth` — credential store (provider API keys, OAuth tokens).
@@ -80,6 +80,7 @@ The UI and the engine communicate only through `goat-protocol` types over bounde
 - The `Agent` tool is engine-level, not a registry tool: the model calls it like a tool, but `GoatAgent` intercepts the call in dispatch and runs the same loop core nested — its own history, restricted tool set (no `Agent`, so no recursion), a child `TaskId`, and no persistence. Several run concurrently via a semaphore-bounded `join_all`, and a parent `CancellationToken` fans out to every child on interrupt. The shared loop core is parameterized by a `Run` (top-level emits + persists; child emits child-tagged events only).
 - The TUI normalizes three event sources into one `AppEvent`, runs a pure `App::update` reducer, and renders on a dirty flag — never on every tick. Child-agent events are routed by `TaskId` to a per-run transcript; a footer agent selector (↓ to focus, arrows, Esc to leave) drills the main area into one run by swapping which transcript renders — the same swap mechanism `/resume` uses.
 - The composer is a first-party widget. Do not add `tui-textarea`; it does not support ratatui 0.30.
+- On startup, `GoatAgent` reads project `AGENTS.md` files and injects them into the system prompt. Discovery follows the Codex standard: global `~/.goat-code/AGENTS.md` first, then git root → cwd (root-to-leaf order, each file capped at 32 KiB). `AGENTS.override.md` in any directory takes precedence over `AGENTS.md` in the same directory. The same injected content reaches both the main loop and delegated subagents.
 
 ## Distribution
 
