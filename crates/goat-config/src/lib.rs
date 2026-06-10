@@ -10,12 +10,24 @@ pub enum ThemeChoice {
     Light,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub theme: ThemeChoice,
     pub computer_use_enabled: bool,
     pub browser_enabled: bool,
+    pub mouse_capture_enabled: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            theme: ThemeChoice::default(),
+            computer_use_enabled: false,
+            browser_enabled: false,
+            mouse_capture_enabled: true,
+        }
+    }
 }
 
 impl Config {
@@ -131,6 +143,7 @@ mod tests {
             theme: ThemeChoice::Light,
             computer_use_enabled: false,
             browser_enabled: true,
+            mouse_capture_enabled: false,
         };
         let raw = serde_json::to_string(&cfg).unwrap();
         assert_eq!(Config::from_json(&raw).unwrap(), cfg);
