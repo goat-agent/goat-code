@@ -219,17 +219,19 @@ impl App {
                 Vec::new()
             }
             AppEvent::Input(CtEvent::Mouse(mouse)) => {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        self.scroll = self.scroll.saturating_sub(3);
-                        self.follow = false;
-                        self.dirty = true;
+                if self.wheel_scroll_allowed() {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            self.scroll = self.scroll.saturating_sub(3);
+                            self.follow = false;
+                            self.dirty = true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.scroll = self.scroll.saturating_add(3);
+                            self.dirty = true;
+                        }
+                        _ => {}
                     }
-                    MouseEventKind::ScrollDown => {
-                        self.scroll = self.scroll.saturating_add(3);
-                        self.dirty = true;
-                    }
-                    _ => {}
                 }
                 Vec::new()
             }
@@ -536,6 +538,13 @@ impl App {
 
     pub(crate) fn page_rows(&self) -> usize {
         usize::from(self.viewport_rows.saturating_sub(1)).max(1)
+    }
+
+    pub(crate) fn wheel_scroll_allowed(&self) -> bool {
+        matches!(
+            self.overlay,
+            Overlay::None | Overlay::Commands(_) | Overlay::Agents(_)
+        )
     }
 
     pub(crate) fn take_dirty(&mut self) -> bool {
@@ -938,6 +947,18 @@ mod tests {
         }
         app.clamp_scroll(10, 80);
         assert!(app.follow);
+    }
+
+    #[test]
+    fn wheel_ignored_while_picker_overlay_open() {
+        use crossterm::event::MouseEventKind;
+        let mut app = filled_app();
+        app.update(mouse(MouseEventKind::ScrollUp));
+        app.clamp_scroll(10, 80);
+        let before = app.scroll;
+        app.dispatch_slash_command("/model");
+        app.update(mouse(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll, before);
     }
 
     #[test]
