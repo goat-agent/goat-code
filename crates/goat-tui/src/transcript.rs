@@ -315,6 +315,16 @@ fn plain_lines(text: &str, theme: Theme) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 fn working_rows(
     theme: Theme,
     width: u16,
@@ -328,7 +338,7 @@ fn working_rows(
     let mut spans = vec![Span::styled(label, theme.muted())];
     if let Some(secs) = w.elapsed {
         spans.push(Span::styled(
-            format!("{}{secs}s", symbols::ui::SEPARATOR),
+            format!("{}{}", symbols::ui::SEPARATOR, format_elapsed(secs)),
             theme.muted(),
         ));
     }
@@ -516,7 +526,7 @@ mod tests {
     use goat_protocol::{ToolCall, ToolCallId, ToolOutcome};
     use ratatui::{Terminal, backend::TestBackend};
 
-    use super::{Item, ToolStatus, Transcript, Working};
+    use super::{Item, ToolStatus, Transcript, Working, format_elapsed};
     use crate::{highlight::PlainHighlighter, symbols, theme::Theme};
 
     fn call(id: u64, name: &str, input: &str) -> ToolCall {
@@ -729,5 +739,12 @@ mod tests {
         let mut t = Transcript::default();
         t.push_user("x\n".repeat(70_000));
         assert!(height(&t, 80) > usize::from(u16::MAX));
+    }
+
+    #[test]
+    fn format_elapsed_scales_units() {
+        assert_eq!(format_elapsed(42), "42s");
+        assert_eq!(format_elapsed(92), "1m32s");
+        assert_eq!(format_elapsed(3_725), "1h02m");
     }
 }
