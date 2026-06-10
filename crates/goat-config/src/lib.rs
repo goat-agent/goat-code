@@ -15,6 +15,7 @@ pub enum ThemeChoice {
 pub struct Config {
     pub theme: ThemeChoice,
     pub computer_use_enabled: bool,
+    pub browser_enabled: bool,
 }
 
 impl Config {
@@ -76,6 +77,14 @@ pub fn skills_dir() -> Option<PathBuf> {
     app_home().map(|home| home.join("skills"))
 }
 
+pub fn browser_dir() -> Option<PathBuf> {
+    app_home().map(|home| home.join("browser"))
+}
+
+pub fn browser_profile_dir() -> Option<PathBuf> {
+    browser_dir().map(|dir| dir.join("profile"))
+}
+
 pub const PROJECT_SKILLS_SUBDIR: &str = ".goat/skills";
 
 pub fn agents_dir() -> Option<PathBuf> {
@@ -121,6 +130,7 @@ mod tests {
         let cfg = Config {
             theme: ThemeChoice::Light,
             computer_use_enabled: false,
+            browser_enabled: true,
         };
         let raw = serde_json::to_string(&cfg).unwrap();
         assert_eq!(Config::from_json(&raw).unwrap(), cfg);
