@@ -86,12 +86,14 @@ fn search(
     let regex = Regex::new(pattern)?;
     let mut builder = WalkBuilder::new(root);
     builder.require_git(false);
-    if let Some(glob) = glob {
-        let mut overrides = OverrideBuilder::new(root);
-        overrides.add(glob).map_err(|err| ignore_error(&err))?;
-        let built = overrides.build().map_err(|err| ignore_error(&err))?;
-        builder.overrides(built);
-    }
+    let matcher = match glob {
+        Some(glob) => {
+            let mut overrides = OverrideBuilder::new(root);
+            overrides.add(glob).map_err(|err| ignore_error(&err))?;
+            Some(overrides.build().map_err(|err| ignore_error(&err))?)
+        }
+        None => None,
+    };
 
     let mut out = String::new();
     let mut count = 0usize;
@@ -100,6 +102,11 @@ fn search(
     'walk: for entry in builder.build() {
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        if let Some(matcher) = &matcher
+            && !matcher.matched(entry.path(), false).is_whitelist()
+        {
             continue;
         }
         let Ok(contents) = std::fs::read(entry.path()) else {

@@ -61,26 +61,29 @@ const MAX_GLOB_RESULTS: usize = 1000;
 fn walk(cwd: &std::path::Path, root: &std::path::Path, pattern: &str) -> Result<String, ToolError> {
     let mut overrides = OverrideBuilder::new(root);
     overrides.add(pattern).map_err(|err| ignore_error(&err))?;
-    let built = overrides.build().map_err(|err| ignore_error(&err))?;
+    let matcher = overrides.build().map_err(|err| ignore_error(&err))?;
 
-    let mut matches = Vec::new();
+    let mut found = Vec::new();
     let mut builder = WalkBuilder::new(root);
-    builder.require_git(false).overrides(built);
+    builder.require_git(false);
     for entry in builder.build() {
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
-        matches.push(relative_display(cwd, entry.path()));
+        if !matcher.matched(entry.path(), false).is_whitelist() {
+            continue;
+        }
+        found.push(relative_display(cwd, entry.path()));
     }
 
-    if matches.is_empty() {
+    if found.is_empty() {
         return Ok("no files".to_owned());
     }
-    matches.sort();
-    let total = matches.len();
-    matches.truncate(MAX_GLOB_RESULTS);
-    let mut out = matches.join("\n");
+    found.sort();
+    let total = found.len();
+    found.truncate(MAX_GLOB_RESULTS);
+    let mut out = found.join("\n");
     if total > MAX_GLOB_RESULTS {
         let _ = write!(
             out,
