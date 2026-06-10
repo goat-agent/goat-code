@@ -7,8 +7,8 @@ use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKi
 use futures::StreamExt;
 use goat_commands::{CommandEffect, CommandRegistry};
 use goat_protocol::{
-    AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, Op, RateLimitSnapshot,
-    TaskId, ToolCallId, Usage,
+    AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, NotifyKind, Op,
+    RateLimitSnapshot, TaskId, ToolCallId, Usage,
 };
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -55,11 +55,13 @@ pub(crate) enum Overlay {
     Agents(usize),
     Ask(AskPicker, ToolCallId),
     Usage,
+    Help,
 }
 
 const TICK: Duration = Duration::from_millis(120);
 const QUIT_ARM_TICKS: u16 = 25;
 const CLEAR_ARM_TICKS: u16 = 25;
+const DENY_ARM_TICKS: u16 = 25;
 
 pub(crate) enum AppEvent {
     Input(CtEvent),
@@ -80,11 +82,14 @@ pub struct App {
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
     pub(crate) clear_arm: Option<u16>,
+    pub(crate) deny_arm: Option<u16>,
+    pub(crate) thinking: bool,
     pub(crate) should_quit: bool,
     pub(crate) dirty: bool,
     pub(crate) scroll: u16,
     pub(crate) follow: bool,
     pub(crate) models: Vec<ModelEntry>,
+    pub(crate) models_loaded: bool,
     pub(crate) model: Option<ModelTarget>,
     pub(crate) overlay: Overlay,
     pub(crate) pending_resume: Option<ResumeIntent>,
@@ -109,6 +114,7 @@ impl App {
             .ok()
             .map(|p| shorten_home(&p))
             .unwrap_or_default();
+        let cfg = goat_config::Config::load();
         Self {
             theme,
             transcript: Transcript::default(),
@@ -120,19 +126,21 @@ impl App {
             spinner: 0,
             quit_arm: None,
             clear_arm: None,
+            deny_arm: None,
+            thinking: false,
             should_quit: false,
             dirty: true,
             scroll: 0,
             follow: true,
             models: Vec::new(),
+            models_loaded: false,
             model: None,
             overlay: Overlay::None,
             pending_resume: None,
             account_entries: Vec::new(),
-            mouse_capture: true,
-            computer_use: goat_config::Config::load().computer_use_enabled,
-            browser: goat_config::Config::load().browser_enabled,
-
+            mouse_capture: cfg.mouse_capture_enabled,
+            computer_use: cfg.computer_use_enabled,
+            browser: cfg.browser_enabled,
             commands: CommandRegistry::builtin(),
             task_start: None,
             toasts: Vec::new(),
@@ -163,6 +171,13 @@ impl App {
                     *ticks = ticks.saturating_sub(1);
                     if *ticks == 0 {
                         self.clear_arm = None;
+                        self.dirty = true;
+                    }
+                }
+                if let Some(ticks) = &mut self.deny_arm {
+                    *ticks = ticks.saturating_sub(1);
+                    if *ticks == 0 {
+                        self.deny_arm = None;
                         self.dirty = true;
                     }
                 }
@@ -249,8 +264,10 @@ impl App {
             CommandEffect::OpenEffortPicker => {
                 let efforts = self.current_efforts();
                 if efforts.is_empty() {
-                    self.transcript
-                        .push_notice("current model has no reasoning effort options".to_owned());
+                    self.push_toast(
+                        NotifyKind::Info,
+                        "current model has no reasoning effort options".to_owned(),
+                    );
                     return Vec::new();
                 }
                 let label = self
@@ -264,21 +281,24 @@ impl App {
             }
             CommandEffect::SelectEffort(level) => {
                 let Some(effort) = Effort::parse(&level) else {
-                    self.transcript
-                        .push_error(format!("unknown effort: {level}"));
+                    self.push_toast(NotifyKind::Error, format!("unknown effort: {level}"));
                     return Vec::new();
                 };
                 if !self.current_efforts().contains(&effort) {
-                    self.transcript
-                        .push_error(format!("current model does not support effort: {level}"));
+                    self.push_toast(
+                        NotifyKind::Error,
+                        format!("current model does not support effort: {level}"),
+                    );
                     return Vec::new();
                 }
                 self.apply_effort(effort)
             }
             CommandEffect::OpenThreadPicker => {
                 if self.active.is_some() {
-                    self.transcript
-                        .push_notice("finish the current task before resuming".to_owned());
+                    self.push_toast(
+                        NotifyKind::Info,
+                        "finish the current task before resuming".to_owned(),
+                    );
                     return Vec::new();
                 }
                 self.pending_resume = Some(ResumeIntent::Picker);
@@ -286,8 +306,10 @@ impl App {
             }
             CommandEffect::ResumeIndex(index) => {
                 if self.active.is_some() {
-                    self.transcript
-                        .push_notice("finish the current task before resuming".to_owned());
+                    self.push_toast(
+                        NotifyKind::Info,
+                        "finish the current task before resuming".to_owned(),
+                    );
                     return Vec::new();
                 }
                 self.pending_resume = Some(ResumeIntent::Index(index));
@@ -304,8 +326,7 @@ impl App {
                 Vec::new()
             }
             CommandEffect::ShowHelp => {
-                self.transcript
-                    .push_notice(crate::command::help_text(&self.commands));
+                self.overlay = Overlay::Help;
                 Vec::new()
             }
             CommandEffect::RenameConversation(title) => vec![Op::RenameThread { title }],
@@ -315,17 +336,18 @@ impl App {
                 }
                 self.transcript.clear();
                 self.reset_agents();
+                self.clear_ctx_indicator();
                 self.scroll = 0;
                 self.follow = true;
                 vec![Op::Clear]
             }
             CommandEffect::Submit(text) => self.submit_text(text),
             CommandEffect::Notice(message) => {
-                self.transcript.push_notice(message);
+                self.push_toast(NotifyKind::Info, message);
                 Vec::new()
             }
             CommandEffect::Error(message) => {
-                self.transcript.push_error(message);
+                self.push_toast(NotifyKind::Error, message);
                 Vec::new()
             }
             CommandEffect::OpenUsage => {
@@ -363,10 +385,21 @@ impl App {
                 if let Overlay::Config(config) = &mut self.overlay {
                     config.set_providers(self.account_entries.clone());
                 }
-                vec![Op::SetTheme { dark }]
+                let mut cfg = goat_config::Config::load();
+                cfg.theme = if dark {
+                    goat_config::ThemeChoice::Dark
+                } else {
+                    goat_config::ThemeChoice::Light
+                };
+                let _ = cfg.save();
+                Vec::new()
             }
             ConfigOutcome::SetMouseCapture { enabled } => {
                 self.mouse_capture = enabled;
+                tui::set_mouse_capture(enabled);
+                let mut cfg = goat_config::Config::load();
+                cfg.mouse_capture_enabled = enabled;
+                let _ = cfg.save();
                 Vec::new()
             }
             ConfigOutcome::SetComputerUse { enabled } => {
@@ -387,7 +420,14 @@ impl App {
     }
 
     pub(crate) fn submit(&mut self) -> Vec<Op> {
-        if self.active.is_some() || self.composer.is_empty() {
+        if self.active.is_some() {
+            if !self.composer.is_empty() {
+                self.deny_arm = Some(DENY_ARM_TICKS);
+                self.dirty = true;
+            }
+            return Vec::new();
+        }
+        if self.composer.is_empty() {
             return Vec::new();
         }
         let text = self.composer.take();
@@ -428,8 +468,7 @@ impl App {
 
     pub(crate) fn apply_effort(&mut self, effort: Effort) -> Vec<Op> {
         let Some(current) = &self.model else {
-            self.transcript
-                .push_error("select a model first".to_owned());
+            self.push_toast(NotifyKind::Error, "select a model first".to_owned());
             return Vec::new();
         };
         let mut target = current.clone();
@@ -518,6 +557,21 @@ impl App {
     }
     pub(crate) fn clear_armed(&self) -> bool {
         self.clear_arm.is_some()
+    }
+    pub(crate) fn deny_armed(&self) -> bool {
+        self.deny_arm.is_some()
+    }
+
+    pub(crate) fn push_toast(&mut self, kind: NotifyKind, message: String) {
+        self.toasts.push(crate::toast::Toast::new(kind, message));
+        self.dirty = true;
+    }
+
+    pub(crate) fn clear_ctx_indicator(&mut self) {
+        if let Some(model) = &self.model {
+            let key = (model.provider.clone(), model.account.clone());
+            self.usage_last.remove(&key);
+        }
     }
     pub(crate) fn spinner_frame(&self) -> &'static str {
         symbols::SPINNER[self.spinner % symbols::SPINNER.len()]
@@ -616,14 +670,14 @@ impl App {
         Some(format!("{running} agents · {}", parts.join(", ")))
     }
 
-    pub(crate) fn build_usage_view(&self) -> UsageView {
+    pub(crate) fn build_usage_view(&self) -> UsageView<'_> {
         UsageView::new(
-            self.account_entries.clone(),
-            self.usage_last.clone(),
-            self.usage_total.clone(),
-            self.rate_limits.clone(),
+            &self.account_entries,
+            &self.usage_last,
+            &self.usage_total,
+            &self.rate_limits,
             self.context_window,
-            self.model.clone(),
+            self.model.as_ref(),
         )
     }
 
@@ -655,8 +709,9 @@ pub async fn run(
     mut events: Receiver<EngineEvent>,
     theme: Theme,
 ) -> color_eyre::Result<()> {
-    let mut terminal = tui::init()?;
-    let result = event_loop(&mut terminal, &ops, &mut events, theme).await;
+    let app = App::new(theme);
+    let mut terminal = tui::init(app.mouse_capture)?;
+    let result = event_loop(&mut terminal, &ops, &mut events, app).await;
     tui::restore();
     let _ = ops.send(Op::Shutdown).await;
     result
@@ -666,9 +721,8 @@ async fn event_loop(
     terminal: &mut DefaultTerminal,
     ops: &Sender<Op>,
     events: &mut Receiver<EngineEvent>,
-    theme: Theme,
+    mut app: App,
 ) -> color_eyre::Result<()> {
-    let mut app = App::new(theme);
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(TICK);
 
@@ -689,6 +743,13 @@ async fn event_loop(
         for op in app.update(event) {
             if ops.send(op).await.is_err() {
                 app.should_quit = true;
+            }
+        }
+        while let Ok(pending) = events.try_recv() {
+            for op in app.update(AppEvent::Engine(pending)) {
+                if ops.send(op).await.is_err() {
+                    app.should_quit = true;
+                }
             }
         }
 
@@ -901,32 +962,26 @@ mod tests {
     }
 
     #[test]
-    fn unknown_slash_command_pushes_error() {
+    fn unknown_slash_command_shows_toast() {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("/bogus");
         let ops = app.submit();
         assert!(ops.is_empty());
         assert!(matches!(app.overlay, Overlay::None));
         assert!(app.active.is_none());
-        assert_eq!(app.transcript.items.len(), 1);
-        assert!(matches!(
-            &app.transcript.items[0],
-            crate::transcript::Item::Error(_)
-        ));
+        assert!(app.transcript.items.is_empty());
+        assert_eq!(app.toasts.len(), 1);
     }
 
     #[test]
-    fn slash_help_pushes_notice() {
+    fn slash_help_opens_overlay() {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("/help");
         let ops = app.submit();
         assert!(ops.is_empty());
         assert!(app.active.is_none());
-        assert_eq!(app.transcript.items.len(), 1);
-        assert!(matches!(
-            &app.transcript.items[0],
-            crate::transcript::Item::Notice(_)
-        ));
+        assert!(matches!(app.overlay, Overlay::Help));
+        assert!(app.transcript.items.is_empty());
     }
 
     #[test]
@@ -945,16 +1000,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_skill_command_pushes_error() {
+    fn unknown_skill_command_shows_toast() {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("/demo");
         let ops = app.submit();
         assert!(ops.is_empty());
-        assert_eq!(app.transcript.items.len(), 1);
-        assert!(matches!(
-            &app.transcript.items[0],
-            crate::transcript::Item::Error(_)
-        ));
+        assert!(app.transcript.items.is_empty());
+        assert_eq!(app.toasts.len(), 1);
     }
 
     fn entry_with_efforts(
@@ -979,15 +1031,13 @@ mod tests {
     }
 
     #[test]
-    fn effort_without_model_notices() {
+    fn effort_without_model_shows_toast() {
         let mut app = App::new(Theme::dark());
         let ops = app.dispatch_slash_command("/effort");
         assert!(ops.is_empty());
         assert!(!matches!(app.overlay, Overlay::Effort(_)));
-        assert!(matches!(
-            app.transcript.items.last(),
-            Some(crate::transcript::Item::Notice(_))
-        ));
+        assert!(app.transcript.items.is_empty());
+        assert_eq!(app.toasts.len(), 1);
     }
 
     #[test]
@@ -1041,10 +1091,8 @@ mod tests {
         select_model(&mut app, "openai", "gpt");
         let ops = app.dispatch_slash_command("/effort max");
         assert!(ops.is_empty());
-        assert!(matches!(
-            app.transcript.items.last(),
-            Some(crate::transcript::Item::Error(_))
-        ));
+        assert!(app.transcript.items.is_empty());
+        assert_eq!(app.toasts.len(), 1);
     }
 
     #[test]
@@ -1116,7 +1164,7 @@ mod tests {
                     call: ToolCall {
                         id: ToolCallId(1),
                         name: "Read".to_owned(),
-                        input: "f.rs".to_owned(),
+                        display: goat_protocol::ToolDisplay::primary("f.rs"),
                     },
                     outcome: ToolOutcome {
                         ok: true,
@@ -1152,7 +1200,7 @@ mod tests {
             call: ToolCall {
                 id: ToolCallId(1),
                 name: "Agent".to_owned(),
-                input: "{}".to_owned(),
+                display: goat_protocol::ToolDisplay::primary("explore"),
             },
         });
         let child = TaskId(1 << 32);
@@ -1168,7 +1216,7 @@ mod tests {
             call: ToolCall {
                 id: ToolCallId(1),
                 name: "Grep".to_owned(),
-                input: "x".to_owned(),
+                display: goat_protocol::ToolDisplay::primary("x"),
             },
         });
         app.on_engine(EngineEvent::ToolDone {

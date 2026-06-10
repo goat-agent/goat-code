@@ -3,26 +3,18 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
 };
-
-fn hint_line<'a>(pairs: &[(&'a str, &'a str)], sep: &'a str, theme: Theme) -> Line<'a> {
-    let mut spans: Vec<Span<'a>> = vec![Span::raw("  ")];
-    for (i, (glyph, label)) in pairs.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(sep, theme.muted()));
-        }
-        spans.push(Span::styled(*glyph, theme.muted_accent()));
-        spans.push(Span::styled(*label, theme.muted()));
-    }
-    Line::from(spans)
-}
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    overlay::{centered_rect, clamp_u16, overlay_frame, selection_row},
+    layout::{OVERLAY_CHROME, OVERLAY_W},
+    overlay::{centered_rect, clamp_u16, hint_line, overlay_frame, overlay_layout, selection_row},
     symbols,
     theme::Theme,
 };
+
+const FIELD_LABEL_W: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Section {
@@ -480,6 +472,7 @@ impl Config {
     }
 
     pub fn cancel_stage(&mut self) {
+        self.error = None;
         self.stage = InputStage::List;
     }
 
@@ -494,10 +487,15 @@ impl Config {
     pub fn desired_height(&self) -> u16 {
         match self.stage {
             InputStage::List => {
-                let rows = self.provider_rows().len();
-                let blanks = self.providers.len().saturating_sub(1);
-                let content = rows + blanks + 5;
-                clamp_u16(content).clamp(10, 30)
+                let rows = match self.section {
+                    Section::Providers => {
+                        self.provider_rows().len() + self.providers.len().saturating_sub(1)
+                    }
+                    Section::Appearance => 4,
+                };
+                clamp_u16(rows.max(1))
+                    .saturating_add(OVERLAY_CHROME)
+                    .clamp(10, 30)
             }
             InputStage::Choosing { .. } => 8,
             InputStage::Adding { .. } => 9,
@@ -506,21 +504,15 @@ impl Config {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        let rect = centered_rect(area, 64, self.desired_height());
-        let Some(inner) = overlay_frame(frame, rect, theme, None) else {
+        let rect = centered_rect(area, OVERLAY_W, self.desired_height());
+        let Some(inner) = overlay_frame(frame, rect, theme) else {
             return;
         };
         match &self.stage {
             InputStage::List => {
-                let [tabs_area, gap_area, content_area] = Layout::vertical([
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Min(1),
-                ])
-                .areas(inner);
-                let _ = gap_area;
+                let (tabs_area, body_area, hint_area) = overlay_layout(inner);
                 self.render_tabs(frame, tabs_area, theme);
-                self.render_list(frame, content_area, theme);
+                self.render_list(frame, body_area, hint_area, theme);
             }
             InputStage::Adding {
                 provider,
@@ -567,30 +559,27 @@ impl Config {
             theme.muted()
         };
         let line = Line::from(vec![
-            Span::styled("  ", theme.muted()),
-            Span::styled("Providers", providers_style),
-            Span::styled("   ", theme.muted()),
-            Span::styled("Appearance", appearance_style),
+            Span::raw(" "),
+            Span::styled("providers", providers_style),
+            Span::raw("   "),
+            Span::styled("appearance", appearance_style),
         ]);
         frame.render_widget(Paragraph::new(line), area);
     }
 
-    fn render_list(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        let [body_area, hint_area] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    fn render_list(&self, frame: &mut Frame, body_area: Rect, hint_area: Rect, theme: Theme) {
         match self.section {
             Section::Providers => {
                 self.render_providers(frame, body_area, theme);
                 frame.render_widget(
                     Paragraph::new(hint_line(
                         &[
-                            (symbols::key::ARROWS_UPDOWN, " move"),
-                            (symbols::key::ENTER, " add"),
-                            (symbols::key::BACKSPACE, " remove"),
-                            (symbols::key::ARROWS_LEFTRIGHT, " section"),
-                            ("esc", " close"),
+                            (symbols::key::ARROWS_UPDOWN, "move"),
+                            (symbols::key::ENTER, "add"),
+                            (symbols::key::BACKSPACE, "remove"),
+                            (symbols::key::ARROWS_LEFTRIGHT, "section"),
+                            (symbols::key::ESC, "close"),
                         ],
-                        symbols::ui::SEPARATOR,
                         theme,
                     )),
                     hint_area,
@@ -601,12 +590,11 @@ impl Config {
                 frame.render_widget(
                     Paragraph::new(hint_line(
                         &[
-                            (symbols::key::ARROWS_UPDOWN, " move"),
-                            (symbols::key::ENTER, " toggle"),
-                            (symbols::key::ARROWS_LEFTRIGHT, " section"),
-                            ("esc", " close"),
+                            (symbols::key::ARROWS_UPDOWN, "move"),
+                            (symbols::key::ENTER, "toggle"),
+                            (symbols::key::ARROWS_LEFTRIGHT, "section"),
+                            (symbols::key::ESC, "close"),
                         ],
-                        symbols::ui::SEPARATOR,
                         theme,
                     )),
                     hint_area,
@@ -618,6 +606,7 @@ impl Config {
     fn render_providers(&self, frame: &mut Frame, area: Rect, theme: Theme) {
         let rows = self.provider_rows();
         let mut lines: Vec<Line> = Vec::new();
+        let mut cursor_line = 0usize;
         let mut seen_header = false;
         for (i, row) in rows.iter().enumerate() {
             let selected = i == self.cursor;
@@ -628,12 +617,13 @@ impl Config {
                         lines.push(Line::default());
                     }
                     seen_header = true;
-                    let mut spans = vec![Span::styled(
-                        format!("  {}", entry.provider),
-                        theme.accent(),
-                    )];
+                    let mut spans =
+                        vec![Span::styled(format!(" {}", entry.provider), theme.accent())];
                     if entry.local {
-                        spans.push(Span::styled("   local", theme.muted()));
+                        spans.push(Span::styled(
+                            format!("{}local", symbols::ui::SEPARATOR),
+                            theme.muted(),
+                        ));
                     }
                     lines.push(Line::from(spans));
                 }
@@ -641,8 +631,11 @@ impl Config {
                     let ai = row.account_index.unwrap_or(0);
                     let account = &entry.accounts[ai];
                     let name_style = if selected { theme.key() } else { theme.base() };
-                    let left = vec![Span::styled(format!("{:<18}", account.name), name_style)];
+                    let left = vec![Span::styled(account.name.clone(), name_style)];
                     let right = Some(Span::styled(method_label(account.method), theme.muted()));
+                    if selected {
+                        cursor_line = lines.len();
+                    }
                     lines.push(selection_row(
                         theme,
                         selected,
@@ -653,6 +646,9 @@ impl Config {
                 }
                 RowKind::AddAccount => {
                     let style = if selected { theme.key() } else { theme.muted() };
+                    if selected {
+                        cursor_line = lines.len();
+                    }
                     lines.push(selection_row(
                         theme,
                         selected,
@@ -663,13 +659,41 @@ impl Config {
                 }
             }
         }
-        frame.render_widget(Paragraph::new(lines), area);
+
+        let height = usize::from(area.height).max(1);
+        let total = lines.len();
+        if total <= height {
+            frame.render_widget(Paragraph::new(lines), area);
+            return;
+        }
+        let cap = height.saturating_sub(2).max(1);
+        let start = cursor_line
+            .saturating_sub(cap.saturating_sub(1))
+            .min(total - cap);
+        let mut out: Vec<Line> = Vec::new();
+        if start > 0 {
+            out.push(Line::from(Span::styled(
+                format!(" {} {} more", symbols::ui::MORE_ABOVE, start),
+                theme.muted(),
+            )));
+        }
+        out.extend(lines.into_iter().skip(start).take(cap));
+        let below = total - start - cap.min(total - start);
+        if below > 0 {
+            out.push(Line::from(Span::styled(
+                format!(" {} {} more", symbols::ui::MORE_BELOW, below),
+                theme.muted(),
+            )));
+        }
+        frame.render_widget(Paragraph::new(out), area);
     }
 
     fn render_appearance(&self, frame: &mut Frame, area: Rect, theme: Theme) {
+        let width = usize::from(area.width);
         let lines = vec![
             appearance_row(
                 theme,
+                width,
                 self.cursor == 0,
                 "theme",
                 self.dark_theme,
@@ -678,6 +702,7 @@ impl Config {
             ),
             appearance_row(
                 theme,
+                width,
                 self.cursor == 1,
                 "mouse",
                 self.mouse_capture,
@@ -686,6 +711,7 @@ impl Config {
             ),
             appearance_row(
                 theme,
+                width,
                 self.cursor == 2,
                 "computer use",
                 self.computer_use,
@@ -694,6 +720,7 @@ impl Config {
             ),
             appearance_row(
                 theme,
+                width,
                 self.cursor == 3,
                 "browser",
                 self.browser,
@@ -707,13 +734,13 @@ impl Config {
 
 fn appearance_row(
     theme: Theme,
+    width: usize,
     selected: bool,
     label: &str,
     first_active: bool,
     first: &str,
     second: &str,
 ) -> Line<'static> {
-    let marker = if selected { symbols::ui::CARET } else { "  " };
     let label_style = if selected { theme.key() } else { theme.base() };
     let first_dot = if first_active {
         symbols::ui::DOT_FULL
@@ -735,12 +762,17 @@ fn appearance_row(
     } else {
         theme.accent()
     };
-    Line::from(vec![
-        Span::styled(marker, theme.accent()),
-        Span::styled(format!("{label:<12}"), label_style),
-        Span::styled(format!("{first_dot} {first:<6}"), first_style),
-        Span::styled(format!("{second_dot} {second}"), second_style),
-    ])
+    selection_row(
+        theme,
+        selected,
+        width,
+        vec![
+            Span::styled(format!("{label:<12}"), label_style),
+            Span::styled(format!("{first_dot} {first:<6}"), first_style),
+            Span::styled(format!("{second_dot} {second}"), second_style),
+        ],
+        None,
+    )
 }
 
 fn method_label(method: AuthMethod) -> &'static str {
@@ -780,30 +812,33 @@ fn render_adding(
     .areas(area);
 
     let title = Line::from(vec![
-        Span::styled(format!("  {provider}"), theme.key()),
+        Span::styled(format!(" {provider}"), theme.key()),
         Span::styled(
-            format!("{} new account", symbols::ui::SEPARATOR),
+            format!("{}new account", symbols::ui::SEPARATOR),
             theme.muted(),
         ),
     ]);
     frame.render_widget(Paragraph::new(title), title_area);
 
     let api_key = !matches!(method, AuthMethod::OAuth);
+    let value_cols = usize::from(area.width).saturating_sub(3 + FIELD_LABEL_W + 1);
     let name_active = field == Field::Name;
     let name_label_style = if name_active {
         theme.accent()
     } else {
         theme.muted()
     };
+    let shown_name = input_tail(name, value_cols);
+    let name_cols = shown_name.width();
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("    name   ", name_label_style),
-            Span::styled(name.to_owned(), theme.base()),
+            Span::styled(format!("   {:<FIELD_LABEL_W$}", "name"), name_label_style),
+            Span::styled(shown_name, theme.base()),
         ])),
         name_area,
     );
     if name_active {
-        place_cursor(frame, name_area, 11, name.chars().count());
+        place_cursor(frame, name_area, name_cols);
     }
 
     if api_key {
@@ -813,25 +848,27 @@ fn render_adding(
         } else {
             theme.muted()
         };
-        let masked = symbols::ui::MASK.repeat(key.chars().count());
+        let mask_cols = key.chars().count().min(value_cols);
+        let masked = symbols::ui::MASK.repeat(mask_cols);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("    key    ", key_label_style),
+                Span::styled(format!("   {:<FIELD_LABEL_W$}", "key"), key_label_style),
                 Span::styled(masked, theme.base()),
             ])),
             key_area,
         );
         if key_active {
-            place_cursor(frame, key_area, 11, key.chars().count());
+            place_cursor(frame, key_area, mask_cols);
         }
     }
 
     if let Some(message) = error {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                format!("    {} {message}", symbols::ui::CROSS),
+                format!("   {} {message}", symbols::ui::CROSS),
                 theme.error(),
-            ))),
+            )))
+            .wrap(Wrap { trim: false }),
             error_area,
         );
     }
@@ -840,11 +877,10 @@ fn render_adding(
         frame.render_widget(
             Paragraph::new(hint_line(
                 &[
-                    (symbols::key::ENTER, " save"),
-                    (symbols::key::TAB, " next field"),
-                    ("esc", " cancel"),
+                    (symbols::key::ENTER, "save"),
+                    (symbols::key::TAB, "next field"),
+                    (symbols::key::ESC, "cancel"),
                 ],
-                symbols::ui::SEPARATOR,
                 theme,
             )),
             hint_area,
@@ -852,8 +888,10 @@ fn render_adding(
     } else {
         frame.render_widget(
             Paragraph::new(hint_line(
-                &[(symbols::key::ENTER, " open browser"), ("esc", " cancel")],
-                symbols::ui::SEPARATOR,
+                &[
+                    (symbols::key::ENTER, "open browser"),
+                    (symbols::key::ESC, "cancel"),
+                ],
                 theme,
             )),
             hint_area,
@@ -861,10 +899,26 @@ fn render_adding(
     }
 }
 
-fn place_cursor(frame: &mut Frame, area: Rect, prefix: u16, value_len: usize) {
-    let col = u16::try_from(value_len)
-        .unwrap_or(u16::MAX)
-        .saturating_add(prefix);
+fn input_tail(value: &str, max_cols: usize) -> String {
+    if value.width() <= max_cols {
+        return value.to_owned();
+    }
+    let mut cols = 0usize;
+    let mut tail: Vec<char> = Vec::new();
+    for c in value.chars().rev() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if cols + w > max_cols {
+            break;
+        }
+        cols += w;
+        tail.push(c);
+    }
+    tail.iter().rev().collect()
+}
+
+fn place_cursor(frame: &mut Frame, area: Rect, value_cols: usize) {
+    let prefix = clamp_u16(3 + FIELD_LABEL_W);
+    let col = clamp_u16(value_cols).saturating_add(prefix);
     let x = area.x + col.min(area.width.saturating_sub(1));
     frame.set_cursor_position((x, area.y));
 }
@@ -879,14 +933,14 @@ fn render_waiting(
 ) {
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(format!("  {provider}"), theme.key()),
-            Span::styled(" \u{b7} ", theme.muted()),
+            Span::styled(format!(" {provider}"), theme.key()),
+            Span::styled(symbols::ui::SEPARATOR, theme.muted()),
             Span::styled(name.to_owned(), theme.base()),
         ]),
         Line::from(Span::raw("")),
     ];
     if let Some(msg) = status {
-        lines.push(Line::from(Span::styled(format!("  {msg}"), theme.muted())));
+        lines.push(Line::from(Span::styled(format!("   {msg}"), theme.muted())));
     }
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -909,18 +963,24 @@ fn render_choosing(
     .areas(area);
 
     let title = Line::from(vec![
-        Span::styled(format!("  {provider}"), theme.key()),
-        Span::styled(" \u{b7} sign in with", theme.muted()),
+        Span::styled(format!(" {provider}"), theme.key()),
+        Span::styled(
+            format!("{}sign in with", symbols::ui::SEPARATOR),
+            theme.muted(),
+        ),
     ]);
     frame.render_widget(Paragraph::new(title), title_area);
 
+    let width = usize::from(area.width);
     let row = |selected: bool, label: &str| {
-        let (marker, style) = if selected {
-            ("  \u{203a} ", theme.accent())
-        } else {
-            ("    ", theme.base())
-        };
-        Line::from(Span::styled(format!("{marker}{label}"), style))
+        let style = if selected { theme.key() } else { theme.base() };
+        selection_row(
+            theme,
+            selected,
+            width,
+            vec![Span::styled(label.to_owned(), style)],
+            None,
+        )
     };
     frame.render_widget(
         Paragraph::new(row(matches!(method, AuthMethod::ApiKey), "api key")),
@@ -933,11 +993,10 @@ fn render_choosing(
     frame.render_widget(
         Paragraph::new(hint_line(
             &[
-                (symbols::key::ARROWS_UPDOWN, " choose"),
-                (symbols::key::ENTER, " continue"),
-                ("esc", " cancel"),
+                (symbols::key::ARROWS_UPDOWN, "choose"),
+                (symbols::key::ENTER, "continue"),
+                (symbols::key::ESC, "cancel"),
             ],
-            symbols::ui::SEPARATOR,
             theme,
         )),
         hint_area,

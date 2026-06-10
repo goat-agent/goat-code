@@ -1,5 +1,3 @@
-use goat_protocol::ToolOutcome;
-
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
     #[error("unknown tool: {name}")]
@@ -37,43 +35,4 @@ pub enum ToolError {
     Cwd { source: std::io::Error },
     #[error("{message}")]
     Execution { message: String },
-}
-
-pub fn outcome_from(result: &Result<crate::ToolOutput, ToolError>) -> (ToolOutcome, String) {
-    match result {
-        Ok(crate::ToolOutput::Text(text)) => (
-            ToolOutcome {
-                ok: true,
-                summary: summarize(text),
-            },
-            text.clone(),
-        ),
-        Ok(crate::ToolOutput::Image(_)) => (
-            ToolOutcome {
-                ok: true,
-                summary: Some("[image]".to_owned()),
-            },
-            "[image]".to_owned(),
-        ),
-        Err(err) => {
-            let msg = err.to_string();
-            (
-                ToolOutcome {
-                    ok: false,
-                    summary: Some(msg.clone()),
-                },
-                msg,
-            )
-        }
-    }
-}
-
-fn summarize(text: &str) -> Option<String> {
-    text.lines().next().map(|line| {
-        if line.len() > 80 {
-            format!("{}…", &line[..line.floor_char_boundary(80)])
-        } else {
-            line.to_owned()
-        }
-    })
 }

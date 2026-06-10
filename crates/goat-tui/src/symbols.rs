@@ -2,7 +2,6 @@ pub mod marker {
     pub const USER: &str = "› ";
     pub const AGENT: &str = "● ";
     pub const NOTICE: &str = "→ ";
-    pub const OK: &str = "✓ ";
     pub const ERROR: &str = "✗ ";
 }
 
@@ -17,7 +16,7 @@ pub mod ui {
     pub const SEPARATOR: &str = " · ";
     pub const ELLIPSIS: &str = "…";
     pub const CODE_GUTTER: &str = "│ ";
-    pub const QUOTE_GUTTER: &str = "│ ";
+    pub const QUOTE_GUTTER: &str = "▎ ";
     pub const RULE: &str = "──────────";
     pub const MORE_ABOVE: &str = "↑";
     pub const MORE_BELOW: &str = "↓";
@@ -29,7 +28,7 @@ pub mod ui {
 
 pub mod key {
     pub const CTRL: &str = "⌃";
-    pub const ESC: &str = "⎋";
+    pub const ESC: &str = "esc";
     pub const SHIFT: &str = "⇧";
     pub const ENTER: &str = "↵";
     pub const TAB: &str = "⇥";

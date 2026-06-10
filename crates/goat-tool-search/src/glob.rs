@@ -37,6 +37,17 @@ impl Tool for GlobTool {
         })
     }
 
+    fn display_input(&self, input: &str) -> goat_protocol::ToolDisplay {
+        let Ok(args) = serde_json::from_str::<Input>(input) else {
+            return goat_tool::display::generic(input);
+        };
+        let pattern = goat_tool::display::flatten(&args.pattern);
+        match args.path.filter(|p| !p.is_empty() && p != ".") {
+            Some(path) => goat_protocol::ToolDisplay::with_detail(pattern, path),
+            None => goat_protocol::ToolDisplay::primary(pattern),
+        }
+    }
+
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
@@ -61,26 +72,29 @@ const MAX_GLOB_RESULTS: usize = 1000;
 fn walk(cwd: &std::path::Path, root: &std::path::Path, pattern: &str) -> Result<String, ToolError> {
     let mut overrides = OverrideBuilder::new(root);
     overrides.add(pattern).map_err(|err| ignore_error(&err))?;
-    let built = overrides.build().map_err(|err| ignore_error(&err))?;
+    let matcher = overrides.build().map_err(|err| ignore_error(&err))?;
 
-    let mut matches = Vec::new();
+    let mut found = Vec::new();
     let mut builder = WalkBuilder::new(root);
-    builder.require_git(false).overrides(built);
+    builder.require_git(false);
     for entry in builder.build() {
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
-        matches.push(relative_display(cwd, entry.path()));
+        if !matcher.matched(entry.path(), false).is_whitelist() {
+            continue;
+        }
+        found.push(relative_display(cwd, entry.path()));
     }
 
-    if matches.is_empty() {
+    if found.is_empty() {
         return Ok("no files".to_owned());
     }
-    matches.sort();
-    let total = matches.len();
-    matches.truncate(MAX_GLOB_RESULTS);
-    let mut out = matches.join("\n");
+    found.sort();
+    let total = found.len();
+    found.truncate(MAX_GLOB_RESULTS);
+    let mut out = found.join("\n");
     if total > MAX_GLOB_RESULTS {
         let _ = write!(
             out,
@@ -112,6 +126,7 @@ mod tests {
         assert!(text.contains("a.rs"));
         assert!(text.contains("b.rs"));
         assert!(!text.contains("c.txt"));
+        assert_eq!(out.summary, None);
     }
 
     #[tokio::test]
@@ -121,6 +136,15 @@ mod tests {
         let ctx = ctx(dir.path());
         let out = GlobTool.run(r#"{"pattern":"*.rs"}"#, &ctx).await.unwrap();
         assert_eq!(out.as_text().unwrap(), "no files");
+        assert_eq!(out.summary, None);
+    }
+
+    #[test]
+    fn display_omits_trivial_scope() {
+        use goat_tool::Tool;
+        let display = GlobTool.display_input(r#"{"pattern":"*.rs","path":"."}"#);
+        assert_eq!(display.primary, "*.rs");
+        assert_eq!(display.detail, None);
     }
 
     #[tokio::test]

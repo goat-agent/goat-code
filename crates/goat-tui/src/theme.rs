@@ -1,5 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::layout::{METER_HIGH, METER_WARN};
+
 #[derive(Debug, Clone, Copy)]
 pub struct CodePalette {
     pub bg: Color,
@@ -22,6 +24,8 @@ pub struct Theme {
     muted: Color,
     accent: Color,
     border: Color,
+    selection: Color,
+    panel: Color,
     pub code: CodePalette,
 }
 
@@ -43,6 +47,8 @@ impl Theme {
             muted: Color::Rgb(0x6b, 0x70, 0x7c),
             accent: Color::Rgb(0xbb, 0x9a, 0xf7),
             border: Color::Rgb(0x2a, 0x2c, 0x32),
+            selection: Color::Rgb(0x2f, 0x33, 0x3e),
+            panel: Color::Rgb(0x1b, 0x1b, 0x1e),
             code: CodePalette {
                 bg: Color::Rgb(0x1a, 0x1b, 0x26),
                 keyword: Color::Rgb(0xbb, 0x9a, 0xf7),
@@ -66,6 +72,8 @@ impl Theme {
             muted: Color::Rgb(0x8a, 0x8f, 0x98),
             accent: Color::Rgb(0x6a, 0x3d, 0xc9),
             border: Color::Rgb(0xd9, 0xdc, 0xe1),
+            selection: Color::Rgb(0xdd, 0xe3, 0xec),
+            panel: Color::Rgb(0xee, 0xee, 0xf0),
             code: CodePalette {
                 bg: Color::Rgb(0xf0, 0xf0, 0xf5),
                 keyword: Color::Rgb(0x6a, 0x3d, 0xc9),
@@ -91,7 +99,7 @@ impl Theme {
     }
 
     pub fn accent(self) -> Style {
-        Style::new().fg(self.accent).add_modifier(Modifier::BOLD)
+        Style::new().fg(self.accent)
     }
 
     pub fn border(self) -> Style {
@@ -99,15 +107,15 @@ impl Theme {
     }
 
     pub fn role_user(self) -> Style {
-        Style::new().fg(self.user).add_modifier(Modifier::BOLD)
+        Style::new().fg(self.user)
     }
 
     pub fn role_agent(self) -> Style {
-        Style::new().fg(self.agent).add_modifier(Modifier::BOLD)
+        Style::new().fg(self.agent)
     }
 
     pub fn role_tool(self) -> Style {
-        Style::new().fg(self.tool).add_modifier(Modifier::BOLD)
+        Style::new().fg(self.tool)
     }
 
     pub fn tool_name(self) -> Style {
@@ -115,11 +123,21 @@ impl Theme {
     }
 
     pub fn selected_row(self) -> Style {
-        Style::new().bg(self.border)
+        Style::new().bg(self.selection)
     }
 
     pub fn error(self) -> Style {
-        Style::new().fg(self.error).add_modifier(Modifier::BOLD)
+        Style::new().fg(self.error)
+    }
+
+    pub fn meter(self, pct: f32) -> Style {
+        if pct >= METER_HIGH {
+            self.error()
+        } else if pct >= METER_WARN {
+            self.tool_name()
+        } else {
+            self.muted()
+        }
     }
 
     pub fn code_plain(self) -> Style {
@@ -134,12 +152,12 @@ impl Theme {
         self.accent
     }
 
-    pub fn muted_accent(self) -> Style {
-        Style::new().fg(self.muted).add_modifier(Modifier::BOLD)
+    pub fn hint_key(self) -> Style {
+        Style::new().fg(self.fg)
     }
 
-    pub fn surface(self) -> Style {
-        Style::new().fg(self.fg).bg(self.code.bg)
+    pub fn panel(self) -> Style {
+        Style::new().fg(self.fg).bg(self.panel)
     }
 
     pub fn is_dark(self) -> bool {

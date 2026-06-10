@@ -1,4 +1,5 @@
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput};
+use goat_protocol::ToolDisplay;
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display};
 
 use crate::action::{self, Action};
 use crate::session::{self, SessionHandle};
@@ -47,6 +48,30 @@ impl Tool for BrowserTool {
             },
             "required": ["action"]
         })
+    }
+
+    fn display_input(&self, input: &str) -> ToolDisplay {
+        let Ok(action) = action::parse(input) else {
+            return display::generic(input);
+        };
+        match action {
+            Action::Navigate { url } => ToolDisplay::with_detail("navigate", url),
+            Action::Snapshot => ToolDisplay::primary("snapshot"),
+            Action::Click { reference } => ToolDisplay::with_detail("click", reference),
+            Action::Type {
+                reference, text, ..
+            } => ToolDisplay::with_detail(
+                "type",
+                format!("{reference} · {}", display::flatten(&text)),
+            ),
+            Action::Select { reference, value } => {
+                ToolDisplay::with_detail("select", format!("{reference} · {value}"))
+            }
+            Action::PressKey { key } => ToolDisplay::with_detail("press key", key),
+            Action::Evaluate { js } => ToolDisplay::with_detail("evaluate", display::flatten(&js)),
+            Action::Screenshot => ToolDisplay::primary("screenshot"),
+            Action::Close => ToolDisplay::primary("close"),
+        }
     }
 
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {

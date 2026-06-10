@@ -259,7 +259,7 @@ fn heading_style(level: HeadingLevel, theme: Theme) -> ratatui::style::Style {
     match level {
         HeadingLevel::H1 => theme.accent().add_modifier(Modifier::BOLD),
         HeadingLevel::H2 => theme.accent(),
-        _ => theme.muted(),
+        _ => theme.key(),
     }
 }
 
@@ -522,7 +522,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l.spans.first().is_some_and(|s| s.content.contains('│')))
+                .any(|l| l.spans.first().is_some_and(|s| s.content.contains('▎')))
         );
     }
 

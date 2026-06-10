@@ -3,8 +3,9 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Paragraph},
+    widgets::{Clear, Paragraph},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{symbols, theme::Theme};
 
@@ -15,7 +16,7 @@ pub struct Toast {
 }
 
 const TOAST_TICKS: u16 = 33;
-const TOAST_HEIGHT: u16 = 3;
+const TOAST_HEIGHT: u16 = 1;
 const TOAST_GAP: u16 = 1;
 const MIN_WIDTH: u16 = 12;
 
@@ -64,9 +65,10 @@ pub fn render(frame: &mut Frame, area: Rect, theme: Theme, toasts: &[Toast]) {
         if y.saturating_add(TOAST_HEIGHT) > area.bottom() {
             break;
         }
-        let message_width = u16::try_from(toast.message.chars().count()).unwrap_or(u16::MAX);
-        let width = message_width.saturating_add(8).clamp(MIN_WIDTH, max_width);
-        let x = area.right().saturating_sub(width).saturating_sub(2);
+        let message_width =
+            u16::try_from(UnicodeWidthStr::width(toast.message.as_str())).unwrap_or(u16::MAX);
+        let width = message_width.saturating_add(4).clamp(MIN_WIDTH, max_width);
+        let x = area.right().saturating_sub(width).saturating_sub(1);
         let rect = Rect {
             x,
             y,
@@ -74,19 +76,13 @@ pub fn render(frame: &mut Frame, area: Rect, theme: Theme, toasts: &[Toast]) {
             height: TOAST_HEIGHT,
         };
         frame.render_widget(Clear, rect);
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(theme.border())
-            .style(theme.base());
-        let inner = block.inner(rect);
-        frame.render_widget(block, rect);
         let line = Line::from(vec![
-            Span::styled(" ", theme.base()),
+            Span::raw(" "),
             Span::styled(toast.icon(), toast.icon_style(theme)),
-            Span::styled("  ", theme.base()),
-            Span::styled(toast.message.clone(), theme.base()),
+            Span::raw(" "),
+            Span::raw(toast.message.clone()),
         ]);
-        frame.render_widget(Paragraph::new(line), inner);
+        frame.render_widget(Paragraph::new(line).style(theme.panel()), rect);
         y = y.saturating_add(TOAST_HEIGHT + TOAST_GAP);
     }
 }

@@ -7,7 +7,7 @@ use ratatui::{
 use unicode_normalization::UnicodeNormalization;
 use unicode_width::UnicodeWidthChar;
 
-use crate::theme::Theme;
+use crate::{symbols, theme::Theme};
 
 const PROMPT_COLS: u16 = 2;
 const PLACEHOLDER: &str = "Ask anything…";
@@ -304,7 +304,7 @@ impl Composer {
         if self.is_empty() {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("› ", theme.accent()),
+                    Span::styled(symbols::marker::USER, theme.accent()),
                     Span::styled(PLACEHOLDER, theme.muted()),
                 ])),
                 inner,
@@ -321,7 +321,7 @@ impl Composer {
             .iter()
             .enumerate()
             .map(|(i, chars)| {
-                let prompt = if i == 0 { "› " } else { "  " };
+                let prompt = if i == 0 { symbols::marker::USER } else { "  " };
                 let body: String = chars.iter().collect();
                 Line::from(vec![
                     Span::styled(prompt, theme.accent()),

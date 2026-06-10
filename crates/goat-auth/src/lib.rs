@@ -222,7 +222,15 @@ pub async fn capture_loopback_code(port: u16, expected_state: &str) -> Result<St
     capture_on(listener, expected_state).await
 }
 
+const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
+
 pub async fn capture_on(listener: TcpListener, expected_state: &str) -> Result<String, AuthError> {
+    tokio::time::timeout(LOGIN_TIMEOUT, capture_loop(listener, expected_state))
+        .await
+        .map_err(|_| AuthError::OAuth("login timed out".to_owned()))?
+}
+
+async fn capture_loop(listener: TcpListener, expected_state: &str) -> Result<String, AuthError> {
     loop {
         let (mut stream, _) = listener.accept().await?;
         let mut buf = vec![0u8; 8192];

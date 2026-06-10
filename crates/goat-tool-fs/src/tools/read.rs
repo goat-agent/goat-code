@@ -1,6 +1,9 @@
 use std::fmt::Write as _;
 
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, path::resolve_in_cwd};
+use goat_protocol::ToolDisplay;
+use goat_tool::{
+    Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display, path::resolve_in_cwd,
+};
 use serde::Deserialize;
 
 pub struct ReadTool;
@@ -31,6 +34,13 @@ impl Tool for ReadTool {
             },
             "required": ["path"]
         })
+    }
+
+    fn display_input(&self, input: &str) -> ToolDisplay {
+        match serde_json::from_str::<Input>(input) {
+            Ok(args) => ToolDisplay::primary(display::flatten(&args.path)),
+            Err(_) => display::generic(input),
+        }
     }
 
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
@@ -86,6 +96,22 @@ mod tests {
 
     fn ctx(dir: &std::path::Path) -> ToolContext {
         ToolContext::new(dir).unwrap()
+    }
+
+    #[test]
+    fn display_shows_path_without_range() {
+        let display = ReadTool.display_input(r#"{"path":"a.txt","offset":120,"limit":50}"#);
+        assert_eq!(display.primary, "a.txt");
+        assert_eq!(display.detail, None);
+    }
+
+    #[tokio::test]
+    async fn read_has_no_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let ctx = ctx(dir.path());
+        let out = ReadTool.run(r#"{"path":"a.txt"}"#, &ctx).await.unwrap();
+        assert_eq!(out.summary, None);
     }
 
     #[tokio::test]

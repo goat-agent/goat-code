@@ -3,28 +3,20 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, BorderType, Paragraph},
+    widgets::Paragraph,
 };
 use unicode_normalization::UnicodeNormalization;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    overlay::{centered_rect, clamp_u16, overflow_hint, overlay_frame, selection_row},
+    layout::{LIST_MAX, OVERLAY_CHROME, OVERLAY_CHROME_PLAIN, OVERLAY_W},
+    overlay::{
+        centered_rect, clamp_u16, hint_line, overflow_hint, overlay_frame, overlay_layout,
+        overlay_layout_plain, selection_row,
+    },
     symbols,
     theme::Theme,
 };
-
-fn hint_line<'a>(pairs: &[(&'a str, &'a str)], sep: &'a str, theme: Theme) -> Line<'a> {
-    let mut spans: Vec<Span<'a>> = vec![Span::raw(" ")];
-    for (i, (glyph, label)) in pairs.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(sep, theme.muted()));
-        }
-        spans.push(Span::styled(*glyph, theme.muted_accent()));
-        spans.push(Span::styled(*label, theme.muted()));
-    }
-    Line::from(spans)
-}
 
 pub enum PickerOutcome {
     NoOp,
@@ -149,19 +141,16 @@ impl Picker {
     }
 
     pub fn desired_height(&self) -> u16 {
-        if let Some(account) = &self.account {
-            return clamp_u16(account.choices.len().max(1))
-                .min(10)
-                .saturating_add(6);
-        }
-        let rows = clamp_u16(self.matches.len().max(1)).min(12);
-        rows.saturating_add(6)
+        let rows = match &self.account {
+            Some(account) => account.choices.len().max(1),
+            None => self.matches.len().max(1),
+        };
+        clamp_u16(rows.min(LIST_MAX)).saturating_add(OVERLAY_CHROME)
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        let rect = centered_rect(area, 64, self.desired_height());
-        let Some(inner) = overlay_frame(frame, rect, theme, None) else {
+        let rect = centered_rect(area, OVERLAY_W, self.desired_height());
+        let Some(inner) = overlay_frame(frame, rect, theme) else {
             return;
         };
 
@@ -170,17 +159,10 @@ impl Picker {
             return;
         }
 
-        let [input_area, _, list_area, _, hint_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
+        let (input_area, list_area, hint_area) = overlay_layout(inner);
 
         let input_line = if self.query.is_empty() {
-            Line::from(Span::styled(" Search models", theme.muted()))
+            Line::from(Span::styled(" search models", theme.muted()))
         } else {
             Line::from(Span::styled(format!(" {}", self.query), theme.base()))
         };
@@ -252,17 +234,16 @@ impl Picker {
         frame.render_widget(
             Paragraph::new(hint_line(
                 &[
-                    (symbols::key::ARROWS_UPDOWN, " navigate"),
-                    (symbols::key::ENTER, " select"),
-                    ("esc", " close"),
+                    (symbols::key::ARROWS_UPDOWN, "navigate"),
+                    (symbols::key::ENTER, "select"),
+                    (symbols::key::ESC, "close"),
                 ],
-                symbols::ui::SEPARATOR,
                 theme,
             )),
             hint_area,
         );
 
-        let col = 1 + self.query.chars().count();
+        let col = 1 + self.query.width();
         let x = input_area.x + clamp_u16(col);
         frame.set_cursor_position((x.min(input_area.right().saturating_sub(1)), input_area.y));
     }
@@ -294,7 +275,7 @@ impl EffortPicker {
     }
 
     fn cap(&self) -> usize {
-        self.options.len().min(8)
+        self.options.len().min(LIST_MAX)
     }
 
     pub fn move_up(&mut self) {
@@ -327,29 +308,22 @@ impl EffortPicker {
     }
 
     pub fn desired_height(&self) -> u16 {
-        clamp_u16(self.cap().max(1)).saturating_add(6)
+        clamp_u16(self.cap().max(1)).saturating_add(OVERLAY_CHROME)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        let rect = centered_rect(area, 48, self.desired_height());
-        let Some(inner) = overlay_frame(frame, rect, theme, None) else {
+        let rect = centered_rect(area, OVERLAY_W, self.desired_height());
+        let Some(inner) = overlay_frame(frame, rect, theme) else {
             return;
         };
-        let [title_area, _, list_area, _, hint_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
+        let (context_area, list_area, hint_area) = overlay_layout(inner);
 
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(" reasoning effort", theme.key()),
-                Span::styled(format!("  {}", self.label), theme.muted()),
-            ])),
-            title_area,
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {}", self.label),
+                theme.muted(),
+            ))),
+            context_area,
         );
 
         let width = usize::from(list_area.width);
@@ -379,11 +353,10 @@ impl EffortPicker {
         frame.render_widget(
             Paragraph::new(hint_line(
                 &[
-                    (symbols::key::ARROWS_UPDOWN, " navigate"),
-                    (symbols::key::ENTER, " select"),
-                    ("esc", " close"),
+                    (symbols::key::ARROWS_UPDOWN, "navigate"),
+                    (symbols::key::ENTER, "select"),
+                    (symbols::key::ESC, "close"),
                 ],
-                symbols::ui::SEPARATOR,
                 theme,
             )),
             hint_area,
@@ -412,12 +385,12 @@ impl ThreadPicker {
     }
 
     fn cap(&self) -> usize {
-        self.threads.len().min(8)
+        self.threads.len().min(LIST_MAX)
     }
 
     fn visible_items(&self) -> usize {
         let cap = self.cap();
-        if self.threads.len() > 8 {
+        if self.threads.len() > LIST_MAX {
             cap.saturating_sub(2)
         } else {
             cap
@@ -454,30 +427,15 @@ impl ThreadPicker {
     }
 
     pub fn desired_height(&self) -> u16 {
-        clamp_u16(self.cap().max(1)).saturating_add(6)
+        clamp_u16(self.cap().max(1)).saturating_add(OVERLAY_CHROME_PLAIN)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        let rect = centered_rect(area, 72, self.desired_height());
-        let Some(inner) = overlay_frame(frame, rect, theme, None) else {
+        let rect = centered_rect(area, OVERLAY_W, self.desired_height());
+        let Some(inner) = overlay_frame(frame, rect, theme) else {
             return;
         };
-        let [title_area, _, list_area, _, hint_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
-
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                " resume conversation",
-                theme.key(),
-            ))),
-            title_area,
-        );
+        let (list_area, hint_area) = overlay_layout_plain(inner);
 
         let width = usize::from(list_area.width);
         let rows = usize::from(list_area.height).max(1);
@@ -528,11 +486,10 @@ impl ThreadPicker {
         frame.render_widget(
             Paragraph::new(hint_line(
                 &[
-                    (symbols::key::ARROWS_UPDOWN, " navigate"),
-                    (symbols::key::ENTER, " resume"),
-                    ("esc", " close"),
+                    (symbols::key::ARROWS_UPDOWN, "navigate"),
+                    (symbols::key::ENTER, "resume"),
+                    (symbols::key::ESC, "close"),
                 ],
-                symbols::ui::SEPARATOR,
                 theme,
             )),
             hint_area,
@@ -541,24 +498,17 @@ impl ThreadPicker {
 }
 
 fn render_account(frame: &mut Frame, inner: Rect, theme: Theme, account: &AccountPicker) {
-    let [title_area, _, list_area, _, hint_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
+    let (context_area, list_area, hint_area) = overlay_layout(inner);
 
     let model_label = account.choices.first().map_or_else(String::new, |c| {
         format!("{}/{}", c.target.provider, c.target.model)
     });
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" select account", theme.key()),
-            Span::styled(format!("  {model_label}"), theme.muted()),
-        ])),
-        title_area,
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {model_label}"),
+            theme.muted(),
+        ))),
+        context_area,
     );
 
     let width = usize::from(list_area.width);
@@ -585,11 +535,10 @@ fn render_account(frame: &mut Frame, inner: Rect, theme: Theme, account: &Accoun
     frame.render_widget(
         Paragraph::new(hint_line(
             &[
-                (symbols::key::ARROWS_UPDOWN, " navigate"),
-                (symbols::key::ENTER, " select"),
-                ("esc", " back"),
+                (symbols::key::ARROWS_UPDOWN, "navigate"),
+                (symbols::key::ENTER, "select"),
+                (symbols::key::ESC, "back"),
             ],
-            symbols::ui::SEPARATOR,
             theme,
         )),
         hint_area,
@@ -783,11 +732,11 @@ impl AskPicker {
     pub fn desired_height(&self) -> u16 {
         if self.confirming {
             let rows = clamp_u16(self.questions.len() * 2);
-            rows.saturating_add(6)
+            rows.saturating_add(OVERLAY_CHROME)
         } else {
             let q = &self.questions[self.current_q];
-            let rows = clamp_u16(q.options.len() + 1).min(12);
-            rows.saturating_add(6)
+            let rows = clamp_u16(q.options.len() + 1).min(clamp_u16(LIST_MAX));
+            rows.saturating_add(OVERLAY_CHROME)
         }
     }
 
@@ -795,23 +744,13 @@ impl AskPicker {
         let panel_h = self.desired_height();
         let [_, outer] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(panel_h)]).areas(area);
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(theme.border())
-            .style(theme.base());
-        let inner = block.inner(outer);
-        frame.render_widget(block, outer);
+        let Some(inner) = overlay_frame(frame, outer, theme) else {
+            return;
+        };
         if self.confirming {
             self.render_confirm(frame, inner, theme);
         } else {
-            let [title_area, _, list_area, _, hint_area] = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .areas(inner);
+            let (title_area, list_area, hint_area) = overlay_layout(inner);
             self.render_title(frame, title_area, theme);
             self.render_list(frame, list_area, theme);
             self.render_hint(frame, hint_area, theme);
@@ -887,16 +826,9 @@ impl AskPicker {
     }
 
     fn render_confirm(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        let [title_area, _, list_area, _, hint_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let (title_area, list_area, hint_area) = overlay_layout(area);
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(" Confirm", theme.muted()))),
+            Paragraph::new(Line::from(Span::styled(" confirm", theme.muted()))),
             title_area,
         );
         let mut lines: Vec<Line> = Vec::new();
@@ -919,11 +851,10 @@ impl AskPicker {
         frame.render_widget(
             Paragraph::new(hint_line(
                 &[
-                    (symbols::key::ENTER, " submit"),
-                    ("←", " edit"),
-                    ("esc", " cancel"),
+                    (symbols::key::ENTER, "submit"),
+                    (symbols::key::ARROW_LEFT, "edit"),
+                    (symbols::key::ESC, "cancel"),
                 ],
-                symbols::ui::SEPARATOR,
                 theme,
             )),
             hint_area,
@@ -934,30 +865,30 @@ impl AskPicker {
         let total = self.questions.len();
         let hint = if self.typing {
             hint_line(
-                &[(symbols::key::ENTER, " confirm"), ("esc", " back")],
-                symbols::ui::SEPARATOR,
+                &[
+                    (symbols::key::ENTER, "confirm"),
+                    (symbols::key::ESC, "back"),
+                ],
                 theme,
             )
         } else if total > 1 {
             hint_line(
                 &[
-                    (symbols::key::ARROWS_UPDOWN, " navigate"),
-                    (symbols::key::ENTER, " next"),
-                    ("→", " skip"),
-                    ("←", " back"),
-                    ("esc", " cancel"),
+                    (symbols::key::ARROWS_UPDOWN, "navigate"),
+                    (symbols::key::ENTER, "next"),
+                    (symbols::key::ARROW_RIGHT, "skip"),
+                    (symbols::key::ARROW_LEFT, "back"),
+                    (symbols::key::ESC, "cancel"),
                 ],
-                symbols::ui::SEPARATOR,
                 theme,
             )
         } else {
             hint_line(
                 &[
-                    (symbols::key::ARROWS_UPDOWN, " navigate"),
-                    (symbols::key::ENTER, " select"),
-                    ("esc", " cancel"),
+                    (symbols::key::ARROWS_UPDOWN, "navigate"),
+                    (symbols::key::ENTER, "select"),
+                    (symbols::key::ESC, "cancel"),
                 ],
-                symbols::ui::SEPARATOR,
                 theme,
             )
         };

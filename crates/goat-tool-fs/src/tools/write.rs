@@ -1,4 +1,7 @@
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, path::resolve_in_cwd};
+use goat_protocol::ToolDisplay;
+use goat_tool::{
+    Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display, path::resolve_in_cwd,
+};
 use serde::Deserialize;
 
 use crate::tools::relative_display;
@@ -31,6 +34,13 @@ impl Tool for WriteTool {
         })
     }
 
+    fn display_input(&self, input: &str) -> ToolDisplay {
+        match serde_json::from_str::<Input>(input) {
+            Ok(args) => ToolDisplay::primary(display::flatten(&args.path)),
+            Err(_) => display::generic(input),
+        }
+    }
+
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
@@ -43,7 +53,7 @@ impl Tool for WriteTool {
                         source,
                     })?;
             }
-            let bytes = args.content.len();
+            let line_count = args.content.lines().count();
             tokio::fs::write(&resolved, args.content.as_bytes())
                 .await
                 .map_err(|source| ToolError::Io {
@@ -51,7 +61,11 @@ impl Tool for WriteTool {
                     source,
                 })?;
             let rel = relative_display(&ctx.cwd, &resolved);
-            Ok(ToolOutput::text(format!("wrote {bytes} bytes to {rel}")))
+            let unit = if line_count == 1 { "line" } else { "lines" };
+            Ok(
+                ToolOutput::text(format!("wrote {rel} ({line_count} {unit})"))
+                    .with_summary(format!("{line_count} {unit}")),
+            )
         })
     }
 }
@@ -73,7 +87,8 @@ mod tests {
             .run(r#"{"path":"out.txt","content":"hello"}"#, &ctx)
             .await
             .unwrap();
-        assert!(out.as_text().unwrap().contains("wrote 5 bytes to out.txt"));
+        assert!(out.as_text().unwrap().contains("wrote out.txt (1 line)"));
+        assert_eq!(out.summary.as_deref(), Some("1 line"));
         let written = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
         assert_eq!(written, "hello");
     }

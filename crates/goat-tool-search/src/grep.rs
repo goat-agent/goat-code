@@ -44,6 +44,25 @@ impl Tool for GrepTool {
         })
     }
 
+    fn display_input(&self, input: &str) -> goat_protocol::ToolDisplay {
+        let Ok(args) = serde_json::from_str::<Input>(input) else {
+            return goat_tool::display::generic(input);
+        };
+        let scope: Vec<String> = [
+            args.path.filter(|p| !p.is_empty() && p != "."),
+            args.glob.filter(|g| !g.is_empty() && g != "*"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let pattern = goat_tool::display::flatten(&args.pattern);
+        if scope.is_empty() {
+            goat_protocol::ToolDisplay::primary(pattern)
+        } else {
+            goat_protocol::ToolDisplay::with_detail(pattern, scope.join(" · "))
+        }
+    }
+
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
@@ -86,12 +105,14 @@ fn search(
     let regex = Regex::new(pattern)?;
     let mut builder = WalkBuilder::new(root);
     builder.require_git(false);
-    if let Some(glob) = glob {
-        let mut overrides = OverrideBuilder::new(root);
-        overrides.add(glob).map_err(|err| ignore_error(&err))?;
-        let built = overrides.build().map_err(|err| ignore_error(&err))?;
-        builder.overrides(built);
-    }
+    let matcher = match glob {
+        Some(glob) => {
+            let mut overrides = OverrideBuilder::new(root);
+            overrides.add(glob).map_err(|err| ignore_error(&err))?;
+            Some(overrides.build().map_err(|err| ignore_error(&err))?)
+        }
+        None => None,
+    };
 
     let mut out = String::new();
     let mut count = 0usize;
@@ -100,6 +121,11 @@ fn search(
     'walk: for entry in builder.build() {
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        if let Some(matcher) = &matcher
+            && !matcher.matched(entry.path(), false).is_whitelist()
+        {
             continue;
         }
         let Ok(contents) = std::fs::read(entry.path()) else {

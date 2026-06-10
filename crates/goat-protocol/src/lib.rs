@@ -41,10 +41,32 @@ impl fmt::Display for ToolCallId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDisplay {
+    pub primary: String,
+    pub detail: Option<String>,
+}
+
+impl ToolDisplay {
+    pub fn primary(primary: impl Into<String>) -> Self {
+        Self {
+            primary: primary.into(),
+            detail: None,
+        }
+    }
+
+    pub fn with_detail(primary: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            primary: primary.into(),
+            detail: Some(detail.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: ToolCallId,
     pub name: String,
-    pub input: String,
+    pub display: ToolDisplay,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,9 +230,6 @@ pub enum Op {
     RemoveAccount {
         provider: String,
         name: String,
-    },
-    SetTheme {
-        dark: bool,
     },
     ListThreads,
     Resume {

@@ -1,5 +1,3 @@
-use std::fmt::Write;
-
 use goat_commands::CommandRegistry;
 use ratatui::{
     Frame,
@@ -8,7 +6,11 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::{overlay::selection_row, symbols, theme::Theme};
+use crate::{
+    overlay::{hint_line, selection_row},
+    symbols,
+    theme::Theme,
+};
 
 fn subsequence_match(query: &str, target: &str) -> Option<Vec<usize>> {
     if query.is_empty() {
@@ -144,57 +146,16 @@ impl CommandMenu {
         frame.render_widget(Paragraph::new(lines), list_area);
 
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(
-                    " {}{} navigate{}{}  complete{}  run  esc close",
-                    symbols::key::ARROW_UP,
-                    symbols::key::ARROW_DOWN,
-                    symbols::ui::SEPARATOR,
-                    symbols::key::TAB,
-                    symbols::ui::SEPARATOR,
-                ),
-                theme.muted(),
-            ))),
+            Paragraph::new(hint_line(
+                &[
+                    (symbols::key::ARROWS_UPDOWN, "navigate"),
+                    (symbols::key::TAB, "complete"),
+                    (symbols::key::ENTER, "run"),
+                    (symbols::key::ESC, "close"),
+                ],
+                theme,
+            )),
             hint_area,
         );
     }
-}
-
-pub fn help_text(registry: &CommandRegistry) -> String {
-    let mut out = String::from("Commands:\n");
-    for spec in registry.specs() {
-        let label = if spec.aliases.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", spec.aliases.join(", "))
-        };
-        let _ = writeln!(out, "  /{}{}  {}", spec.name, label, spec.description);
-    }
-    out.push_str("\nKeybindings:\n");
-    out.push_str("  Enter            send message\n");
-    out.push_str("  Shift/Alt+Enter  newline\n");
-    out.push_str("  Esc              interrupt / clear input (x2)\n");
-    out.push_str("  Ctrl-C           clear input / quit (x2)\n");
-    out.push_str("  Ctrl-A/E         line start/end\n");
-    out.push_str("  Ctrl-W           delete word before\n");
-    let _ = writeln!(
-        out,
-        "  Alt-{}/{}          word left/right",
-        symbols::key::ARROW_LEFT,
-        symbols::key::ARROW_RIGHT
-    );
-    let _ = writeln!(
-        out,
-        "  {}/{}              history (when at first/last row)",
-        symbols::key::ARROW_UP,
-        symbols::key::ARROW_DOWN
-    );
-    out.push_str("  PageUp/Down      scroll transcript\n");
-    let _ = writeln!(
-        out,
-        "  {}               complete slash command",
-        symbols::key::TAB
-    );
-    out.push_str("  Esc              clear composer");
-    out
 }

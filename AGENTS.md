@@ -45,7 +45,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-store` — conversation persistence (SQLite via rusqlite).
 
 **Tools**
-- `goat-tool` — the `Tool` trait; leaf.
+- `goat-tool` — the `Tool` trait, `ToolOutput` (model-facing content + optional human summary), and per-tool input display (`display_input`, generic fallback in `display`); depends on `goat-protocol` only.
 - `goat-tool-fs` — filesystem tools (read, write, list, search).
 - `goat-tool-shell` — shell execution tool.
 - `goat-tool-search` — web/code search tools.
@@ -81,6 +81,7 @@ The UI and the engine communicate only through `goat-protocol` types over bounde
 - `GoatAgent` owns a `Vec<Message>` history (single source of truth for the LLM context); the TUI keeps an append-only render mirror built from `Event`s. Each message is persisted losslessly as a `Vec<ContentBlock>` JSON `body` (thinking blocks and tool calls/results included), so `/resume` rebuilds both the history and the transcript from the store.
 - Reasoning effort is a per-model property carried on `ModelTarget.effort` (persisted per thread). Providers advertise the valid set per model via `Provider::efforts` and translate the chosen `Request.effort` themselves — OpenAI/Codex send `reasoning.effort`, Anthropic maps to `output_config.effort`/`thinking.budget_tokens`. Anthropic extended thinking requires the `ContentBlock::Thinking`/`RedactedThinking` blocks to round-trip unchanged in history, which is why they are first-class content blocks every provider must handle.
 - The `Agent` tool is engine-level, not a registry tool: the model calls it like a tool, but `GoatAgent` intercepts the call in dispatch and runs the same loop core nested — its own history, restricted tool set (no `Agent`, so no recursion), a child `TaskId`, and no persistence. Several run concurrently via a semaphore-bounded `join_all`, and a parent `CancellationToken` fans out to every child on interrupt. The shared loop core is parameterized by a `Run` (top-level emits + persists; child emits child-tagged events only).
+- Human-facing tool presentation belongs to the tools, never the TUI: each tool renders its own input via `Tool::display_input` (parsing its own `Input` struct) and may attach a display `summary` to `ToolOutput`; the engine ships both over `goat-protocol` (`ToolCall.display`, `ToolOutcome.summary`), and the TUI renders exactly what arrives with zero per-tool knowledge.
 - The TUI normalizes three event sources into one `AppEvent`, runs a pure `App::update` reducer, and renders on a dirty flag — never on every tick. Child-agent events are routed by `TaskId` to a per-run transcript; a footer agent selector (↓ to focus, arrows, Esc to leave) drills the main area into one run by swapping which transcript renders — the same swap mechanism `/resume` uses.
 - The composer is a first-party widget. Do not add `tui-textarea`; it does not support ratatui 0.30.
 - On startup, `GoatAgent` reads project `AGENTS.md` files and injects them into the system prompt. Discovery follows the Codex standard: global `~/.goat-code/AGENTS.md` first, then git root → cwd (root-to-leaf order, each file capped at 32 KiB). `AGENTS.override.md` in any directory takes precedence over `AGENTS.md` in the same directory. The same injected content reaches both the main loop and delegated subagents.

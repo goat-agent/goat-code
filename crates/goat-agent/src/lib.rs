@@ -16,14 +16,14 @@ use goat_core::Engine;
 use goat_protocol::{
     AccountChoice, AccountEntry, AccountInfo, AskQuestion, AuthMethod, Effort, Event,
     LoginCredential, LoginProvider, ModelEntry, ModelTarget, NotifyKind, Op, SkillInfo, TaskId,
-    ThreadSummary, ToolCall, ToolCallId, ToolOutcome, TranscriptEntry,
+    ThreadSummary, ToolCall, ToolCallId, ToolDisplay, ToolOutcome, TranscriptEntry,
 };
 use goat_provider::{
     ContentBlock, Message, MessageRole, Provider, Request, StreamEvent, ToolDefinition,
 };
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use goat_store::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
-use goat_tool::{ToolContext, ToolOutput};
+use goat_tool::{ToolContent, ToolContext, ToolOutput};
 use goat_tools::ToolRegistry;
 use tokio::{
     sync::{Mutex, Semaphore, mpsc, oneshot},
@@ -126,6 +126,7 @@ impl Engine for GoatAgent {
 
 struct Ctx<'a> {
     registry: &'a Registry,
+    account_registries: &'a std::sync::Mutex<HashMap<String, Arc<Registry>>>,
     credentials: &'a CredentialStore,
     tools: &'a ToolRegistry,
     agents: &'a AgentRegistry,
@@ -369,12 +370,15 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
             .await;
     }
     let rl_cache = std::sync::Mutex::new(rl_cache_data);
+    let account_registries: std::sync::Mutex<HashMap<String, Arc<Registry>>> =
+        std::sync::Mutex::new(HashMap::new());
 
     while let Some(op) = ops.recv().await {
         match op {
             Op::SubmitMessage { id, text } => {
                 let ctx = Ctx {
                     registry: &registry,
+                    account_registries: &account_registries,
                     credentials: &credentials,
                     tools: &tools,
                     agents: &agents,
@@ -402,7 +406,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     break;
                 }
             }
-            Op::Interrupt { .. } | Op::SetTheme { .. } | Op::Answer { .. } => {}
+            Op::Interrupt { .. } | Op::Answer { .. } => {}
             Op::Clear => {
                 history.clear();
                 thread_id = None;
@@ -420,6 +424,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     events: &events,
                 };
                 handle_login(ctx, provider, DEFAULT_ACCOUNT.to_owned(), credential, false).await;
+                clear_account_registries(&account_registries);
             }
             Op::AddAccount {
                 provider,
@@ -432,9 +437,11 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     events: &events,
                 };
                 handle_login(ctx, provider, name, credential, true).await;
+                clear_account_registries(&account_registries);
             }
             Op::RemoveAccount { provider, name } => {
                 handle_remove_account(provider, name, &credentials, &mut registry, &events).await;
+                clear_account_registries(&account_registries);
             }
             Op::ListThreads => {
                 handle_list_threads(&store, &events).await;
@@ -443,6 +450,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 handle_resume(
                     &store,
                     &skills,
+                    &tools,
                     project_instructions.as_deref(),
                     tid,
                     &mut target,
@@ -519,8 +527,6 @@ async fn announce_startup(
             entries: catalog_only(registry, credentials),
         })
         .await;
-    let entries = discover_ready(registry, credentials).await;
-    let _ = events.send(Event::ModelListChanged { entries }).await;
     if let Some(selected) = target {
         let _ = events
             .send(Event::ModelSelected {
@@ -528,6 +534,12 @@ async fn announce_startup(
             })
             .await;
     }
+    let providers = provider_accounts(registry, credentials);
+    let bg_events = events.clone();
+    tokio::spawn(async move {
+        let entries = discover_entries(providers).await;
+        let _ = bg_events.send(Event::ModelListChanged { entries }).await;
+    });
 }
 
 struct LoginCtx<'a> {
@@ -751,53 +763,77 @@ fn catalog_only(registry: &Registry, credentials: &CredentialStore) -> Vec<Model
     entries
 }
 
-async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> Vec<ModelEntry> {
+fn provider_accounts(
+    registry: &Registry,
+    credentials: &CredentialStore,
+) -> Vec<(Arc<dyn Provider>, Vec<String>)> {
+    registry
+        .all()
+        .iter()
+        .filter_map(|provider| {
+            accounts_for_provider(credentials, provider.as_ref())
+                .map(|accounts| (Arc::clone(provider), accounts))
+        })
+        .collect()
+}
+
+async fn discover_provider(provider: Arc<dyn Provider>, accounts: Vec<String>) -> Vec<ModelEntry> {
+    let provider_id = provider.id().to_string();
+    let (tx, mut rx) = mpsc::channel(32);
+    let handle = provider.discover(tx);
+    let mut discovered = Vec::new();
+    let collect = async {
+        while let Some(info) = rx.recv().await {
+            discovered.push(info);
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(3), collect).await;
+    handle.abort();
+
+    let catalog = provider.catalog();
+    let catalog_ids: HashSet<&str> = catalog.iter().copied().collect();
+
     let mut entries = Vec::new();
-    for provider in registry.all() {
-        let Some(accounts) = accounts_for_provider(credentials, provider.as_ref()) else {
+    for &id in catalog {
+        entries.push(model_entry(
+            &provider_id,
+            id,
+            &accounts,
+            provider.efforts(id),
+            provider.context_window(id),
+        ));
+    }
+    for info in discovered {
+        if catalog_ids.contains(info.id.as_str()) {
             continue;
-        };
-        let provider_id = provider.id().to_string();
-        let (tx, mut rx) = mpsc::channel(32);
-        let handle = provider.discover(tx);
-        let mut discovered = Vec::new();
-        let collect = async {
-            while let Some(info) = rx.recv().await {
-                discovered.push(info);
-            }
-        };
-        let _ = tokio::time::timeout(Duration::from_secs(3), collect).await;
-        handle.abort();
-
-        let catalog = provider.catalog();
-        let catalog_ids: HashSet<&str> = catalog.iter().copied().collect();
-
-        for &id in catalog {
-            entries.push(model_entry(
-                &provider_id,
-                id,
-                &accounts,
-                provider.efforts(id),
-                provider.context_window(id),
-            ));
         }
-
-        for info in discovered {
-            if catalog_ids.contains(info.id.as_str()) {
-                continue;
-            }
-            let efforts = provider.efforts(&info.id);
-            let ctx_win = provider.context_window(&info.id);
-            entries.push(model_entry(
-                &provider_id,
-                &info.id,
-                &accounts,
-                efforts,
-                ctx_win,
-            ));
-        }
+        let efforts = provider.efforts(&info.id);
+        let ctx_win = provider.context_window(&info.id);
+        entries.push(model_entry(
+            &provider_id,
+            &info.id,
+            &accounts,
+            efforts,
+            ctx_win,
+        ));
     }
     entries
+}
+
+async fn discover_entries(providers: Vec<(Arc<dyn Provider>, Vec<String>)>) -> Vec<ModelEntry> {
+    futures::future::join_all(
+        providers
+            .into_iter()
+            .map(|(provider, accounts)| discover_provider(provider, accounts)),
+    )
+    .await
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> Vec<ModelEntry> {
+    discover_entries(provider_accounts(registry, credentials)).await
 }
 
 async fn run_round(
@@ -872,13 +908,9 @@ async fn run_round(
 
 fn tool_outcome(result: &Result<ToolOutput, String>) -> ToolOutcome {
     match result {
-        Ok(ToolOutput::Text(text)) => ToolOutcome {
+        Ok(output) => ToolOutcome {
             ok: true,
-            summary: summarize_line(text),
-        },
-        Ok(ToolOutput::Image(_)) => ToolOutcome {
-            ok: true,
-            summary: Some("[image]".to_owned()),
+            summary: output.summary.clone(),
         },
         Err(message) => ToolOutcome {
             ok: false,
@@ -887,15 +919,59 @@ fn tool_outcome(result: &Result<ToolOutput, String>) -> ToolOutcome {
     }
 }
 
-fn summarize_line(text: &str) -> Option<String> {
-    text.lines().next().map(|line| {
-        if line.chars().count() > 80 {
-            let head: String = line.chars().take(80).collect();
-            format!("{head}…")
-        } else {
-            line.to_owned()
+fn call_display(tools: &ToolRegistry, name: &str, input: &str) -> ToolDisplay {
+    match name {
+        AGENT_TOOL_NAME => agent_call_display(input),
+        ASK_TOOL_NAME => ask_call_display(input),
+        _ => tools.get(name).map_or_else(
+            || goat_tool::display::generic(input),
+            |tool| tool.display_input(input),
+        ),
+    }
+}
+
+fn agent_call_display(input: &str) -> ToolDisplay {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        agent_type: String,
+        prompt: String,
+    }
+    match serde_json::from_str::<Input>(input) {
+        Ok(args) => {
+            ToolDisplay::with_detail(args.agent_type, goat_tool::display::flatten(&args.prompt))
         }
-    })
+        Err(_) => goat_tool::display::generic(input),
+    }
+}
+
+fn ask_call_display(input: &str) -> ToolDisplay {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        questions: Vec<AskQuestion>,
+    }
+    let Ok(args) = serde_json::from_str::<Input>(input) else {
+        return goat_tool::display::generic(input);
+    };
+    let Some(first) = args.questions.first() else {
+        return goat_tool::display::generic(input);
+    };
+    let primary = goat_tool::display::flatten(&first.question);
+    if args.questions.len() > 1 {
+        ToolDisplay::with_detail(primary, format!("+{} more", args.questions.len() - 1))
+    } else {
+        ToolDisplay::primary(primary)
+    }
+}
+
+fn summarize_line(text: &str) -> Option<String> {
+    let line = text.lines().find(|line| !line.trim().is_empty())?;
+    let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 80 {
+        let head: String = flat.chars().take(80).collect();
+        Some(format!("{head}…"))
+    } else {
+        Some(flat)
+    }
 }
 
 async fn create_tool_call_record(
@@ -1036,17 +1112,19 @@ async fn execute_tool(
         })
         .await;
     let content = match result {
-        Ok(ToolOutput::Text(text)) => {
-            vec![ContentBlock::Text {
-                text: cap_tool_result(text),
-            }]
-        }
-        Ok(ToolOutput::Image(img)) => {
-            vec![ContentBlock::Image {
-                media_type: img.media_type,
-                data: img.data,
-            }]
-        }
+        Ok(output) => match output.content {
+            ToolContent::Text(text) => {
+                vec![ContentBlock::Text {
+                    text: cap_tool_result(text),
+                }]
+            }
+            ToolContent::Image(img) => {
+                vec![ContentBlock::Image {
+                    media_type: img.media_type,
+                    data: img.data,
+                }]
+            }
+        },
         Err(msg) => vec![ContentBlock::Text { text: msg }],
     };
     ToolExecResult {
@@ -1079,7 +1157,7 @@ async fn run_tool_batch(
                 call: ToolCall {
                     id: ToolCallId(tui_id),
                     name: name.clone(),
-                    input: input_json.clone(),
+                    display: call_display(ctx.tools, name, input_json),
                 },
             })
             .await;
@@ -1330,7 +1408,7 @@ async fn process_round_output(
         && run.is_top()
     {
         let now = now_ms() / 1000;
-        {
+        let serialized = {
             let mut cache = ctx
                 .rl_cache
                 .lock()
@@ -1341,9 +1419,11 @@ async fn process_round_output(
                 snapshot.windows.clone(),
                 now,
             );
-            if let Some(path) = ctx.rl_path {
-                cache.save(path);
-            }
+            cache.to_json()
+        };
+        if let (Some(path), Some(json)) = (ctx.rl_path, serialized) {
+            let path = path.to_owned();
+            tokio::task::spawn_blocking(move || rate_limit_cache::write(&path, &json));
         }
         let _ = ctx
             .events
@@ -1587,6 +1667,31 @@ async fn core_loop(
     }
 }
 
+fn clear_account_registries(cache: &std::sync::Mutex<HashMap<String, Arc<Registry>>>) {
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+fn provider_for(
+    ctx: &Ctx<'_>,
+    account: &str,
+    id: &goat_provider::ProviderId,
+) -> Option<Arc<dyn Provider>> {
+    if account == DEFAULT_ACCOUNT {
+        return ctx.registry.get(id);
+    }
+    let mut cache = ctx
+        .account_registries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .entry(account.to_owned())
+        .or_insert_with(|| Arc::new(Registry::load(ctx.credentials, account)))
+        .get(id)
+}
+
 fn resolve_agent_model(
     ctx: &Ctx<'_>,
     parent: &ModelTarget,
@@ -1600,9 +1705,12 @@ fn resolve_agent_model(
             .find(|provider| provider.catalog().contains(&model_id.as_str()))
         {
             let provider_id = found.id().to_string();
-            let provider = Registry::load(ctx.credentials, &parent.account)
-                .get(&goat_provider::ProviderId::from(provider_id.as_str()))
-                .unwrap_or_else(|| found.clone());
+            let provider = provider_for(
+                ctx,
+                &parent.account,
+                &goat_provider::ProviderId::from(provider_id.as_str()),
+            )
+            .unwrap_or_else(|| found.clone());
             let effort = spec
                 .effort
                 .or_else(|| provider.efforts(model_id).into_iter().next());
@@ -1610,13 +1718,11 @@ fn resolve_agent_model(
         }
         tracing::warn!(model = %model_id, "agent model not found; inheriting parent model");
     }
-    let provider = ctx
-        .registry
-        .get(&goat_provider::ProviderId::from(parent.provider.as_str()))
-        .or_else(|| {
-            Registry::load(ctx.credentials, &parent.account)
-                .get(&goat_provider::ProviderId::from(parent.provider.as_str()))
-        })?;
+    let provider = provider_for(
+        ctx,
+        &parent.account,
+        &goat_provider::ProviderId::from(parent.provider.as_str()),
+    )?;
     Some((provider, parent.model.clone(), parent.effort))
 }
 
@@ -1804,10 +1910,7 @@ async fn handle_idle_op(
     target: &mut Option<ModelTarget>,
     events: &mpsc::Sender<Event>,
 ) {
-    if matches!(
-        op,
-        Op::AddAccount { .. } | Op::RemoveAccount { .. } | Op::SetTheme { .. }
-    ) {
+    if matches!(op, Op::AddAccount { .. } | Op::RemoveAccount { .. }) {
         return;
     }
     if let Op::SelectModel { target: chosen } = op {
@@ -1889,20 +1992,11 @@ async fn handle_rename(
     }
 }
 
-fn tool_summary(content: &str) -> String {
-    content
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .take(200)
-        .collect()
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_resume(
     store: &Store,
     skills: &[SkillInfo],
+    tools: &ToolRegistry,
     instructions: Option<&str>,
     tid: i64,
     target: &mut Option<ModelTarget>,
@@ -1954,16 +2048,21 @@ async fn handle_resume(
                 } => {
                     if let Some((name, input)) = tool_uses.remove(tool_use_id) {
                         tool_seq += 1;
-                        let summary_text = ContentBlock::tool_result_text(content);
+                        let display = call_display(tools, &name, &input);
+                        let summary = if *is_error {
+                            summarize_line(&ContentBlock::tool_result_text(content))
+                        } else {
+                            None
+                        };
                         entries.push(TranscriptEntry::Tool {
                             call: ToolCall {
                                 id: ToolCallId(tool_seq),
                                 name,
-                                input,
+                                display,
                             },
                             outcome: ToolOutcome {
                                 ok: !is_error,
-                                summary: Some(tool_summary(&summary_text)),
+                                summary,
                             },
                         });
                     }
@@ -1996,16 +2095,19 @@ async fn handle_turn(
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
     let Some(resolved) = target.clone() else {
-        emit_task_error(ctx, id, "no model selected".to_owned()).await;
+        emit_task_error(
+            ctx,
+            id,
+            "no model selected · /config to connect a provider".to_owned(),
+        )
+        .await;
         return Flow::Continue;
     };
-    let resolved_provider = ctx
-        .registry
-        .get(&goat_provider::ProviderId::from(resolved.provider.as_str()))
-        .or_else(|| {
-            Registry::load(ctx.credentials, &resolved.account)
-                .get(&goat_provider::ProviderId::from(resolved.provider.as_str()))
-        });
+    let resolved_provider = provider_for(
+        ctx,
+        &resolved.account,
+        &goat_provider::ProviderId::from(resolved.provider.as_str()),
+    );
     let Some(provider) = resolved_provider else {
         emit_task_error(ctx, id, format!("unknown provider: {}", resolved.provider)).await;
         return Flow::Continue;
