@@ -91,6 +91,7 @@ pub struct App {
     pub(crate) account_entries: Vec<AccountEntry>,
     pub(crate) mouse_capture: bool,
     pub(crate) computer_use: bool,
+    pub(crate) browser: bool,
     pub(crate) commands: CommandRegistry,
     pub(crate) task_start: Option<std::time::Instant>,
     pub(crate) toasts: Vec<crate::toast::Toast>,
@@ -130,6 +131,7 @@ impl App {
             account_entries: Vec::new(),
             mouse_capture: true,
             computer_use: goat_config::Config::load().computer_use_enabled,
+            browser: goat_config::Config::load().browser_enabled,
 
             commands: CommandRegistry::builtin(),
             task_start: None,
@@ -297,6 +299,7 @@ impl App {
                     self.theme.is_dark(),
                     self.mouse_capture,
                     self.computer_use,
+                    self.browser,
                 ));
                 Vec::new()
             }
@@ -370,6 +373,13 @@ impl App {
                 self.computer_use = enabled;
                 let mut cfg = goat_config::Config::load();
                 cfg.computer_use_enabled = enabled;
+                let _ = cfg.save();
+                Vec::new()
+            }
+            ConfigOutcome::SetBrowser { enabled } => {
+                self.browser = enabled;
+                let mut cfg = goat_config::Config::load();
+                cfg.browser_enabled = enabled;
                 let _ = cfg.save();
                 Vec::new()
             }

@@ -18,6 +18,7 @@ goat-config = { workspace = true }
 goat-tool = { workspace = true }
 goat-tools = { workspace = true }
 goat-tool-computer = { workspace = true }
+goat-tool-browser = { workspace = true }
 goat-skill = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -18,7 +18,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-28 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
+31 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
 
 **Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
@@ -50,6 +50,8 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-tool-shell` — shell execution tool.
 - `goat-tool-search` — web/code search tools.
 - `goat-tool-skill` — the `Skill` tool; loads a skill's instructions on demand from the cwd.
+- `goat-tool-computer` — the `Computer` tool; desktop control (screenshot + mouse/keyboard) via `xcap`/`enigo`. Opt-in: registered by `GoatAgent::new` only when `computer_use_enabled` is set.
+- `goat-tool-browser` — the `Browser` tool; drives a real Chrome via CDP (`chromiumoxide`). One tool with an `action` enum (navigate/snapshot/click/type/select/press_key/evaluate/screenshot/close); actions return a text accessibility snapshot with element refs (`screenshot` returns an image). Persistent login profile at `~/.goat-code/browser/profile`, headful. Opt-in: registered by `GoatAgent::new` only when `browser_enabled` is set.
 - `goat-tools` — tool registry; wires all tool crates.
 - `goat-skill` — SKILL.md (agentskills.io) parser and loader; reads global `~/.goat-code/skills` and project `.goat/skills` (project overrides global); depends on `goat-config` only.
 
