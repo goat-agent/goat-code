@@ -22,6 +22,7 @@ pub(crate) struct RenderCtx<'a> {
     pub scroll: usize,
     pub spinner: &'static str,
     pub working: Option<&'a Working>,
+    pub hl: &'a dyn Highlighter,
 }
 
 struct RenderCache {
@@ -29,6 +30,12 @@ struct RenderCache {
     version: u64,
     lines: Vec<Line<'static>>,
     spinner_lines: Vec<usize>,
+}
+
+struct StreamCache {
+    len: usize,
+    width: u16,
+    rows: Vec<Line<'static>>,
 }
 
 #[derive(Debug)]
@@ -57,12 +64,14 @@ pub struct Transcript {
     streaming: Option<String>,
     version: u64,
     cache: RefCell<Option<RenderCache>>,
+    stream_cache: RefCell<Option<StreamCache>>,
 }
 
 impl Transcript {
     fn bump_version(&mut self) {
         self.version = self.version.wrapping_add(1);
         *self.cache.borrow_mut() = None;
+        *self.stream_cache.borrow_mut() = None;
     }
 
     pub fn clear(&mut self) {
@@ -163,32 +172,51 @@ impl Transcript {
         });
     }
 
-    fn streaming_rows(&self, theme: Theme, width: u16) -> Vec<Line<'static>> {
+    fn streaming_rows(&self, theme: Theme, width: u16, hl: &dyn Highlighter) -> Vec<Line<'static>> {
         let Some(buffer) = &self.streaming else {
             return Vec::new();
         };
-        let mut content = plain_lines(buffer, theme);
+        {
+            let guard = self.stream_cache.borrow();
+            if let Some(cached) = guard.as_ref()
+                && cached.len == buffer.len()
+                && cached.width == width
+            {
+                return cached.rows.clone();
+            }
+        }
+        let mut content = markdown::render(buffer, theme, hl);
+        while content.last().is_some_and(is_blank) {
+            content.pop();
+        }
         if let Some(last) = content.last_mut() {
             last.spans
                 .push(Span::styled(symbols::ui::STREAM_CURSOR, theme.accent()));
         }
-        hang(
+        let rows = hang(
             &content,
             Span::styled(symbols::marker::AGENT, theme.role_agent()),
             width,
-        )
+        );
+        *self.stream_cache.borrow_mut() = Some(StreamCache {
+            len: buffer.len(),
+            width,
+            rows: rows.clone(),
+        });
+        rows
     }
 
     fn tail_rows(
         &self,
         theme: Theme,
         width: u16,
+        hl: &dyn Highlighter,
         spinner: &'static str,
         working: Option<&Working>,
         base_nonempty: bool,
     ) -> Vec<Line<'static>> {
         let mut tail: Vec<Line<'static>> = Vec::new();
-        let streamed = self.streaming_rows(theme, width);
+        let streamed = self.streaming_rows(theme, width, hl);
         if !streamed.is_empty() {
             if base_nonempty {
                 tail.push(Line::default());
@@ -204,11 +232,17 @@ impl Transcript {
         tail
     }
 
-    pub fn content_height(&self, width: u16, theme: Theme, working: Option<&Working>) -> usize {
+    pub fn content_height(
+        &self,
+        width: u16,
+        theme: Theme,
+        hl: &dyn Highlighter,
+        working: Option<&Working>,
+    ) -> usize {
         self.ensure_cache(theme, width);
         let base = self.cache.borrow().as_ref().map_or(0, |c| c.lines.len());
         base + self
-            .tail_rows(theme, width, symbols::SPINNER[0], working, base > 0)
+            .tail_rows(theme, width, hl, symbols::SPINNER[0], working, base > 0)
             .len()
     }
 
@@ -221,6 +255,7 @@ impl Transcript {
         let tail = self.tail_rows(
             ctx.theme,
             area.width,
+            ctx.hl,
             ctx.spinner,
             ctx.working,
             !cache.lines.is_empty(),
@@ -507,7 +542,7 @@ mod tests {
     }
 
     fn height(t: &Transcript, width: u16) -> usize {
-        t.content_height(width, Theme::dark(), None)
+        t.content_height(width, Theme::dark(), &PlainHighlighter, None)
     }
 
     fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
@@ -620,7 +655,7 @@ mod tests {
             label: None,
             thinking: false,
         };
-        let busy = t.content_height(80, Theme::dark(), Some(&working));
+        let busy = t.content_height(80, Theme::dark(), &PlainHighlighter, Some(&working));
         assert!(
             busy > idle,
             "content_height must be larger when busy (working line)"
@@ -654,6 +689,7 @@ mod tests {
                         scroll: h - 2,
                         spinner: symbols::SPINNER[0],
                         working: None,
+                        hl: &PlainHighlighter,
                     },
                 );
             })
@@ -676,6 +712,7 @@ mod tests {
                         scroll: 0,
                         spinner: symbols::SPINNER[3],
                         working: None,
+                        hl: &PlainHighlighter,
                     },
                 );
             })

@@ -203,6 +203,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
             scroll: app.scroll(),
             spinner: app.spinner_frame(),
             working: working.as_ref(),
+            hl: &app.highlighter,
         },
     );
     if app.follow() {

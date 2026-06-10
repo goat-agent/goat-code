@@ -591,8 +591,12 @@ impl App {
     }
 
     pub(crate) fn content_height(&self, width: u16) -> usize {
-        self.active_transcript()
-            .content_height(width, self.theme, self.working_state().as_ref())
+        self.active_transcript().content_height(
+            width,
+            self.theme,
+            &self.highlighter,
+            self.working_state().as_ref(),
+        )
     }
     pub(crate) fn scroll(&self) -> usize {
         self.scroll
