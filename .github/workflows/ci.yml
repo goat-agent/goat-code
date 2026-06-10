@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
   LINUX_DEPS: >-
     libwayland-dev libxkbcommon-dev libpipewire-0.3-dev libgbm-dev libdrm-dev
-    libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev
+    libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libegl1-mesa-dev
 
 jobs:
   lint:
