@@ -86,7 +86,7 @@ pub struct App {
     pub(crate) thinking: bool,
     pub(crate) should_quit: bool,
     pub(crate) dirty: bool,
-    pub(crate) scroll: u16,
+    pub(crate) scroll: usize,
     pub(crate) follow: bool,
     pub(crate) models: Vec<ModelEntry>,
     pub(crate) models_loaded: bool,
@@ -220,6 +220,7 @@ impl App {
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
                         self.scroll = self.scroll.saturating_sub(3);
+                        self.follow = false;
                         self.dirty = true;
                     }
                     MouseEventKind::ScrollDown => {
@@ -519,11 +520,15 @@ impl App {
     pub(crate) fn clamp_scroll(&mut self, viewport_height: u16, content_width: u16) {
         let max = self
             .content_height(content_width)
-            .saturating_sub(viewport_height);
-        if self.scroll > max {
+            .saturating_sub(usize::from(viewport_height));
+        if self.follow {
             self.scroll = max;
+        } else {
+            if self.scroll > max {
+                self.scroll = max;
+            }
+            self.follow = self.scroll >= max;
         }
-        self.follow = self.scroll >= max;
     }
 
     pub(crate) fn take_dirty(&mut self) -> bool {
@@ -577,11 +582,19 @@ impl App {
         symbols::SPINNER[self.spinner % symbols::SPINNER.len()]
     }
 
-    pub(crate) fn content_height(&self, width: u16) -> u16 {
-        self.active_transcript()
-            .content_height(width, self.theme, self.is_busy())
+    pub(crate) fn working_state(&self) -> Option<crate::transcript::Working> {
+        self.is_busy().then(|| crate::transcript::Working {
+            elapsed: self.elapsed_secs(),
+            label: self.agent_status(),
+            thinking: self.thinking,
+        })
     }
-    pub(crate) fn scroll(&self) -> u16 {
+
+    pub(crate) fn content_height(&self, width: u16) -> usize {
+        self.active_transcript()
+            .content_height(width, self.theme, self.working_state().as_ref())
+    }
+    pub(crate) fn scroll(&self) -> usize {
         self.scroll
     }
     pub(crate) fn overlay(&self) -> &Overlay {
@@ -627,7 +640,6 @@ impl App {
         if let Some(run) = self.agent_runs.get(cursor) {
             self.overlay = Overlay::Agents(cursor);
             self.main_view = MainView::Agent(run.id);
-            self.scroll = 0;
             self.follow = true;
             self.dirty = true;
         }
@@ -637,7 +649,6 @@ impl App {
         self.overlay = Overlay::None;
         self.main_view = MainView::Live;
         self.follow = true;
-        self.scroll = u16::MAX;
         self.dirty = true;
     }
 
@@ -874,6 +885,55 @@ mod tests {
         app.composer.insert_str("hello");
         app.submit();
         assert!(app.follow);
+    }
+
+    fn filled_app() -> App {
+        let mut app = App::new(Theme::dark());
+        for i in 0..30 {
+            app.transcript.push_user(format!("message {i}"));
+        }
+        app.clamp_scroll(10, 80);
+        app
+    }
+
+    fn mouse(kind: crossterm::event::MouseEventKind) -> super::AppEvent {
+        super::AppEvent::Input(crossterm::event::Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+    }
+
+    #[test]
+    fn clamp_scroll_materializes_bottom_when_following() {
+        let app = filled_app();
+        assert!(app.follow);
+        assert_eq!(app.scroll, app.content_height(80) - 10);
+    }
+
+    #[test]
+    fn wheel_up_unfollows_then_bottom_refollows() {
+        use crossterm::event::MouseEventKind;
+        let mut app = filled_app();
+        app.update(mouse(MouseEventKind::ScrollUp));
+        assert!(!app.follow);
+        app.clamp_scroll(10, 80);
+        assert!(!app.follow);
+        for _ in 0..40 {
+            app.update(mouse(MouseEventKind::ScrollDown));
+        }
+        app.clamp_scroll(10, 80);
+        assert!(app.follow);
+    }
+
+    #[test]
+    fn page_up_unfollows() {
+        let mut app = filled_app();
+        app.on_key(press(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(!app.follow);
     }
 
     #[test]

@@ -105,6 +105,7 @@ impl App {
         match key.code {
             KeyCode::PageUp => {
                 self.scroll = self.scroll.saturating_sub(10);
+                self.follow = false;
                 self.dirty = true;
                 Vec::new()
             }
@@ -515,6 +516,7 @@ impl App {
             }
             KeyCode::PageUp => {
                 self.scroll = self.scroll.saturating_sub(10);
+                self.follow = false;
                 self.dirty = true;
             }
             KeyCode::PageDown => {
