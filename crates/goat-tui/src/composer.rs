@@ -19,6 +19,7 @@ pub struct Composer {
     col: usize,
     history: Vec<String>,
     hist_cursor: Option<usize>,
+    draft: Option<String>,
 }
 
 impl Default for Composer {
@@ -29,6 +30,7 @@ impl Default for Composer {
             col: 0,
             history: Vec::new(),
             hist_cursor: None,
+            draft: None,
         }
     }
 }
@@ -233,12 +235,19 @@ impl Composer {
         text
     }
 
+    pub fn discard(&mut self) {
+        self.take();
+    }
+
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {
             return;
         }
         let idx = match self.hist_cursor {
-            None => self.history.len() - 1,
+            None => {
+                self.draft = Some(self.text());
+                self.history.len() - 1
+            }
             Some(0) => 0,
             Some(i) => i - 1,
         };
@@ -256,7 +265,8 @@ impl Composer {
             }
             Some(_) => {
                 self.hist_cursor = None;
-                self.set_text("");
+                let draft = self.draft.take().unwrap_or_default();
+                self.set_text(&draft);
             }
             None => {}
         }
@@ -452,6 +462,28 @@ mod tests {
         assert!(composer.is_empty());
         composer.history_prev();
         assert!(composer.is_empty());
+    }
+
+    #[test]
+    fn discard_preserves_draft_in_history() {
+        let mut composer = Composer::default();
+        composer.insert_str("important draft");
+        composer.discard();
+        assert!(composer.is_empty());
+        composer.history_prev();
+        assert_eq!(composer.text(), "important draft");
+    }
+
+    #[test]
+    fn history_navigation_restores_draft() {
+        let mut composer = Composer::default();
+        composer.insert_str("sent");
+        composer.take();
+        composer.insert_str("work in progress");
+        composer.history_prev();
+        assert_eq!(composer.text(), "sent");
+        composer.history_next();
+        assert_eq!(composer.text(), "work in progress");
     }
 
     #[test]

@@ -504,7 +504,7 @@ impl App {
         if self.quit_arm.is_some() {
             self.should_quit = true;
         } else {
-            self.composer.clear();
+            self.composer.discard();
             self.quit_arm = Some(QUIT_ARM_TICKS);
         }
         Vec::new()
