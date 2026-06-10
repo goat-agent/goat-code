@@ -16,6 +16,7 @@ mod transcript;
 mod tui;
 pub(crate) mod usage;
 mod view;
+mod wrap;
 
 pub use app::run;
 pub use theme::Theme;
