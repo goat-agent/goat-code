@@ -293,4 +293,40 @@ mod tests {
         assert_eq!(info.id, "mock-1");
         handle.await.unwrap();
     }
+
+    #[test]
+    fn content_blocks_round_trip_through_json() {
+        use super::ContentBlock;
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "hello".into(),
+            },
+            ContentBlock::Thinking {
+                text: "step one".into(),
+                signature: "sig-abc".into(),
+            },
+            ContentBlock::RedactedThinking {
+                data: "opaque".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "Read".into(),
+                input: serde_json::json!({"path": "src/lib.rs"}),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "call-1".into(),
+                content: vec![ContentBlock::Text {
+                    text: "result".into(),
+                }],
+                is_error: false,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "base64data".into(),
+            },
+        ];
+        let json = serde_json::to_string(&blocks).unwrap();
+        let restored: Vec<ContentBlock> = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, blocks);
+    }
 }
