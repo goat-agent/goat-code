@@ -1,11 +1,49 @@
 use std::sync::Arc;
 
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolImage, ToolOutput};
+use goat_protocol::ToolDisplay;
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolImage, ToolOutput, display};
 
 use crate::{
     action::{self, Action},
     backend::ComputerBackend,
 };
+
+fn display_action(action: &Action) -> ToolDisplay {
+    match action {
+        Action::Screenshot => ToolDisplay::primary("screenshot"),
+        Action::MouseMove { x, y } => ToolDisplay::with_detail("move", format!("{x},{y}")),
+        Action::LeftClick { x, y, .. } => ToolDisplay::with_detail("click", format!("{x},{y}")),
+        Action::RightClick { x, y, .. } => {
+            ToolDisplay::with_detail("right click", format!("{x},{y}"))
+        }
+        Action::MiddleClick { x, y, .. } => {
+            ToolDisplay::with_detail("middle click", format!("{x},{y}"))
+        }
+        Action::DoubleClick { x, y, .. } => {
+            ToolDisplay::with_detail("double click", format!("{x},{y}"))
+        }
+        Action::TripleClick { x, y, .. } => {
+            ToolDisplay::with_detail("triple click", format!("{x},{y}"))
+        }
+        Action::MouseDown { x, y } => ToolDisplay::with_detail("mouse down", format!("{x},{y}")),
+        Action::MouseUp { x, y } => ToolDisplay::with_detail("mouse up", format!("{x},{y}")),
+        Action::Drag { path, .. } => {
+            ToolDisplay::with_detail("drag", format!("{} points", path.len()))
+        }
+        Action::Scroll { x, y, .. } => ToolDisplay::with_detail("scroll", format!("{x},{y}")),
+        Action::Type { text } => ToolDisplay::with_detail("type", display::flatten(text)),
+        Action::Key { combo } => ToolDisplay::with_detail("key", combo.clone()),
+        Action::HoldKey { key, duration_ms } => {
+            ToolDisplay::with_detail("hold key", format!("{key} {duration_ms}ms"))
+        }
+        Action::Wait { duration_ms } => {
+            ToolDisplay::with_detail("wait", format!("{duration_ms}ms"))
+        }
+        Action::Zoom { x1, y1, x2, y2 } => {
+            ToolDisplay::with_detail("zoom", format!("{x1},{y1}→{x2},{y2}"))
+        }
+    }
+}
 
 pub struct ComputerTool {
     pub(crate) backend: Arc<dyn ComputerBackend>,
@@ -64,6 +102,13 @@ impl Tool for ComputerTool {
         })
     }
 
+    fn display_input(&self, input: &str) -> ToolDisplay {
+        match action::parse(input) {
+            Ok(action) => display_action(&action),
+            Err(_) => display::generic(input),
+        }
+    }
+
     fn run<'a>(&'a self, input: &'a str, _ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let action = action::parse(input).map_err(exec_err)?;
@@ -80,7 +125,7 @@ impl Tool for ComputerTool {
             .map_err(exec_err)?
             .map_err(exec_err)?;
 
-            Ok(ToolOutput::Image(ToolImage {
+            Ok(ToolOutput::image(ToolImage {
                 media_type: img.media_type,
                 data: img.data,
             }))

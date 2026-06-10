@@ -23,7 +23,7 @@ impl App {
                     return result;
                 }
             }
-            Overlay::Usage => return self.on_usage_key(key),
+            Overlay::Usage | Overlay::Help => return self.on_usage_key(key),
             Overlay::None => {}
         }
         if let Some(ch) = keymap::ctrl_key(&key) {

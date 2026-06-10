@@ -201,7 +201,7 @@ impl BrowserSession {
             }
             Action::PressKey { key } => ToolOutput::text(self.press_key(&key).await?),
             Action::Evaluate { js } => ToolOutput::text(self.evaluate(&js, max_bytes).await?),
-            Action::Screenshot => ToolOutput::Image(self.screenshot().await?),
+            Action::Screenshot => ToolOutput::image(self.screenshot().await?),
             Action::Close => ToolOutput::text("browser closed".to_owned()),
         };
         Ok(output)

@@ -1,4 +1,4 @@
-use goat_protocol::{Event as EngineEvent, Op, TaskId, TranscriptEntry};
+use goat_protocol::{Event as EngineEvent, NotifyKind, Op, TaskId, TranscriptEntry};
 
 use super::{App, Overlay, ResumeIntent};
 use crate::picker::{AskPicker, ThreadPicker};
@@ -10,12 +10,14 @@ impl App {
         match event {
             EngineEvent::TaskStarted { .. } => {
                 self.task_start = Some(std::time::Instant::now());
+                self.thinking = false;
             }
             EngineEvent::ModelListChanged { entries } => {
                 if let Overlay::Model(picker) = &mut self.overlay {
                     picker.set_entries(entries.clone());
                 }
                 self.models = entries;
+                self.models_loaded = true;
             }
             EngineEvent::ModelSelected { target } => self.model = Some(target),
             EngineEvent::ThreadsListed { threads } => match self.pending_resume.take() {
@@ -26,9 +28,12 @@ impl App {
                     Some(thread) => ops.push(Op::Resume {
                         thread_id: thread.id,
                     }),
-                    None => self
-                        .transcript
-                        .push_error(format!("no conversation #{}", index + 1)),
+                    None => {
+                        self.push_toast(
+                            NotifyKind::Error,
+                            format!("no conversation #{}", index + 1),
+                        );
+                    }
                 },
                 None => {}
             },
@@ -52,8 +57,12 @@ impl App {
                     }
                 }
                 self.model = Some(target);
+                self.clear_ctx_indicator();
             }
-            EngineEvent::ThinkingDelta { .. } | EngineEvent::LoginProviders { .. } => {}
+            EngineEvent::ThinkingDelta { .. } => {
+                self.thinking = true;
+            }
+            EngineEvent::LoginProviders { .. } => {}
             EngineEvent::AccountsChanged { providers } => {
                 if let Overlay::Config(config) = &mut self.overlay {
                     config.set_providers(providers.clone());
@@ -75,6 +84,7 @@ impl App {
                 }
             }
             EngineEvent::TextDelta { id, chunk } => {
+                self.thinking = false;
                 if let Some(i) = self.agent_index(id) {
                     self.agent_runs[i].transcript.push_delta(&chunk);
                 } else {
@@ -92,6 +102,7 @@ impl App {
                 }
             }
             EngineEvent::ToolStarted { id, call } => {
+                self.thinking = false;
                 if let Some(i) = self.agent_index(id) {
                     self.agent_runs[i].transcript.push_tool(call);
                 } else {
@@ -132,11 +143,13 @@ impl App {
                     .complete(interrupted, &self.highlighter, self.theme);
                 self.active = None;
                 self.task_start = None;
+                self.thinking = false;
             }
             EngineEvent::Error { message, .. } => {
                 self.transcript.push_error(message);
                 self.active = None;
                 self.task_start = None;
+                self.thinking = false;
             }
             EngineEvent::Notify { kind, message } => {
                 self.toasts.push(crate::toast::Toast::new(kind, message));

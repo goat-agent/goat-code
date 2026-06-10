@@ -2128,6 +2128,7 @@ dependencies = [
  "chromiumoxide",
  "futures",
  "goat-config",
+ "goat-protocol",
  "goat-tool",
  "image",
  "serde",
@@ -2143,6 +2144,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "enigo",
+ "goat-protocol",
  "goat-tool",
  "image",
  "serde_json",
@@ -2155,6 +2157,7 @@ dependencies = [
 name = "goat-tool-fs"
 version = "0.1.0"
 dependencies = [
+ "goat-protocol",
  "goat-tool",
  "serde",
  "serde_json",
@@ -2166,6 +2169,7 @@ dependencies = [
 name = "goat-tool-search"
 version = "0.1.0"
 dependencies = [
+ "goat-protocol",
  "goat-tool",
  "ignore",
  "regex",
@@ -2179,6 +2183,7 @@ dependencies = [
 name = "goat-tool-shell"
 version = "0.1.0"
 dependencies = [
+ "goat-protocol",
  "goat-tool",
  "serde",
  "serde_json",
@@ -2190,6 +2195,7 @@ name = "goat-tool-skill"
 version = "0.1.0"
 dependencies = [
  "goat-config",
+ "goat-protocol",
  "goat-skill",
  "goat-tool",
  "serde",

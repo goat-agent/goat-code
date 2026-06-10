@@ -16,14 +16,14 @@ use goat_core::Engine;
 use goat_protocol::{
     AccountChoice, AccountEntry, AccountInfo, AskQuestion, AuthMethod, Effort, Event,
     LoginCredential, LoginProvider, ModelEntry, ModelTarget, NotifyKind, Op, SkillInfo, TaskId,
-    ThreadSummary, ToolCall, ToolCallId, ToolOutcome, TranscriptEntry,
+    ThreadSummary, ToolCall, ToolCallId, ToolDisplay, ToolOutcome, TranscriptEntry,
 };
 use goat_provider::{
     ContentBlock, Message, MessageRole, Provider, Request, StreamEvent, ToolDefinition,
 };
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use goat_store::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
-use goat_tool::{ToolContext, ToolOutput};
+use goat_tool::{ToolContent, ToolContext, ToolOutput};
 use goat_tools::ToolRegistry;
 use tokio::{
     sync::{Mutex, Semaphore, mpsc, oneshot},
@@ -406,7 +406,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     break;
                 }
             }
-            Op::Interrupt { .. } | Op::SetTheme { .. } | Op::Answer { .. } => {}
+            Op::Interrupt { .. } | Op::Answer { .. } => {}
             Op::Clear => {
                 history.clear();
                 thread_id = None;
@@ -450,6 +450,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 handle_resume(
                     &store,
                     &skills,
+                    &tools,
                     project_instructions.as_deref(),
                     tid,
                     &mut target,
@@ -907,13 +908,9 @@ async fn run_round(
 
 fn tool_outcome(result: &Result<ToolOutput, String>) -> ToolOutcome {
     match result {
-        Ok(ToolOutput::Text(text)) => ToolOutcome {
+        Ok(output) => ToolOutcome {
             ok: true,
-            summary: summarize_line(text),
-        },
-        Ok(ToolOutput::Image(_)) => ToolOutcome {
-            ok: true,
-            summary: Some("[image]".to_owned()),
+            summary: output.summary.clone(),
         },
         Err(message) => ToolOutcome {
             ok: false,
@@ -922,15 +919,59 @@ fn tool_outcome(result: &Result<ToolOutput, String>) -> ToolOutcome {
     }
 }
 
-fn summarize_line(text: &str) -> Option<String> {
-    text.lines().next().map(|line| {
-        if line.chars().count() > 80 {
-            let head: String = line.chars().take(80).collect();
-            format!("{head}…")
-        } else {
-            line.to_owned()
+fn call_display(tools: &ToolRegistry, name: &str, input: &str) -> ToolDisplay {
+    match name {
+        AGENT_TOOL_NAME => agent_call_display(input),
+        ASK_TOOL_NAME => ask_call_display(input),
+        _ => tools.get(name).map_or_else(
+            || goat_tool::display::generic(input),
+            |tool| tool.display_input(input),
+        ),
+    }
+}
+
+fn agent_call_display(input: &str) -> ToolDisplay {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        agent_type: String,
+        prompt: String,
+    }
+    match serde_json::from_str::<Input>(input) {
+        Ok(args) => {
+            ToolDisplay::with_detail(args.agent_type, goat_tool::display::flatten(&args.prompt))
         }
-    })
+        Err(_) => goat_tool::display::generic(input),
+    }
+}
+
+fn ask_call_display(input: &str) -> ToolDisplay {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        questions: Vec<AskQuestion>,
+    }
+    let Ok(args) = serde_json::from_str::<Input>(input) else {
+        return goat_tool::display::generic(input);
+    };
+    let Some(first) = args.questions.first() else {
+        return goat_tool::display::generic(input);
+    };
+    let primary = goat_tool::display::flatten(&first.question);
+    if args.questions.len() > 1 {
+        ToolDisplay::with_detail(primary, format!("+{} more", args.questions.len() - 1))
+    } else {
+        ToolDisplay::primary(primary)
+    }
+}
+
+fn summarize_line(text: &str) -> Option<String> {
+    let line = text.lines().find(|line| !line.trim().is_empty())?;
+    let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 80 {
+        let head: String = flat.chars().take(80).collect();
+        Some(format!("{head}…"))
+    } else {
+        Some(flat)
+    }
 }
 
 async fn create_tool_call_record(
@@ -1071,17 +1112,19 @@ async fn execute_tool(
         })
         .await;
     let content = match result {
-        Ok(ToolOutput::Text(text)) => {
-            vec![ContentBlock::Text {
-                text: cap_tool_result(text),
-            }]
-        }
-        Ok(ToolOutput::Image(img)) => {
-            vec![ContentBlock::Image {
-                media_type: img.media_type,
-                data: img.data,
-            }]
-        }
+        Ok(output) => match output.content {
+            ToolContent::Text(text) => {
+                vec![ContentBlock::Text {
+                    text: cap_tool_result(text),
+                }]
+            }
+            ToolContent::Image(img) => {
+                vec![ContentBlock::Image {
+                    media_type: img.media_type,
+                    data: img.data,
+                }]
+            }
+        },
         Err(msg) => vec![ContentBlock::Text { text: msg }],
     };
     ToolExecResult {
@@ -1114,7 +1157,7 @@ async fn run_tool_batch(
                 call: ToolCall {
                     id: ToolCallId(tui_id),
                     name: name.clone(),
-                    input: input_json.clone(),
+                    display: call_display(ctx.tools, name, input_json),
                 },
             })
             .await;
@@ -1867,10 +1910,7 @@ async fn handle_idle_op(
     target: &mut Option<ModelTarget>,
     events: &mpsc::Sender<Event>,
 ) {
-    if matches!(
-        op,
-        Op::AddAccount { .. } | Op::RemoveAccount { .. } | Op::SetTheme { .. }
-    ) {
+    if matches!(op, Op::AddAccount { .. } | Op::RemoveAccount { .. }) {
         return;
     }
     if let Op::SelectModel { target: chosen } = op {
@@ -1952,20 +1992,11 @@ async fn handle_rename(
     }
 }
 
-fn tool_summary(content: &str) -> String {
-    content
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .take(200)
-        .collect()
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_resume(
     store: &Store,
     skills: &[SkillInfo],
+    tools: &ToolRegistry,
     instructions: Option<&str>,
     tid: i64,
     target: &mut Option<ModelTarget>,
@@ -2017,16 +2048,21 @@ async fn handle_resume(
                 } => {
                     if let Some((name, input)) = tool_uses.remove(tool_use_id) {
                         tool_seq += 1;
-                        let summary_text = ContentBlock::tool_result_text(content);
+                        let display = call_display(tools, &name, &input);
+                        let summary = if *is_error {
+                            summarize_line(&ContentBlock::tool_result_text(content))
+                        } else {
+                            None
+                        };
                         entries.push(TranscriptEntry::Tool {
                             call: ToolCall {
                                 id: ToolCallId(tool_seq),
                                 name,
-                                input,
+                                display,
                             },
                             outcome: ToolOutcome {
                                 ok: !is_error,
-                                summary: Some(tool_summary(&summary_text)),
+                                summary,
                             },
                         });
                     }
@@ -2059,7 +2095,12 @@ async fn handle_turn(
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
     let Some(resolved) = target.clone() else {
-        emit_task_error(ctx, id, "no model selected".to_owned()).await;
+        emit_task_error(
+            ctx,
+            id,
+            "no model selected · /config to connect a provider".to_owned(),
+        )
+        .await;
         return Flow::Continue;
     };
     let resolved_provider = provider_for(

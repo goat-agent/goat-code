@@ -27,6 +27,13 @@ impl Tool for SkillTool {
         })
     }
 
+    fn display_input(&self, input: &str) -> goat_protocol::ToolDisplay {
+        match serde_json::from_str::<Input>(input) {
+            Ok(args) => goat_protocol::ToolDisplay::primary(args.name),
+            Err(_) => goat_tool::display::generic(input),
+        }
+    }
+
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;

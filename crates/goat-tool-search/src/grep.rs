@@ -44,6 +44,25 @@ impl Tool for GrepTool {
         })
     }
 
+    fn display_input(&self, input: &str) -> goat_protocol::ToolDisplay {
+        let Ok(args) = serde_json::from_str::<Input>(input) else {
+            return goat_tool::display::generic(input);
+        };
+        let scope: Vec<String> = [
+            args.path.filter(|p| !p.is_empty() && p != "."),
+            args.glob.filter(|g| !g.is_empty() && g != "*"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let pattern = goat_tool::display::flatten(&args.pattern);
+        if scope.is_empty() {
+            goat_protocol::ToolDisplay::primary(pattern)
+        } else {
+            goat_protocol::ToolDisplay::with_detail(pattern, scope.join(" · "))
+        }
+    }
+
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;

@@ -10,19 +10,29 @@ use crossterm::{
 };
 use ratatui::DefaultTerminal;
 
-pub fn init() -> io::Result<DefaultTerminal> {
+pub fn init(mouse_capture: bool) -> io::Result<DefaultTerminal> {
     let terminal = ratatui::init();
     if supports_keyboard_enhancement().unwrap_or(false) {
         execute!(
             io::stdout(),
             EnableBracketedPaste,
-            EnableMouseCapture,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         )?;
     } else {
-        execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
+        execute!(io::stdout(), EnableBracketedPaste)?;
+    }
+    if mouse_capture {
+        execute!(io::stdout(), EnableMouseCapture)?;
     }
     Ok(terminal)
+}
+
+pub fn set_mouse_capture(enabled: bool) {
+    if enabled {
+        let _ = execute!(io::stdout(), EnableMouseCapture);
+    } else {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+    }
 }
 
 pub fn restore() {

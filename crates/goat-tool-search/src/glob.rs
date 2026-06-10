@@ -37,6 +37,17 @@ impl Tool for GlobTool {
         })
     }
 
+    fn display_input(&self, input: &str) -> goat_protocol::ToolDisplay {
+        let Ok(args) = serde_json::from_str::<Input>(input) else {
+            return goat_tool::display::generic(input);
+        };
+        let pattern = goat_tool::display::flatten(&args.pattern);
+        match args.path.filter(|p| !p.is_empty() && p != ".") {
+            Some(path) => goat_protocol::ToolDisplay::with_detail(pattern, path),
+            None => goat_protocol::ToolDisplay::primary(pattern),
+        }
+    }
+
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
@@ -115,6 +126,7 @@ mod tests {
         assert!(text.contains("a.rs"));
         assert!(text.contains("b.rs"));
         assert!(!text.contains("c.txt"));
+        assert_eq!(out.summary, None);
     }
 
     #[tokio::test]
@@ -124,6 +136,15 @@ mod tests {
         let ctx = ctx(dir.path());
         let out = GlobTool.run(r#"{"pattern":"*.rs"}"#, &ctx).await.unwrap();
         assert_eq!(out.as_text().unwrap(), "no files");
+        assert_eq!(out.summary, None);
+    }
+
+    #[test]
+    fn display_omits_trivial_scope() {
+        use goat_tool::Tool;
+        let display = GlobTool.display_input(r#"{"pattern":"*.rs","path":"."}"#);
+        assert_eq!(display.primary, "*.rs");
+        assert_eq!(display.detail, None);
     }
 
     #[tokio::test]
