@@ -17,7 +17,7 @@ pub mod ui {
     pub const SEPARATOR: &str = " · ";
     pub const ELLIPSIS: &str = "…";
     pub const CODE_GUTTER: &str = "│ ";
-    pub const QUOTE_GUTTER: &str = "│ ";
+    pub const QUOTE_GUTTER: &str = "▎ ";
     pub const RULE: &str = "──────────";
     pub const MORE_ABOVE: &str = "↑";
     pub const MORE_BELOW: &str = "↓";
