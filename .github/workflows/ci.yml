@@ -7,12 +7,16 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  LINUX_DEPS: >-
+    libwayland-dev libxkbcommon-dev libpipewire-0.3-dev libgbm-dev libdrm-dev
+    libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -25,6 +29,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
@@ -34,6 +40,7 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.95"
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
       - run: rustup toolchain install 1.95 --profile minimal
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
