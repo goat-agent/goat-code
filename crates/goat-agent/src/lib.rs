@@ -126,6 +126,7 @@ impl Engine for GoatAgent {
 
 struct Ctx<'a> {
     registry: &'a Registry,
+    account_registries: &'a std::sync::Mutex<HashMap<String, Arc<Registry>>>,
     credentials: &'a CredentialStore,
     tools: &'a ToolRegistry,
     agents: &'a AgentRegistry,
@@ -369,12 +370,15 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
             .await;
     }
     let rl_cache = std::sync::Mutex::new(rl_cache_data);
+    let account_registries: std::sync::Mutex<HashMap<String, Arc<Registry>>> =
+        std::sync::Mutex::new(HashMap::new());
 
     while let Some(op) = ops.recv().await {
         match op {
             Op::SubmitMessage { id, text } => {
                 let ctx = Ctx {
                     registry: &registry,
+                    account_registries: &account_registries,
                     credentials: &credentials,
                     tools: &tools,
                     agents: &agents,
@@ -420,6 +424,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     events: &events,
                 };
                 handle_login(ctx, provider, DEFAULT_ACCOUNT.to_owned(), credential, false).await;
+                clear_account_registries(&account_registries);
             }
             Op::AddAccount {
                 provider,
@@ -432,9 +437,11 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     events: &events,
                 };
                 handle_login(ctx, provider, name, credential, true).await;
+                clear_account_registries(&account_registries);
             }
             Op::RemoveAccount { provider, name } => {
                 handle_remove_account(provider, name, &credentials, &mut registry, &events).await;
+                clear_account_registries(&account_registries);
             }
             Op::ListThreads => {
                 handle_list_threads(&store, &events).await;
@@ -1615,6 +1622,31 @@ async fn core_loop(
     }
 }
 
+fn clear_account_registries(cache: &std::sync::Mutex<HashMap<String, Arc<Registry>>>) {
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+fn provider_for(
+    ctx: &Ctx<'_>,
+    account: &str,
+    id: &goat_provider::ProviderId,
+) -> Option<Arc<dyn Provider>> {
+    if account == DEFAULT_ACCOUNT {
+        return ctx.registry.get(id);
+    }
+    let mut cache = ctx
+        .account_registries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .entry(account.to_owned())
+        .or_insert_with(|| Arc::new(Registry::load(ctx.credentials, account)))
+        .get(id)
+}
+
 fn resolve_agent_model(
     ctx: &Ctx<'_>,
     parent: &ModelTarget,
@@ -1628,9 +1660,12 @@ fn resolve_agent_model(
             .find(|provider| provider.catalog().contains(&model_id.as_str()))
         {
             let provider_id = found.id().to_string();
-            let provider = Registry::load(ctx.credentials, &parent.account)
-                .get(&goat_provider::ProviderId::from(provider_id.as_str()))
-                .unwrap_or_else(|| found.clone());
+            let provider = provider_for(
+                ctx,
+                &parent.account,
+                &goat_provider::ProviderId::from(provider_id.as_str()),
+            )
+            .unwrap_or_else(|| found.clone());
             let effort = spec
                 .effort
                 .or_else(|| provider.efforts(model_id).into_iter().next());
@@ -1638,13 +1673,11 @@ fn resolve_agent_model(
         }
         tracing::warn!(model = %model_id, "agent model not found; inheriting parent model");
     }
-    let provider = ctx
-        .registry
-        .get(&goat_provider::ProviderId::from(parent.provider.as_str()))
-        .or_else(|| {
-            Registry::load(ctx.credentials, &parent.account)
-                .get(&goat_provider::ProviderId::from(parent.provider.as_str()))
-        })?;
+    let provider = provider_for(
+        ctx,
+        &parent.account,
+        &goat_provider::ProviderId::from(parent.provider.as_str()),
+    )?;
     Some((provider, parent.model.clone(), parent.effort))
 }
 
@@ -2027,13 +2060,11 @@ async fn handle_turn(
         emit_task_error(ctx, id, "no model selected".to_owned()).await;
         return Flow::Continue;
     };
-    let resolved_provider = ctx
-        .registry
-        .get(&goat_provider::ProviderId::from(resolved.provider.as_str()))
-        .or_else(|| {
-            Registry::load(ctx.credentials, &resolved.account)
-                .get(&goat_provider::ProviderId::from(resolved.provider.as_str()))
-        });
+    let resolved_provider = provider_for(
+        ctx,
+        &resolved.account,
+        &goat_provider::ProviderId::from(resolved.provider.as_str()),
+    );
     let Some(provider) = resolved_provider else {
         emit_task_error(ctx, id, format!("unknown provider: {}", resolved.provider)).await;
         return Flow::Continue;
