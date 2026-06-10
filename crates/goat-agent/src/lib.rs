@@ -519,8 +519,6 @@ async fn announce_startup(
             entries: catalog_only(registry, credentials),
         })
         .await;
-    let entries = discover_ready(registry, credentials).await;
-    let _ = events.send(Event::ModelListChanged { entries }).await;
     if let Some(selected) = target {
         let _ = events
             .send(Event::ModelSelected {
@@ -528,6 +526,12 @@ async fn announce_startup(
             })
             .await;
     }
+    let providers = provider_accounts(registry, credentials);
+    let bg_events = events.clone();
+    tokio::spawn(async move {
+        let entries = discover_entries(providers).await;
+        let _ = bg_events.send(Event::ModelListChanged { entries }).await;
+    });
 }
 
 struct LoginCtx<'a> {
@@ -751,53 +755,77 @@ fn catalog_only(registry: &Registry, credentials: &CredentialStore) -> Vec<Model
     entries
 }
 
-async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> Vec<ModelEntry> {
+fn provider_accounts(
+    registry: &Registry,
+    credentials: &CredentialStore,
+) -> Vec<(Arc<dyn Provider>, Vec<String>)> {
+    registry
+        .all()
+        .iter()
+        .filter_map(|provider| {
+            accounts_for_provider(credentials, provider.as_ref())
+                .map(|accounts| (Arc::clone(provider), accounts))
+        })
+        .collect()
+}
+
+async fn discover_provider(provider: Arc<dyn Provider>, accounts: Vec<String>) -> Vec<ModelEntry> {
+    let provider_id = provider.id().to_string();
+    let (tx, mut rx) = mpsc::channel(32);
+    let handle = provider.discover(tx);
+    let mut discovered = Vec::new();
+    let collect = async {
+        while let Some(info) = rx.recv().await {
+            discovered.push(info);
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(3), collect).await;
+    handle.abort();
+
+    let catalog = provider.catalog();
+    let catalog_ids: HashSet<&str> = catalog.iter().copied().collect();
+
     let mut entries = Vec::new();
-    for provider in registry.all() {
-        let Some(accounts) = accounts_for_provider(credentials, provider.as_ref()) else {
+    for &id in catalog {
+        entries.push(model_entry(
+            &provider_id,
+            id,
+            &accounts,
+            provider.efforts(id),
+            provider.context_window(id),
+        ));
+    }
+    for info in discovered {
+        if catalog_ids.contains(info.id.as_str()) {
             continue;
-        };
-        let provider_id = provider.id().to_string();
-        let (tx, mut rx) = mpsc::channel(32);
-        let handle = provider.discover(tx);
-        let mut discovered = Vec::new();
-        let collect = async {
-            while let Some(info) = rx.recv().await {
-                discovered.push(info);
-            }
-        };
-        let _ = tokio::time::timeout(Duration::from_secs(3), collect).await;
-        handle.abort();
-
-        let catalog = provider.catalog();
-        let catalog_ids: HashSet<&str> = catalog.iter().copied().collect();
-
-        for &id in catalog {
-            entries.push(model_entry(
-                &provider_id,
-                id,
-                &accounts,
-                provider.efforts(id),
-                provider.context_window(id),
-            ));
         }
-
-        for info in discovered {
-            if catalog_ids.contains(info.id.as_str()) {
-                continue;
-            }
-            let efforts = provider.efforts(&info.id);
-            let ctx_win = provider.context_window(&info.id);
-            entries.push(model_entry(
-                &provider_id,
-                &info.id,
-                &accounts,
-                efforts,
-                ctx_win,
-            ));
-        }
+        let efforts = provider.efforts(&info.id);
+        let ctx_win = provider.context_window(&info.id);
+        entries.push(model_entry(
+            &provider_id,
+            &info.id,
+            &accounts,
+            efforts,
+            ctx_win,
+        ));
     }
     entries
+}
+
+async fn discover_entries(providers: Vec<(Arc<dyn Provider>, Vec<String>)>) -> Vec<ModelEntry> {
+    futures::future::join_all(
+        providers
+            .into_iter()
+            .map(|(provider, accounts)| discover_provider(provider, accounts)),
+    )
+    .await
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> Vec<ModelEntry> {
+    discover_entries(provider_accounts(registry, credentials)).await
 }
 
 async fn run_round(
