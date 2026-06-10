@@ -2,14 +2,15 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, BorderType, Paragraph, Wrap},
+    widgets::{Block, BorderType, Paragraph},
 };
 use unicode_normalization::UnicodeNormalization;
 use unicode_width::UnicodeWidthChar;
 
-use crate::{symbols, theme::Theme};
+use crate::{symbols, theme::Theme, wrap};
 
 const PROMPT_COLS: u16 = 2;
+const BORDER_COLS: u16 = 2;
 const PLACEHOLDER: &str = "Ask anything…";
 
 pub struct Composer {
@@ -36,27 +37,22 @@ fn word_boundary(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-fn line_display_width(chars: &[char]) -> u16 {
-    let w: usize = chars.iter().filter_map(|c| c.width()).sum();
-    u16::try_from(w).unwrap_or(u16::MAX)
-}
-
 impl Composer {
     pub fn is_empty(&self) -> bool {
         self.lines.iter().all(Vec::is_empty)
     }
 
     pub fn desired_height(&self, width: u16) -> u16 {
-        let wrap_width = width.saturating_sub(PROMPT_COLS).max(1);
-        let total: u16 = self
+        let wrap_width = width.saturating_sub(PROMPT_COLS + BORDER_COLS).max(1);
+        let total: usize = self
             .lines
             .iter()
-            .map(|line| {
-                let dw = line_display_width(line);
-                dw.div_ceil(wrap_width).max(1)
-            })
-            .fold(0u16, u16::saturating_add);
-        total.saturating_add(2).clamp(3, 8)
+            .map(|line| wrap::wrap_chars(line, wrap_width).len())
+            .sum();
+        u16::try_from(total)
+            .unwrap_or(u16::MAX)
+            .saturating_add(2)
+            .clamp(3, 8)
     }
 
     pub fn on_first_row(&self) -> bool {
@@ -286,12 +282,22 @@ impl Composer {
         self.col = self.lines[self.row].len();
     }
 
-    fn cursor_display_col(&self) -> u16 {
-        let width: usize = self.lines[self.row][..self.col]
+    fn visual_cursor(&self, wrap_width: u16) -> (usize, u16) {
+        let mut row = 0usize;
+        for line in &self.lines[..self.row] {
+            row += wrap::wrap_chars(line, wrap_width).len();
+        }
+        let ranges = wrap::wrap_chars(&self.lines[self.row], wrap_width);
+        let idx = ranges
+            .iter()
+            .position(|r| self.col < r.end)
+            .unwrap_or(ranges.len() - 1);
+        let range = ranges[idx].clone();
+        let col: usize = self.lines[self.row][range.start..self.col.max(range.start)]
             .iter()
             .filter_map(|c| c.width())
             .sum();
-        u16::try_from(width).unwrap_or(u16::MAX)
+        (row + idx, u16::try_from(col).unwrap_or(u16::MAX))
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool) {
@@ -316,38 +322,32 @@ impl Composer {
             return;
         }
 
-        let lines: Vec<Line> = self
-            .lines
-            .iter()
-            .enumerate()
-            .map(|(i, chars)| {
-                let prompt = if i == 0 { symbols::marker::USER } else { "  " };
-                let body: String = chars.iter().collect();
-                Line::from(vec![
+        let wrap_width = inner.width.saturating_sub(PROMPT_COLS).max(1);
+        let mut rows: Vec<Line> = Vec::new();
+        for chars in &self.lines {
+            for range in wrap::wrap_chars(chars, wrap_width) {
+                let prompt = if rows.is_empty() {
+                    symbols::marker::USER
+                } else {
+                    "  "
+                };
+                let body: String = chars[range].iter().collect();
+                rows.push(Line::from(vec![
                     Span::styled(prompt, theme.accent()),
                     Span::styled(body, theme.base()),
-                ])
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+                ]));
+            }
+        }
+
+        let (cursor_row, cursor_col) = self.visual_cursor(wrap_width);
+        let visible_rows = usize::from(inner.height).max(1);
+        let offset = cursor_row.saturating_sub(visible_rows - 1);
+        let visible: Vec<Line> = rows.into_iter().skip(offset).take(visible_rows).collect();
+        frame.render_widget(Paragraph::new(visible), inner);
 
         if focused {
-            let wrap_width = inner.width.saturating_sub(PROMPT_COLS).max(1);
-            let cursor_char_col = self.cursor_display_col();
-
-            let visual_row_offset: u16 = self.lines[..self.row]
-                .iter()
-                .map(|line| {
-                    let dw = line_display_width(line);
-                    dw.div_ceil(wrap_width).max(1)
-                })
-                .fold(0u16, u16::saturating_add);
-
-            let visual_row_within = cursor_char_col / wrap_width;
-            let visual_col = PROMPT_COLS + (cursor_char_col % wrap_width);
-
-            let x = inner.x + visual_col;
-            let y = inner.y + visual_row_offset + visual_row_within;
+            let x = inner.x + PROMPT_COLS + cursor_col;
+            let y = inner.y + u16::try_from(cursor_row - offset).unwrap_or(u16::MAX);
             frame.set_cursor_position((
                 x.min(inner.right().saturating_sub(1)),
                 y.min(inner.bottom().saturating_sub(1)),
@@ -364,16 +364,16 @@ mod tests {
     fn cursor_column_counts_wide_chars() {
         let mut composer = Composer::default();
         composer.insert_str("한글");
-        assert_eq!(composer.cursor_display_col(), 4);
+        assert_eq!(composer.visual_cursor(80), (0, 4));
         composer.move_left();
-        assert_eq!(composer.cursor_display_col(), 2);
+        assert_eq!(composer.visual_cursor(80), (0, 2));
     }
 
     #[test]
     fn paste_normalizes_to_nfc() {
         let mut composer = Composer::default();
         composer.insert_str("\u{1100}\u{1161}");
-        assert_eq!(composer.cursor_display_col(), 2);
+        assert_eq!(composer.visual_cursor(80), (0, 2));
     }
 
     #[test]
@@ -469,8 +469,22 @@ mod tests {
         let mut composer = Composer::default();
         let long: String = "a".repeat(40);
         composer.insert_str(&long);
-        let h_narrow = composer.desired_height(22);
+        let h_narrow = composer.desired_height(24);
         let h_wide = composer.desired_height(80);
         assert!(h_narrow > h_wide);
+    }
+
+    #[test]
+    fn desired_height_counts_wide_chars_exactly() {
+        let mut composer = Composer::default();
+        composer.insert_str("한한한한한");
+        assert_eq!(composer.desired_height(9), 5);
+    }
+
+    #[test]
+    fn visual_cursor_row_tracks_wrapping() {
+        let mut composer = Composer::default();
+        composer.insert_str("abcdefghij");
+        assert_eq!(composer.visual_cursor(4), (2, 2));
     }
 }
