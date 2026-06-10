@@ -104,13 +104,13 @@ impl App {
     pub(crate) fn on_normal_key(&mut self, key: KeyEvent) -> Vec<Op> {
         match key.code {
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
+                self.scroll = self.scroll.saturating_sub(self.page_rows());
                 self.follow = false;
                 self.dirty = true;
                 Vec::new()
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10);
+                self.scroll = self.scroll.saturating_add(self.page_rows());
                 self.dirty = true;
                 Vec::new()
             }
@@ -515,12 +515,12 @@ impl App {
                 }
             }
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
+                self.scroll = self.scroll.saturating_sub(self.page_rows());
                 self.follow = false;
                 self.dirty = true;
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10);
+                self.scroll = self.scroll.saturating_add(self.page_rows());
                 self.dirty = true;
             }
             _ => {}

@@ -88,6 +88,7 @@ pub struct App {
     pub(crate) dirty: bool,
     pub(crate) scroll: usize,
     pub(crate) follow: bool,
+    pub(crate) viewport_rows: u16,
     pub(crate) models: Vec<ModelEntry>,
     pub(crate) models_loaded: bool,
     pub(crate) model: Option<ModelTarget>,
@@ -132,6 +133,7 @@ impl App {
             dirty: true,
             scroll: 0,
             follow: true,
+            viewport_rows: 0,
             models: Vec::new(),
             models_loaded: false,
             model: None,
@@ -518,6 +520,7 @@ impl App {
     }
 
     pub(crate) fn clamp_scroll(&mut self, viewport_height: u16, content_width: u16) {
+        self.viewport_rows = viewport_height;
         let max = self
             .content_height(content_width)
             .saturating_sub(usize::from(viewport_height));
@@ -529,6 +532,10 @@ impl App {
             }
             self.follow = self.scroll >= max;
         }
+    }
+
+    pub(crate) fn page_rows(&self) -> usize {
+        usize::from(self.viewport_rows.saturating_sub(1)).max(1)
     }
 
     pub(crate) fn take_dirty(&mut self) -> bool {
@@ -934,10 +941,12 @@ mod tests {
     }
 
     #[test]
-    fn page_up_unfollows() {
+    fn page_up_scrolls_by_viewport_and_unfollows() {
         let mut app = filled_app();
+        let bottom = app.scroll;
         app.on_key(press(KeyCode::PageUp, KeyModifiers::NONE));
         assert!(!app.follow);
+        assert_eq!(app.scroll, bottom - 9);
     }
 
     #[test]
