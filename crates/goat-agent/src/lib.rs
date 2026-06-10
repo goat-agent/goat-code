@@ -1365,7 +1365,7 @@ async fn process_round_output(
         && run.is_top()
     {
         let now = now_ms() / 1000;
-        {
+        let serialized = {
             let mut cache = ctx
                 .rl_cache
                 .lock()
@@ -1376,9 +1376,11 @@ async fn process_round_output(
                 snapshot.windows.clone(),
                 now,
             );
-            if let Some(path) = ctx.rl_path {
-                cache.save(path);
-            }
+            cache.to_json()
+        };
+        if let (Some(path), Some(json)) = (ctx.rl_path, serialized) {
+            let path = path.to_owned();
+            tokio::task::spawn_blocking(move || rate_limit_cache::write(&path, &json));
         }
         let _ = ctx
             .events
