@@ -941,6 +941,20 @@ mod tests {
     }
 
     #[test]
+    fn home_and_end_jump_transcript_when_composer_empty() {
+        let mut app = filled_app();
+        app.on_key(press(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.scroll, 0);
+        assert!(!app.follow);
+        app.clamp_scroll(10, 80);
+        assert_eq!(app.scroll, 0);
+        app.on_key(press(KeyCode::End, KeyModifiers::NONE));
+        app.clamp_scroll(10, 80);
+        assert!(app.follow);
+        assert_eq!(app.scroll, app.content_height(80) - 10);
+    }
+
+    #[test]
     fn page_up_scrolls_by_viewport_and_unfollows() {
         let mut app = filled_app();
         let bottom = app.scroll;

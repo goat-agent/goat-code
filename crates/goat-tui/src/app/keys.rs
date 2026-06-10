@@ -159,11 +159,22 @@ impl App {
                 Vec::new()
             }
             KeyCode::Home => {
-                self.dirty |= self.composer.move_home();
+                if self.composer.is_empty() {
+                    self.scroll = 0;
+                    self.follow = false;
+                    self.dirty = true;
+                } else {
+                    self.dirty |= self.composer.move_home();
+                }
                 Vec::new()
             }
             KeyCode::End => {
-                self.dirty |= self.composer.move_end();
+                if self.composer.is_empty() {
+                    self.follow = true;
+                    self.dirty = true;
+                } else {
+                    self.dirty |= self.composer.move_end();
+                }
                 Vec::new()
             }
             KeyCode::Up => {
