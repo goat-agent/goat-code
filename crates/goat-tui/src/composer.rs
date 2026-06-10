@@ -311,9 +311,14 @@ impl Composer {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool) {
+        let border = if focused {
+            theme.border()
+        } else {
+            theme.border_dim()
+        };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(theme.border());
+            .border_style(border);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 

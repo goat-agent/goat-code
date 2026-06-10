@@ -106,6 +106,10 @@ impl Theme {
         Style::new().fg(self.border)
     }
 
+    pub fn border_dim(self) -> Style {
+        Style::new().fg(self.panel)
+    }
+
     pub fn role_user(self) -> Style {
         Style::new().fg(self.user)
     }
