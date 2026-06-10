@@ -11,7 +11,6 @@ use crate::{
     layout::{LIST_MAX, PAD_X, SCROLL_GUTTER},
     overlay, symbols,
     theme::Theme,
-    transcript::Working,
 };
 
 #[allow(clippy::too_many_lines)]
@@ -195,24 +194,23 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
         height: area.height,
     };
     app.clamp_scroll(content.height, content.width);
-    let working = app.is_busy().then(|| Working {
-        elapsed: app.elapsed_secs(),
-        label: app.agent_status(),
-        thinking: app.thinking,
-    });
+    let working = app.working_state();
     app.transcript().render(
         frame,
         content,
-        theme,
-        app.scroll(),
-        app.spinner_frame(),
-        working.as_ref(),
+        &crate::transcript::RenderCtx {
+            theme,
+            scroll: app.scroll(),
+            spinner: app.spinner_frame(),
+            working: working.as_ref(),
+            hl: &app.highlighter,
+        },
     );
     if app.follow() {
         return;
     }
     let content_len = app.content_height(content.width);
-    if content_len <= content.height {
+    if content_len <= usize::from(content.height) {
         return;
     }
     let bar = Rect {
@@ -221,9 +219,9 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
         width: 1,
         height: content.height,
     };
-    let mut state = ScrollbarState::new(content_len as usize)
-        .position(app.scroll() as usize)
-        .viewport_content_length(content.height as usize);
+    let mut state = ScrollbarState::new(content_len)
+        .position(app.scroll())
+        .viewport_content_length(usize::from(content.height));
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)

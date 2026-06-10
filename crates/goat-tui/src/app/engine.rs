@@ -195,9 +195,6 @@ impl App {
                 self.dirty = true;
             }
         }
-        if self.follow {
-            self.scroll = u16::MAX;
-        }
         ops
     }
 

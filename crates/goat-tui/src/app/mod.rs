@@ -86,8 +86,9 @@ pub struct App {
     pub(crate) thinking: bool,
     pub(crate) should_quit: bool,
     pub(crate) dirty: bool,
-    pub(crate) scroll: u16,
+    pub(crate) scroll: usize,
     pub(crate) follow: bool,
+    pub(crate) viewport_rows: u16,
     pub(crate) models: Vec<ModelEntry>,
     pub(crate) models_loaded: bool,
     pub(crate) model: Option<ModelTarget>,
@@ -132,6 +133,7 @@ impl App {
             dirty: true,
             scroll: 0,
             follow: true,
+            viewport_rows: 0,
             models: Vec::new(),
             models_loaded: false,
             model: None,
@@ -217,16 +219,19 @@ impl App {
                 Vec::new()
             }
             AppEvent::Input(CtEvent::Mouse(mouse)) => {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        self.scroll = self.scroll.saturating_sub(3);
-                        self.dirty = true;
+                if self.wheel_scroll_allowed() {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            self.scroll = self.scroll.saturating_sub(3);
+                            self.follow = false;
+                            self.dirty = true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.scroll = self.scroll.saturating_add(3);
+                            self.dirty = true;
+                        }
+                        _ => {}
                     }
-                    MouseEventKind::ScrollDown => {
-                        self.scroll = self.scroll.saturating_add(3);
-                        self.dirty = true;
-                    }
-                    _ => {}
                 }
                 Vec::new()
             }
@@ -382,6 +387,10 @@ impl App {
             }
             ConfigOutcome::SetTheme { dark } => {
                 self.theme = if dark { Theme::dark() } else { Theme::light() };
+                self.transcript.invalidate();
+                for run in &mut self.agent_runs {
+                    run.transcript.invalidate();
+                }
                 if let Overlay::Config(config) = &mut self.overlay {
                     config.set_providers(self.account_entries.clone());
                 }
@@ -517,13 +526,29 @@ impl App {
     }
 
     pub(crate) fn clamp_scroll(&mut self, viewport_height: u16, content_width: u16) {
+        self.viewport_rows = viewport_height;
         let max = self
             .content_height(content_width)
-            .saturating_sub(viewport_height);
-        if self.scroll > max {
+            .saturating_sub(usize::from(viewport_height));
+        if self.follow {
             self.scroll = max;
+        } else {
+            if self.scroll > max {
+                self.scroll = max;
+            }
+            self.follow = self.scroll >= max;
         }
-        self.follow = self.scroll >= max;
+    }
+
+    pub(crate) fn page_rows(&self) -> usize {
+        usize::from(self.viewport_rows.saturating_sub(1)).max(1)
+    }
+
+    pub(crate) fn wheel_scroll_allowed(&self) -> bool {
+        matches!(
+            self.overlay,
+            Overlay::None | Overlay::Commands(_) | Overlay::Agents(_)
+        )
     }
 
     pub(crate) fn take_dirty(&mut self) -> bool {
@@ -577,11 +602,23 @@ impl App {
         symbols::SPINNER[self.spinner % symbols::SPINNER.len()]
     }
 
-    pub(crate) fn content_height(&self, width: u16) -> u16 {
-        self.active_transcript()
-            .content_height(width, self.theme, self.is_busy())
+    pub(crate) fn working_state(&self) -> Option<crate::transcript::Working> {
+        self.is_busy().then(|| crate::transcript::Working {
+            elapsed: self.elapsed_secs(),
+            label: self.agent_status(),
+            thinking: self.thinking,
+        })
     }
-    pub(crate) fn scroll(&self) -> u16 {
+
+    pub(crate) fn content_height(&self, width: u16) -> usize {
+        self.active_transcript().content_height(
+            width,
+            self.theme,
+            &self.highlighter,
+            self.working_state().as_ref(),
+        )
+    }
+    pub(crate) fn scroll(&self) -> usize {
         self.scroll
     }
     pub(crate) fn overlay(&self) -> &Overlay {
@@ -627,7 +664,6 @@ impl App {
         if let Some(run) = self.agent_runs.get(cursor) {
             self.overlay = Overlay::Agents(cursor);
             self.main_view = MainView::Agent(run.id);
-            self.scroll = 0;
             self.follow = true;
             self.dirty = true;
         }
@@ -637,7 +673,6 @@ impl App {
         self.overlay = Overlay::None;
         self.main_view = MainView::Live;
         self.follow = true;
-        self.scroll = u16::MAX;
         self.dirty = true;
     }
 
@@ -874,6 +909,83 @@ mod tests {
         app.composer.insert_str("hello");
         app.submit();
         assert!(app.follow);
+    }
+
+    fn filled_app() -> App {
+        let mut app = App::new(Theme::dark());
+        for i in 0..30 {
+            app.transcript.push_user(format!("message {i}"));
+        }
+        app.clamp_scroll(10, 80);
+        app
+    }
+
+    fn mouse(kind: crossterm::event::MouseEventKind) -> super::AppEvent {
+        super::AppEvent::Input(crossterm::event::Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+    }
+
+    #[test]
+    fn clamp_scroll_materializes_bottom_when_following() {
+        let app = filled_app();
+        assert!(app.follow);
+        assert_eq!(app.scroll, app.content_height(80) - 10);
+    }
+
+    #[test]
+    fn wheel_up_unfollows_then_bottom_refollows() {
+        use crossterm::event::MouseEventKind;
+        let mut app = filled_app();
+        app.update(mouse(MouseEventKind::ScrollUp));
+        assert!(!app.follow);
+        app.clamp_scroll(10, 80);
+        assert!(!app.follow);
+        for _ in 0..40 {
+            app.update(mouse(MouseEventKind::ScrollDown));
+        }
+        app.clamp_scroll(10, 80);
+        assert!(app.follow);
+    }
+
+    #[test]
+    fn wheel_ignored_while_picker_overlay_open() {
+        use crossterm::event::MouseEventKind;
+        let mut app = filled_app();
+        app.update(mouse(MouseEventKind::ScrollUp));
+        app.clamp_scroll(10, 80);
+        let before = app.scroll;
+        app.dispatch_slash_command("/model");
+        app.update(mouse(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll, before);
+    }
+
+    #[test]
+    fn home_and_end_jump_transcript_when_composer_empty() {
+        let mut app = filled_app();
+        app.on_key(press(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.scroll, 0);
+        assert!(!app.follow);
+        app.clamp_scroll(10, 80);
+        assert_eq!(app.scroll, 0);
+        app.on_key(press(KeyCode::End, KeyModifiers::NONE));
+        app.clamp_scroll(10, 80);
+        assert!(app.follow);
+        assert_eq!(app.scroll, app.content_height(80) - 10);
+    }
+
+    #[test]
+    fn page_up_scrolls_by_viewport_and_unfollows() {
+        let mut app = filled_app();
+        let bottom = app.scroll;
+        app.on_key(press(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(!app.follow);
+        assert_eq!(app.scroll, bottom - 9);
     }
 
     #[test]

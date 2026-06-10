@@ -4,13 +4,12 @@ use goat_protocol::{ToolCall, ToolCallId, ToolDisplay, ToolOutcome};
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Style,
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::Paragraph,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::{highlight::Highlighter, markdown, symbols, theme::Theme};
+use crate::{highlight::Highlighter, markdown, symbols, theme::Theme, wrap};
 
 pub(crate) struct Working {
     pub elapsed: Option<u64>,
@@ -18,13 +17,25 @@ pub(crate) struct Working {
     pub thinking: bool,
 }
 
+pub(crate) struct RenderCtx<'a> {
+    pub theme: Theme,
+    pub scroll: usize,
+    pub spinner: &'static str,
+    pub working: Option<&'a Working>,
+    pub hl: &'a dyn Highlighter,
+}
+
 struct RenderCache {
     width: u16,
     version: u64,
     lines: Vec<Line<'static>>,
-    rows: Vec<u16>,
     spinner_lines: Vec<usize>,
-    total_rows: u16,
+}
+
+struct StreamCache {
+    len: usize,
+    width: u16,
+    rows: Vec<Line<'static>>,
 }
 
 #[derive(Debug)]
@@ -53,12 +64,18 @@ pub struct Transcript {
     streaming: Option<String>,
     version: u64,
     cache: RefCell<Option<RenderCache>>,
+    stream_cache: RefCell<Option<StreamCache>>,
 }
 
 impl Transcript {
     fn bump_version(&mut self) {
         self.version = self.version.wrapping_add(1);
         *self.cache.borrow_mut() = None;
+        *self.stream_cache.borrow_mut() = None;
+    }
+
+    pub fn invalidate(&mut self) {
+        self.bump_version();
     }
 
     pub fn clear(&mut self) {
@@ -151,163 +168,185 @@ impl Transcript {
             return;
         }
         let (lines, spinner_lines) = build_static_lines(&self.items, theme, width);
-        let rows: Vec<u16> = lines.iter().map(|l| line_rows(l, width)).collect();
-        let total_rows = rows.iter().copied().fold(0u16, u16::saturating_add);
         *self.cache.borrow_mut() = Some(RenderCache {
             width,
             version: self.version,
             lines,
-            rows,
             spinner_lines,
-            total_rows,
         });
     }
 
-    fn streaming_lines(&self, theme: Theme) -> Vec<Line<'static>> {
-        if let Some(buffer) = &self.streaming {
-            let mut streamed = labelled(buffer, symbols::marker::AGENT, theme.role_agent(), theme);
-            if let Some(last) = streamed.last_mut() {
-                last.spans
-                    .push(Span::styled(symbols::ui::STREAM_CURSOR, theme.accent()));
-            }
-            streamed
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn working_rows(base: u16, busy: bool) -> u16 {
-        if !busy {
-            return 0;
-        }
-        if base > 0 { 2 } else { 1 }
-    }
-
-    pub fn content_height(&self, width: u16, theme: Theme, busy: bool) -> u16 {
-        self.ensure_cache(theme, width);
-        let guard = self.cache.borrow();
-        let mut h = guard.as_ref().map_or(0, |c| c.total_rows);
-        let streamed = self.streaming_lines(theme);
-        if !streamed.is_empty() {
-            if h > 0 {
-                h = h.saturating_add(1);
-            }
-            for line in &streamed {
-                h = h.saturating_add(line_rows(line, width));
+    fn streaming_rows(&self, theme: Theme, width: u16, hl: &dyn Highlighter) -> Vec<Line<'static>> {
+        let Some(buffer) = &self.streaming else {
+            return Vec::new();
+        };
+        {
+            let guard = self.stream_cache.borrow();
+            if let Some(cached) = guard.as_ref()
+                && cached.len == buffer.len()
+                && cached.width == width
+            {
+                return cached.rows.clone();
             }
         }
-        h.saturating_add(Self::working_rows(h, busy))
+        let mut content = markdown::render(buffer, theme, hl);
+        while content.last().is_some_and(is_blank) {
+            content.pop();
+        }
+        if let Some(last) = content.last_mut() {
+            last.spans
+                .push(Span::styled(symbols::ui::STREAM_CURSOR, theme.accent()));
+        }
+        let rows = hang(
+            &content,
+            Span::styled(symbols::marker::AGENT, theme.role_agent()),
+            width,
+        );
+        *self.stream_cache.borrow_mut() = Some(StreamCache {
+            len: buffer.len(),
+            width,
+            rows: rows.clone(),
+        });
+        rows
     }
 
-    pub fn render(
+    fn tail_rows(
         &self,
-        frame: &mut Frame,
-        area: Rect,
         theme: Theme,
-        scroll: u16,
+        width: u16,
+        hl: &dyn Highlighter,
         spinner: &'static str,
         working: Option<&Working>,
-    ) {
-        self.ensure_cache(theme, area.width);
+        base_nonempty: bool,
+    ) -> Vec<Line<'static>> {
+        let mut tail: Vec<Line<'static>> = Vec::new();
+        let streamed = self.streaming_rows(theme, width, hl);
+        if !streamed.is_empty() {
+            if base_nonempty {
+                tail.push(Line::default());
+            }
+            tail.extend(streamed);
+        }
+        if let Some(w) = working {
+            if base_nonempty || !tail.is_empty() {
+                tail.push(Line::default());
+            }
+            tail.extend(working_rows(theme, width, spinner, w));
+        }
+        tail
+    }
+
+    pub fn content_height(
+        &self,
+        width: u16,
+        theme: Theme,
+        hl: &dyn Highlighter,
+        working: Option<&Working>,
+    ) -> usize {
+        self.ensure_cache(theme, width);
+        let base = self.cache.borrow().as_ref().map_or(0, |c| c.lines.len());
+        base + self
+            .tail_rows(theme, width, hl, symbols::SPINNER[0], working, base > 0)
+            .len()
+    }
+
+    pub(crate) fn render(&self, frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
+        self.ensure_cache(ctx.theme, area.width);
         let guard = self.cache.borrow();
         let Some(cache) = guard.as_ref() else {
             return;
         };
-        let mut tail: Vec<Line<'static>> = Vec::new();
-        let streamed = self.streaming_lines(theme);
-        if !streamed.is_empty() && !cache.lines.is_empty() {
-            tail.push(Line::default());
-        }
-        tail.extend(streamed);
-        if let Some(w) = working {
-            if !cache.lines.is_empty() || !tail.is_empty() {
-                tail.push(Line::default());
-            }
-            tail.push(working_line(theme, spinner, w));
-        }
-
-        let start = u32::from(scroll);
-        let end = start + u32::from(area.height);
-        let mut visible: Vec<Line<'static>> = Vec::new();
-        let mut first_offset: u16 = 0;
-        let mut cursor: u32 = 0;
-
-        for (i, line) in cache.lines.iter().enumerate() {
-            let rows = u32::from(cache.rows[i]);
-            if cursor + rows <= start {
-                cursor += rows;
-                continue;
-            }
-            if cursor >= end {
-                break;
-            }
-            if visible.is_empty() {
-                first_offset = u16::try_from(start.saturating_sub(cursor)).unwrap_or(0);
-            }
-            let mut line = line.clone();
+        let tail = self.tail_rows(
+            ctx.theme,
+            area.width,
+            ctx.hl,
+            ctx.spinner,
+            ctx.working,
+            !cache.lines.is_empty(),
+        );
+        let total = cache.lines.len() + tail.len();
+        let height = usize::from(area.height);
+        let start = ctx.scroll.min(total.saturating_sub(height));
+        let end = (start + height).min(total);
+        let mut visible: Vec<Line<'static>> = Vec::with_capacity(end.saturating_sub(start));
+        let static_end = end.min(cache.lines.len());
+        for i in start.min(static_end)..static_end {
+            let mut line = cache.lines[i].clone();
             if cache.spinner_lines.binary_search(&i).is_ok()
                 && let Some(span) = line.spans.first_mut()
             {
-                *span = Span::styled(spinner, theme.accent());
+                *span = Span::styled(ctx.spinner, ctx.theme.accent());
             }
             visible.push(line);
-            cursor += rows;
         }
-        for line in tail {
-            let rows = u32::from(line_rows(&line, area.width));
-            if cursor + rows <= start {
-                cursor += rows;
-                continue;
-            }
-            if cursor >= end {
-                break;
-            }
-            if visible.is_empty() {
-                first_offset = u16::try_from(start.saturating_sub(cursor)).unwrap_or(0);
-            }
-            visible.push(line);
-            cursor += rows;
+        if end > cache.lines.len() {
+            let from = start.saturating_sub(cache.lines.len());
+            let to = end - cache.lines.len();
+            visible.extend(tail.into_iter().take(to).skip(from));
         }
-
-        frame.render_widget(
-            Paragraph::new(visible)
-                .wrap(Wrap { trim: false })
-                .scroll((first_offset, 0)),
-            area,
-        );
+        frame.render_widget(Paragraph::new(visible), area);
     }
 }
 
-fn line_rows(line: &Line<'_>, width: u16) -> u16 {
-    if width == 0 {
-        return 1;
+fn is_blank(line: &Line<'_>) -> bool {
+    line.spans.iter().all(|s| s.content.is_empty())
+}
+
+fn hang(content: &[Line<'static>], marker: Span<'static>, width: u16) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(2);
+    let mut first = Some(marker);
+    if content.is_empty() {
+        return vec![Line::from(vec![first.take().unwrap_or_default()])];
     }
-    let display: usize = line
-        .spans
-        .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-        .sum();
-    if display == 0 {
-        1
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for line in content {
+        for mut row in wrap::wrap_line(line, inner) {
+            let prefix = first.take().unwrap_or_else(|| Span::raw("  "));
+            row.spans.insert(0, prefix);
+            out.push(row);
+        }
+    }
+    out
+}
+
+fn plain_lines(text: &str, theme: Theme) -> Vec<Line<'static>> {
+    text.split('\n')
+        .map(|raw| Line::from(Span::styled(raw.to_owned(), theme.base())))
+        .collect()
+}
+
+fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
     } else {
-        u16::try_from(display.div_ceil(usize::from(width))).unwrap_or(u16::MAX)
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
-fn working_line(theme: Theme, spinner: &'static str, w: &Working) -> Line<'static> {
-    let mut spans = vec![Span::styled(spinner, theme.accent()), Span::raw(" ")];
+fn working_rows(
+    theme: Theme,
+    width: u16,
+    spinner: &'static str,
+    w: &Working,
+) -> Vec<Line<'static>> {
     let label = w.label.clone().unwrap_or_else(|| {
         let verb = if w.thinking { "thinking" } else { "working" };
         format!("{verb}{}", symbols::ui::ELLIPSIS)
     });
-    spans.push(Span::styled(label, theme.muted()));
+    let mut spans = vec![Span::styled(label, theme.muted())];
     if let Some(secs) = w.elapsed {
         spans.push(Span::styled(
-            format!("{}{secs}s", symbols::ui::SEPARATOR),
+            format!("{}{}", symbols::ui::SEPARATOR, format_elapsed(secs)),
             theme.muted(),
         ));
     }
-    Line::from(spans)
+    hang(
+        &[Line::from(spans)],
+        Span::styled(format!("{spinner} "), theme.accent()),
+        width,
+    )
 }
 
 fn build_static_lines(
@@ -334,38 +373,39 @@ fn build_static_lines(
         ) {
             spinner_lines.push(lines.len());
         }
-        lines.extend(item_lines(item, theme, width));
+        lines.extend(item_rows(item, theme, width));
     }
     (lines, spinner_lines)
 }
 
-fn item_lines(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
+fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
     match item {
-        Item::User(text) => labelled(
-            text.as_str(),
-            symbols::marker::USER,
-            theme.role_user(),
-            theme,
+        Item::User(text) => hang(
+            &plain_lines(text, theme),
+            Span::styled(symbols::marker::USER, theme.role_user()),
+            width,
         ),
         Item::Agent(rendered) => {
-            let mut out: Vec<Line<'_>> = Vec::new();
-            if let Some(first) = rendered.first() {
-                let mut line = first.clone();
-                line.spans
-                    .insert(0, Span::styled(symbols::marker::AGENT, theme.role_agent()));
-                out.push(line);
-            }
-            out.extend(rendered.iter().skip(1).map(|l| {
-                let mut padded = l.clone();
-                padded.spans.insert(0, Span::raw("  "));
-                padded
-            }));
-            out
+            let end = rendered
+                .iter()
+                .rposition(|l| !is_blank(l))
+                .map_or(0, |i| i + 1);
+            hang(
+                &rendered[..end],
+                Span::styled(symbols::marker::AGENT, theme.role_agent()),
+                width,
+            )
         }
-        Item::Error(text) => labelled(text.as_str(), symbols::marker::ERROR, theme.error(), theme),
-        Item::Notice(text) => {
-            labelled(text.as_str(), symbols::marker::NOTICE, theme.muted(), theme)
-        }
+        Item::Error(text) => hang(
+            &plain_lines(text, theme),
+            Span::styled(symbols::marker::ERROR, theme.error()),
+            width,
+        ),
+        Item::Notice(text) => hang(
+            &plain_lines(text, theme),
+            Span::styled(symbols::marker::NOTICE, theme.muted()),
+            width,
+        ),
         Item::Tool {
             name,
             display,
@@ -417,7 +457,7 @@ fn item_lines(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
                 ..
             }) = status
             {
-                result.extend(result_block(summary, theme));
+                result.extend(result_rows(summary, theme, width));
             }
             result
         }
@@ -426,10 +466,11 @@ fn item_lines(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
 
 const RESULT_BLOCK_CAP: usize = 6;
 
-fn result_block(summary: &str, theme: Theme) -> Vec<Line<'static>> {
-    let lines: Vec<&str> = summary.lines().collect();
+fn result_rows(summary: &str, theme: Theme, width: u16) -> Vec<Line<'static>> {
+    let src: Vec<&str> = summary.lines().collect();
+    let inner = width.saturating_sub(2);
     let mut out: Vec<Line<'static>> = Vec::new();
-    for line in lines.iter().take(RESULT_BLOCK_CAP) {
+    for line in src.iter().take(RESULT_BLOCK_CAP) {
         let style = if line.starts_with("+ ") {
             theme.role_agent()
         } else if line.starts_with("- ") {
@@ -437,19 +478,20 @@ fn result_block(summary: &str, theme: Theme) -> Vec<Line<'static>> {
         } else {
             theme.muted()
         };
-        out.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(line.replace('\t', "  "), style),
-        ]));
+        let content = Line::from(Span::styled(line.replace('\t', "  "), style));
+        for mut row in wrap::wrap_line(&content, inner) {
+            row.spans.insert(0, Span::raw("  "));
+            out.push(row);
+        }
     }
-    if lines.len() > RESULT_BLOCK_CAP {
+    if src.len() > RESULT_BLOCK_CAP {
         out.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(
                 format!(
                     "{} {} more",
                     symbols::ui::ELLIPSIS,
-                    lines.len() - RESULT_BLOCK_CAP
+                    src.len() - RESULT_BLOCK_CAP
                 ),
                 theme.muted(),
             ),
@@ -479,36 +521,13 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
-fn labelled(
-    text: &str,
-    marker: &'static str,
-    marker_style: Style,
-    theme: Theme,
-) -> Vec<Line<'static>> {
-    text.split('\n')
-        .enumerate()
-        .map(|(i, raw)| {
-            if i == 0 {
-                Line::from(vec![
-                    Span::styled(marker, marker_style),
-                    Span::styled(raw.to_owned(), theme.base()),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(raw.to_owned(), theme.base()),
-                ])
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use goat_protocol::{ToolCall, ToolCallId, ToolOutcome};
+    use ratatui::{Terminal, backend::TestBackend};
 
-    use super::{Item, ToolStatus, Transcript};
-    use crate::{highlight::PlainHighlighter, theme::Theme};
+    use super::{Item, ToolStatus, Transcript, Working, format_elapsed};
+    use crate::{highlight::PlainHighlighter, symbols, theme::Theme};
 
     fn call(id: u64, name: &str, input: &str) -> ToolCall {
         ToolCall {
@@ -534,6 +553,17 @@ mod tests {
 
     fn commit(t: &mut Transcript, text: &str) {
         t.commit_text(text, &PlainHighlighter, Theme::dark());
+    }
+
+    fn height(t: &Transcript, width: u16) -> usize {
+        t.content_height(width, Theme::dark(), &PlainHighlighter, None)
+    }
+
+    fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
     }
 
     #[test]
@@ -620,9 +650,9 @@ mod tests {
     fn content_height_counts_streaming() {
         let mut t = Transcript::default();
         commit(&mut t, "hello world");
-        let h1 = t.content_height(80, Theme::dark(), false);
+        let h1 = height(&t, 80);
         t.push_delta("line one\nline two\nline three\nline four");
-        let h2 = t.content_height(80, Theme::dark(), false);
+        let h2 = height(&t, 80);
         assert!(
             h2 > h1,
             "content_height must grow while streaming is active"
@@ -633,10 +663,15 @@ mod tests {
     fn content_height_includes_working_line() {
         let mut t = Transcript::default();
         commit(&mut t, "hello world");
-        let h_idle = t.content_height(80, Theme::dark(), false);
-        let h_busy = t.content_height(80, Theme::dark(), true);
+        let idle = height(&t, 80);
+        let working = Working {
+            elapsed: None,
+            label: None,
+            thinking: false,
+        };
+        let busy = t.content_height(80, Theme::dark(), &PlainHighlighter, Some(&working));
         assert!(
-            h_busy > h_idle,
+            busy > idle,
             "content_height must be larger when busy (working line)"
         );
     }
@@ -649,5 +684,67 @@ mod tests {
             matches!(t.items.last(), Some(Item::Notice(_))),
             "interrupting with no stream must push a Notice item"
         );
+    }
+
+    #[test]
+    fn word_wrapped_bottom_is_visible_at_max_scroll() {
+        let mut t = Transcript::default();
+        commit(&mut t, "aaaaaaa bbbbbbb ccccccc");
+        let h = height(&t, 12);
+        assert_eq!(h, 3, "word wrap must yield three visual rows at width 12");
+        let mut terminal = Terminal::new(TestBackend::new(12, 2)).unwrap();
+        terminal
+            .draw(|frame| {
+                t.render(
+                    frame,
+                    frame.area(),
+                    &super::RenderCtx {
+                        theme: Theme::dark(),
+                        scroll: h - 2,
+                        spinner: symbols::SPINNER[0],
+                        working: None,
+                        hl: &PlainHighlighter,
+                    },
+                );
+            })
+            .unwrap();
+        assert!(buffer_row(&terminal, 1).contains("ccccccc"));
+    }
+
+    #[test]
+    fn running_tool_renders_current_spinner_frame() {
+        let mut t = Transcript::default();
+        t.push_tool(call(1, "Read", "x"));
+        let mut terminal = Terminal::new(TestBackend::new(20, 2)).unwrap();
+        terminal
+            .draw(|frame| {
+                t.render(
+                    frame,
+                    frame.area(),
+                    &super::RenderCtx {
+                        theme: Theme::dark(),
+                        scroll: 0,
+                        spinner: symbols::SPINNER[3],
+                        working: None,
+                        hl: &PlainHighlighter,
+                    },
+                );
+            })
+            .unwrap();
+        assert!(buffer_row(&terminal, 0).starts_with(symbols::SPINNER[3]));
+    }
+
+    #[test]
+    fn content_height_exceeds_u16_for_huge_transcripts() {
+        let mut t = Transcript::default();
+        t.push_user("x\n".repeat(70_000));
+        assert!(height(&t, 80) > usize::from(u16::MAX));
+    }
+
+    #[test]
+    fn format_elapsed_scales_units() {
+        assert_eq!(format_elapsed(42), "42s");
+        assert_eq!(format_elapsed(92), "1m32s");
+        assert_eq!(format_elapsed(3_725), "1h02m");
     }
 }

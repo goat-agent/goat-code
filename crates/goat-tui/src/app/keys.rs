@@ -104,12 +104,13 @@ impl App {
     pub(crate) fn on_normal_key(&mut self, key: KeyEvent) -> Vec<Op> {
         match key.code {
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
+                self.scroll = self.scroll.saturating_sub(self.page_rows());
+                self.follow = false;
                 self.dirty = true;
                 Vec::new()
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10);
+                self.scroll = self.scroll.saturating_add(self.page_rows());
                 self.dirty = true;
                 Vec::new()
             }
@@ -158,11 +159,22 @@ impl App {
                 Vec::new()
             }
             KeyCode::Home => {
-                self.dirty |= self.composer.move_home();
+                if self.composer.is_empty() {
+                    self.scroll = 0;
+                    self.follow = false;
+                    self.dirty = true;
+                } else {
+                    self.dirty |= self.composer.move_home();
+                }
                 Vec::new()
             }
             KeyCode::End => {
-                self.dirty |= self.composer.move_end();
+                if self.composer.is_empty() {
+                    self.follow = true;
+                    self.dirty = true;
+                } else {
+                    self.dirty |= self.composer.move_end();
+                }
                 Vec::new()
             }
             KeyCode::Up => {
@@ -492,7 +504,7 @@ impl App {
         if self.quit_arm.is_some() {
             self.should_quit = true;
         } else {
-            self.composer.clear();
+            self.composer.discard();
             self.quit_arm = Some(QUIT_ARM_TICKS);
         }
         Vec::new()
@@ -514,11 +526,12 @@ impl App {
                 }
             }
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
+                self.scroll = self.scroll.saturating_sub(self.page_rows());
+                self.follow = false;
                 self.dirty = true;
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10);
+                self.scroll = self.scroll.saturating_add(self.page_rows());
                 self.dirty = true;
             }
             _ => {}

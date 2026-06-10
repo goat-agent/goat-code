@@ -12,10 +12,11 @@ use crate::{
     theme::Theme,
 };
 
-const BINDINGS: [(&str, &str); 10] = [
+const BINDINGS: [(&str, &str); 11] = [
     ("⇧↵ ⌥↵", "newline"),
     ("↑↓", "history · move cursor"),
-    ("pgup pgdn", "scroll transcript"),
+    ("pgup pgdn", "scroll transcript by page"),
+    ("home end", "transcript top · bottom"),
     ("⌃a ⌃e", "line start · end"),
     ("⌃w", "delete word"),
     ("⌥← ⌥→", "word left · right"),
