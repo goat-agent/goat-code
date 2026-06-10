@@ -105,6 +105,9 @@ impl GoatAgent {
                 Err(err) => tracing::warn!("computer use unavailable: {err}"),
             }
         }
+        if config.browser_enabled {
+            tools = tools.with(Box::new(goat_tool_browser::browser_tool()));
+        }
         Self {
             registry,
             tools,

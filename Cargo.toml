@@ -33,6 +33,7 @@ goat-tool-search = { path = "crates/goat-tool-search" }
 goat-tool-skill = { path = "crates/goat-tool-skill" }
 goat-tools = { path = "crates/goat-tools" }
 goat-tool-computer = { path = "crates/goat-tool-computer" }
+goat-tool-browser = { path = "crates/goat-tool-browser" }
 goat-skill = { path = "crates/goat-skill" }
 goat-command = { path = "crates/goat-command" }
 goat-command-settings = { path = "crates/goat-command-settings" }
