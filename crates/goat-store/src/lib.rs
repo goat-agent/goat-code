@@ -5,7 +5,7 @@ use std::{
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-const LATEST_VERSION: i64 = 2;
+const LATEST_VERSION: i64 = 3;
 
 const SCHEMA_V1: &str = "\
 CREATE TABLE threads (
@@ -54,6 +54,11 @@ const SCHEMA_V2: &str = "\
 ALTER TABLE threads ADD COLUMN effort TEXT;
 ALTER TABLE turns ADD COLUMN effort TEXT;";
 
+const SCHEMA_V3: &str = "\
+CREATE INDEX idx_messages_thread ON messages(thread_id);
+CREATE INDEX idx_tool_calls_thread ON tool_calls(thread_id);
+CREATE INDEX idx_threads_cwd ON threads(cwd);";
+
 fn migrate(conn: &Connection) -> Result<(), StoreError> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > LATEST_VERSION {
@@ -63,6 +68,7 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         match version {
             0 => conn.execute_batch(SCHEMA_V1)?,
             1 => conn.execute_batch(SCHEMA_V2)?,
+            2 => conn.execute_batch(SCHEMA_V3)?,
             _ => return Err(StoreError::UnknownVersion(version)),
         }
         version += 1;
