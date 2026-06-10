@@ -387,6 +387,10 @@ impl App {
             }
             ConfigOutcome::SetTheme { dark } => {
                 self.theme = if dark { Theme::dark() } else { Theme::light() };
+                self.transcript.invalidate();
+                for run in &mut self.agent_runs {
+                    run.transcript.invalidate();
+                }
                 if let Overlay::Config(config) = &mut self.overlay {
                     config.set_providers(self.account_entries.clone());
                 }

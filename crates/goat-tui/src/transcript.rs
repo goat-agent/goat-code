@@ -74,6 +74,10 @@ impl Transcript {
         *self.stream_cache.borrow_mut() = None;
     }
 
+    pub fn invalidate(&mut self) {
+        self.bump_version();
+    }
+
     pub fn clear(&mut self) {
         self.bump_version();
         self.items.clear();
