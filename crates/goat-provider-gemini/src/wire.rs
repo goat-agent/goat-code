@@ -237,6 +237,8 @@ pub fn build_request(req: &Request) -> InnerRequest {
         }
     }
 
+    let contents = coalesce_user_text_contents(contents);
+
     let system_instruction = if system_parts.is_empty() {
         None
     } else {
@@ -257,6 +259,35 @@ pub fn build_request(req: &Request) -> InnerRequest {
         tools,
         generation_config: gen_cfg,
     }
+}
+
+fn is_plain_user_content(content: &Value) -> bool {
+    content.get("role").and_then(Value::as_str) == Some("user")
+        && content
+            .get("parts")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| {
+                parts
+                    .iter()
+                    .all(|part| part.get("functionResponse").is_none())
+            })
+}
+
+fn coalesce_user_text_contents(contents: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for mut content in contents {
+        if let Some(last) = out.last_mut()
+            && is_plain_user_content(last)
+            && is_plain_user_content(&content)
+            && let (Some(Value::Array(dst)), Some(Value::Array(src))) =
+                (last.get_mut("parts"), content.get_mut("parts"))
+        {
+            dst.append(src);
+            continue;
+        }
+        out.push(content);
+    }
+    out
 }
 
 pub fn inner_request_to_value(inner: &InnerRequest) -> Value {
@@ -479,6 +510,58 @@ mod tests {
         let fc = &v["contents"][0]["parts"][0]["functionCall"];
         assert!(fc.get("id").is_none());
         assert_eq!(fc["name"], "my_tool");
+    }
+
+    #[test]
+    fn consecutive_user_text_contents_merge() {
+        let req = make_request(vec![
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text {
+                    text: "first".to_owned(),
+                }],
+            },
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text {
+                    text: "second".to_owned(),
+                }],
+            },
+        ]);
+        let inner = build_request(&req);
+        let v = inner_request_to_value(&inner);
+        assert_eq!(v["contents"].as_array().unwrap().len(), 1);
+        assert_eq!(v["contents"][0]["role"], "user");
+        assert_eq!(v["contents"][0]["parts"][0]["text"], "first");
+        assert_eq!(v["contents"][0]["parts"][1]["text"], "second");
+    }
+
+    #[test]
+    fn function_response_content_does_not_merge() {
+        let req = make_request(vec![
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text {
+                    text: "run it".to_owned(),
+                }],
+            },
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::text_result(
+                    "real-id-1".to_owned(),
+                    "done",
+                    false,
+                )],
+            },
+        ]);
+        let inner = build_request(&req);
+        let v = inner_request_to_value(&inner);
+        assert_eq!(v["contents"].as_array().unwrap().len(), 2);
+        assert!(
+            v["contents"][1]["parts"][0]
+                .get("functionResponse")
+                .is_some()
+        );
     }
 
     #[test]
