@@ -12,14 +12,22 @@ use crate::{symbols, theme::Theme, wrap};
 const PROMPT_COLS: u16 = 2;
 const BORDER_COLS: u16 = 2;
 const PLACEHOLDER: &str = "Ask anything…";
+const SHELL_PLACEHOLDER: &str = "Run a shell command…";
+
+#[derive(Clone)]
+enum HistEntry {
+    Text(String),
+    Shell(String),
+}
 
 pub struct Composer {
     lines: Vec<Vec<char>>,
     row: usize,
     col: usize,
-    history: Vec<String>,
+    shell: bool,
+    history: Vec<HistEntry>,
     hist_cursor: Option<usize>,
-    draft: Option<String>,
+    draft: Option<HistEntry>,
 }
 
 impl Default for Composer {
@@ -28,6 +36,7 @@ impl Default for Composer {
             lines: vec![Vec::new()],
             row: 0,
             col: 0,
+            shell: false,
             history: Vec::new(),
             hist_cursor: None,
             draft: None,
@@ -42,6 +51,18 @@ fn word_boundary(c: char) -> bool {
 impl Composer {
     pub fn is_empty(&self) -> bool {
         self.lines.iter().all(Vec::is_empty)
+    }
+
+    pub fn shell(&self) -> bool {
+        self.shell
+    }
+
+    pub fn enter_shell(&mut self) {
+        self.shell = true;
+    }
+
+    pub fn exit_shell(&mut self) {
+        self.shell = false;
     }
 
     pub fn desired_height(&self, width: u16) -> u16 {
@@ -225,7 +246,7 @@ impl Composer {
     pub fn take(&mut self) -> String {
         let text = self.text();
         if !text.trim().is_empty() {
-            self.history.push(text.clone());
+            self.history.push(self.snapshot());
         }
         let history = std::mem::take(&mut self.history);
         *self = Self {
@@ -233,6 +254,27 @@ impl Composer {
             ..Self::default()
         };
         text
+    }
+
+    fn snapshot(&self) -> HistEntry {
+        if self.shell {
+            HistEntry::Shell(self.text())
+        } else {
+            HistEntry::Text(self.text())
+        }
+    }
+
+    fn apply(&mut self, entry: &HistEntry) {
+        match entry {
+            HistEntry::Text(text) => {
+                self.shell = false;
+                self.set_text(text);
+            }
+            HistEntry::Shell(text) => {
+                self.shell = true;
+                self.set_text(text);
+            }
+        }
     }
 
     pub fn discard(&mut self) {
@@ -245,7 +287,7 @@ impl Composer {
         }
         let idx = match self.hist_cursor {
             None => {
-                self.draft = Some(self.text());
+                self.draft = Some(self.snapshot());
                 self.history.len() - 1
             }
             Some(0) => 0,
@@ -253,7 +295,7 @@ impl Composer {
         };
         self.hist_cursor = Some(idx);
         let entry = self.history[idx].clone();
-        self.set_text(&entry);
+        self.apply(&entry);
     }
 
     pub fn history_next(&mut self) {
@@ -261,12 +303,15 @@ impl Composer {
             Some(i) if i + 1 < self.history.len() => {
                 self.hist_cursor = Some(i + 1);
                 let entry = self.history[i + 1].clone();
-                self.set_text(&entry);
+                self.apply(&entry);
             }
             Some(_) => {
                 self.hist_cursor = None;
-                let draft = self.draft.take().unwrap_or_default();
-                self.set_text(&draft);
+                let draft = self
+                    .draft
+                    .take()
+                    .unwrap_or_else(|| HistEntry::Text(String::new()));
+                self.apply(&draft);
             }
             None => {}
         }
@@ -311,10 +356,16 @@ impl Composer {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool) {
-        let border = if focused {
-            theme.border()
+        let border = match (self.shell, focused) {
+            (true, true) => theme.shell(),
+            (true, false) => theme.shell_dim(),
+            (false, true) => theme.border(),
+            (false, false) => theme.border_dim(),
+        };
+        let (marker, marker_style) = if self.shell {
+            (symbols::marker::SHELL, theme.shell())
         } else {
-            theme.border_dim()
+            (symbols::marker::USER, theme.accent())
         };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -323,10 +374,15 @@ impl Composer {
         frame.render_widget(block, area);
 
         if self.is_empty() {
+            let placeholder = if self.shell {
+                SHELL_PLACEHOLDER
+            } else {
+                PLACEHOLDER
+            };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(symbols::marker::USER, theme.accent()),
-                    Span::styled(PLACEHOLDER, theme.muted()),
+                    Span::styled(marker, marker_style),
+                    Span::styled(placeholder, theme.muted()),
                 ])),
                 inner,
             );
@@ -341,14 +397,10 @@ impl Composer {
         let mut rows: Vec<Line> = Vec::new();
         for chars in &self.lines {
             for range in wrap::wrap_chars(chars, wrap_width) {
-                let prompt = if rows.is_empty() {
-                    symbols::marker::USER
-                } else {
-                    "  "
-                };
+                let prompt = if rows.is_empty() { marker } else { "  " };
                 let body: String = chars[range].iter().collect();
                 rows.push(Line::from(vec![
-                    Span::styled(prompt, theme.accent()),
+                    Span::styled(prompt, marker_style),
                     Span::styled(body, theme.base()),
                 ]));
             }
@@ -523,5 +575,61 @@ mod tests {
         let mut composer = Composer::default();
         composer.insert_str("abcdefghij");
         assert_eq!(composer.visual_cursor(4), (2, 2));
+    }
+
+    #[test]
+    fn take_resets_shell_mode() {
+        let mut composer = Composer::default();
+        composer.enter_shell();
+        composer.insert_str("echo 1");
+        assert_eq!(composer.take(), "echo 1");
+        assert!(!composer.shell());
+        assert!(composer.is_empty());
+    }
+
+    #[test]
+    fn shell_history_recall_restores_mode() {
+        let mut composer = Composer::default();
+        composer.enter_shell();
+        composer.insert_str("echo 1");
+        composer.take();
+        composer.history_prev();
+        assert!(composer.shell());
+        assert_eq!(composer.text(), "echo 1");
+    }
+
+    #[test]
+    fn pasted_bang_text_recalls_as_plain() {
+        let mut composer = Composer::default();
+        composer.insert_str("!important note");
+        assert!(!composer.shell());
+        composer.take();
+        composer.history_prev();
+        assert!(!composer.shell());
+        assert_eq!(composer.text(), "!important note");
+    }
+
+    #[test]
+    fn shell_draft_survives_history_navigation() {
+        let mut composer = Composer::default();
+        composer.insert_str("older message");
+        composer.take();
+        composer.enter_shell();
+        composer.insert_str("dra");
+        composer.history_prev();
+        assert!(!composer.shell());
+        assert_eq!(composer.text(), "older message");
+        composer.history_next();
+        assert!(composer.shell());
+        assert_eq!(composer.text(), "dra");
+    }
+
+    #[test]
+    fn clear_exits_shell_mode() {
+        let mut composer = Composer::default();
+        composer.enter_shell();
+        composer.insert_str("ls");
+        composer.clear();
+        assert!(!composer.shell());
     }
 }
