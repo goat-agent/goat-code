@@ -26,6 +26,8 @@ pub struct Theme {
     border: Color,
     selection: Color,
     panel: Color,
+    shell: Color,
+    shell_dim: Color,
     pub code: CodePalette,
 }
 
@@ -49,6 +51,8 @@ impl Theme {
             border: Color::Rgb(0x2a, 0x2c, 0x32),
             selection: Color::Rgb(0x2f, 0x33, 0x3e),
             panel: Color::Rgb(0x1b, 0x1b, 0x1e),
+            shell: Color::Rgb(0xdb, 0x4b, 0x4b),
+            shell_dim: Color::Rgb(0x54, 0x29, 0x2e),
             code: CodePalette {
                 bg: Color::Rgb(0x1a, 0x1b, 0x26),
                 keyword: Color::Rgb(0xbb, 0x9a, 0xf7),
@@ -74,6 +78,8 @@ impl Theme {
             border: Color::Rgb(0xd9, 0xdc, 0xe1),
             selection: Color::Rgb(0xdd, 0xe3, 0xec),
             panel: Color::Rgb(0xee, 0xee, 0xf0),
+            shell: Color::Rgb(0xb0, 0x35, 0x54),
+            shell_dim: Color::Rgb(0xe6, 0xc2, 0xcb),
             code: CodePalette {
                 bg: Color::Rgb(0xf0, 0xf0, 0xf5),
                 keyword: Color::Rgb(0x6a, 0x3d, 0xc9),
@@ -108,6 +114,14 @@ impl Theme {
 
     pub fn border_dim(self) -> Style {
         Style::new().fg(self.panel)
+    }
+
+    pub fn shell(self) -> Style {
+        Style::new().fg(self.shell)
+    }
+
+    pub fn shell_dim(self) -> Style {
+        Style::new().fg(self.shell_dim)
     }
 
     pub fn role_user(self) -> Style {
