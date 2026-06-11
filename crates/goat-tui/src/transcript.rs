@@ -1,9 +1,10 @@
 use std::cell::RefCell;
 
-use goat_protocol::{ToolCall, ToolCallId, ToolDisplay, ToolOutcome};
+use goat_protocol::{TaskId, ToolCall, ToolCallId, ToolDisplay, ToolOutcome};
 use ratatui::{
     Frame,
     layout::Rect,
+    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -45,6 +46,12 @@ pub(crate) enum ToolStatus {
 }
 
 #[derive(Debug)]
+pub(crate) enum ShellStatus {
+    Running,
+    Done(String),
+}
+
+#[derive(Debug)]
 pub(crate) enum Item {
     User(String),
     Agent(Vec<Line<'static>>),
@@ -53,6 +60,11 @@ pub(crate) enum Item {
         name: String,
         display: ToolDisplay,
         status: ToolStatus,
+    },
+    Shell {
+        id: TaskId,
+        command: String,
+        status: ShellStatus,
     },
     Error(String),
     Notice(String),
@@ -125,6 +137,28 @@ impl Transcript {
         }
     }
 
+    pub fn push_shell(&mut self, id: TaskId, command: String) {
+        self.bump_version();
+        self.items.push(Item::Shell {
+            id,
+            command,
+            status: ShellStatus::Running,
+        });
+    }
+
+    pub fn finish_shell(&mut self, task_id: TaskId, output: String) {
+        self.bump_version();
+        for item in self.items.iter_mut().rev() {
+            if let Item::Shell { id, status, .. } = item
+                && *id == task_id
+                && matches!(status, ShellStatus::Running)
+            {
+                *status = ShellStatus::Done(output);
+                return;
+            }
+        }
+    }
+
     pub fn push_error(&mut self, text: impl Into<String>) {
         self.bump_version();
         self.streaming = None;
@@ -142,6 +176,11 @@ impl Transcript {
                         ok: false,
                         summary: None,
                     });
+                }
+                if let Item::Shell { status, .. } = item
+                    && matches!(status, ShellStatus::Running)
+                {
+                    *status = ShellStatus::Done(String::new());
                 }
             }
         }
@@ -369,6 +408,9 @@ fn build_static_lines(
             Item::Tool {
                 status: ToolStatus::Running,
                 ..
+            } | Item::Shell {
+                status: ShellStatus::Running,
+                ..
             }
         ) {
             spinner_lines.push(lines.len());
@@ -396,6 +438,9 @@ fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
                 width,
             )
         }
+        Item::Shell {
+            command, status, ..
+        } => shell_rows(command, status, theme, width),
         Item::Error(text) => hang(
             &plain_lines(text, theme),
             Span::styled(symbols::marker::ERROR, theme.error()),
@@ -465,6 +510,141 @@ fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
 }
 
 const RESULT_BLOCK_CAP: usize = 6;
+const SHELL_BLOCK_CAP: usize = 20;
+const SHELL_EXIT_PREFIX: &str = "exit code: ";
+const SHELL_NO_OUTPUT: &str = "(no output)";
+
+fn resolve_carriage_returns(line: &str) -> &str {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    line.rsplit('\r').next().unwrap_or(line)
+}
+
+fn strip_control_sequences(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    for next in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(next) = chars.next() {
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\t' => out.push(c),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn sanitize_shell_output(output: &str) -> Vec<String> {
+    let mut lines: Vec<String> = output
+        .split('\n')
+        .map(|line| strip_control_sequences(resolve_carriage_returns(line)))
+        .collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+fn shell_line_style(line: &str, theme: Theme) -> Style {
+    if line.starts_with(SHELL_EXIT_PREFIX) || (line.starts_with('[') && line.ends_with(']')) {
+        theme.error()
+    } else if line.starts_with("+ ") {
+        theme.role_agent()
+    } else if line.starts_with("- ") {
+        theme.error()
+    } else {
+        theme.muted()
+    }
+}
+
+fn shell_rows(command: &str, status: &ShellStatus, theme: Theme, width: u16) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(2);
+    let (marker, marker_style) = match status {
+        ShellStatus::Running => (symbols::SPINNER[0], theme.accent()),
+        ShellStatus::Done(_) => (symbols::ui::BANG, theme.shell()),
+    };
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut first = Some(Span::styled(marker, marker_style));
+    for line in &plain_lines(command, theme) {
+        for mut row in wrap::wrap_line(line, inner) {
+            match first.take() {
+                Some(span) => {
+                    row.spans.insert(0, Span::raw(" "));
+                    row.spans.insert(0, span);
+                }
+                None => row.spans.insert(0, Span::raw("  ")),
+            }
+            out.push(row);
+        }
+    }
+
+    let ShellStatus::Done(output) = status else {
+        return out;
+    };
+    let lines = sanitize_shell_output(output);
+    if lines.is_empty() {
+        out.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(SHELL_NO_OUTPUT, theme.muted()),
+        ]));
+        return out;
+    }
+    let exit_line = lines
+        .last()
+        .filter(|line| line.starts_with(SHELL_EXIT_PREFIX))
+        .cloned();
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    for line in &lines {
+        let content = Line::from(Span::styled(
+            line.replace('\t', "  "),
+            shell_line_style(line, theme),
+        ));
+        for mut row in wrap::wrap_line(&content, inner) {
+            row.spans.insert(0, Span::raw("  "));
+            rows.push(row);
+        }
+    }
+    let total = rows.len();
+    if total > SHELL_BLOCK_CAP {
+        rows.truncate(SHELL_BLOCK_CAP);
+        rows.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{} {} more", symbols::ui::ELLIPSIS, total - SHELL_BLOCK_CAP),
+                theme.muted(),
+            ),
+        ]));
+        if let Some(exit) = exit_line {
+            rows.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(exit, theme.error()),
+            ]));
+        }
+    }
+    out.extend(rows);
+    out
+}
 
 fn result_rows(summary: &str, theme: Theme, width: u16) -> Vec<Line<'static>> {
     let src: Vec<&str> = summary.lines().collect();
@@ -523,10 +703,13 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use goat_protocol::{ToolCall, ToolCallId, ToolOutcome};
+    use goat_protocol::{TaskId, ToolCall, ToolCallId, ToolOutcome};
     use ratatui::{Terminal, backend::TestBackend};
 
-    use super::{Item, ToolStatus, Transcript, Working, format_elapsed};
+    use super::{
+        Item, SHELL_BLOCK_CAP, ShellStatus, ToolStatus, Transcript, Working, format_elapsed,
+        sanitize_shell_output, shell_rows,
+    };
     use crate::{highlight::PlainHighlighter, symbols, theme::Theme};
 
     fn call(id: u64, name: &str, input: &str) -> ToolCall {
@@ -746,5 +929,84 @@ mod tests {
         assert_eq!(format_elapsed(42), "42s");
         assert_eq!(format_elapsed(92), "1m32s");
         assert_eq!(format_elapsed(3_725), "1h02m");
+    }
+
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.clone()).collect()
+    }
+
+    #[test]
+    fn shell_lifecycle() {
+        let mut t = Transcript::default();
+        t.push_shell(TaskId(1), "echo hi".to_owned());
+        assert!(matches!(
+            &t.items[0],
+            Item::Shell {
+                status: ShellStatus::Running,
+                ..
+            }
+        ));
+        t.finish_shell(TaskId(1), "hi".to_owned());
+        assert!(matches!(
+            &t.items[0],
+            Item::Shell {
+                status: ShellStatus::Done(output),
+                ..
+            } if output == "hi"
+        ));
+    }
+
+    #[test]
+    fn complete_interrupted_finishes_running_shell() {
+        let mut t = Transcript::default();
+        t.push_shell(TaskId(2), "sleep 99".to_owned());
+        t.complete(true, &PlainHighlighter, Theme::dark());
+        assert!(matches!(
+            &t.items[0],
+            Item::Shell {
+                status: ShellStatus::Done(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sanitize_strips_ansi_and_resolves_carriage_returns() {
+        let lines = sanitize_shell_output("\u{1b}[31mred\u{1b}[0m\nstep1\rstep2\rdone\nlast\r\n\n");
+        assert_eq!(lines, vec!["red", "done", "last"]);
+    }
+
+    #[test]
+    fn shell_rows_render_command_and_output() {
+        let rows = shell_rows(
+            "echo hi",
+            &ShellStatus::Done("hi".to_owned()),
+            Theme::dark(),
+            80,
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(line_text(&rows[0]), "! echo hi");
+        assert_eq!(line_text(&rows[1]), "  hi");
+    }
+
+    #[test]
+    fn shell_rows_caps_visual_rows_and_pins_exit_code() {
+        let output = format!("{}\nexit code: 2", "x".repeat(30 * 76));
+        let rows = shell_rows("badcmd", &ShellStatus::Done(output), Theme::dark(), 80);
+        assert_eq!(rows.len(), 1 + SHELL_BLOCK_CAP + 2);
+        assert!(line_text(&rows[1 + SHELL_BLOCK_CAP]).contains("more"));
+        assert!(line_text(rows.last().unwrap()).contains("exit code: 2"));
+    }
+
+    #[test]
+    fn shell_rows_show_no_output_placeholder() {
+        let rows = shell_rows(
+            "true",
+            &ShellStatus::Done("  \n".to_owned()),
+            Theme::dark(),
+            80,
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(line_text(&rows[1]).contains("(no output)"));
     }
 }

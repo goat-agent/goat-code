@@ -23,7 +23,7 @@ use goat_provider::{
 };
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use goat_store::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
-use goat_tool::{ToolContent, ToolContext, ToolOutput};
+use goat_tool::{ToolContent, ToolContext, ToolError, ToolOutput};
 use goat_tools::ToolRegistry;
 use tokio::{
     sync::{Mutex, Semaphore, mpsc, oneshot},
@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 mod agent;
 mod instructions;
 mod rate_limit_cache;
+mod shell;
 
 pub use agent::{AgentRegistry, AgentSpec, ToolSelection};
 
@@ -396,6 +397,37 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     &ctx,
                     id,
                     text,
+                    &mut target,
+                    &mut history,
+                    &mut thread_id,
+                    &mut ops,
+                )
+                .await
+                {
+                    break;
+                }
+            }
+            Op::SubmitShell { id, command } => {
+                let ctx = Ctx {
+                    registry: &registry,
+                    account_registries: &account_registries,
+                    credentials: &credentials,
+                    tools: &tools,
+                    agents: &agents,
+                    store: &store,
+                    events: &events,
+                    skills: &skills,
+                    instructions: project_instructions.as_deref(),
+                    semaphore: &semaphore,
+                    child_ids: &child_ids,
+                    asks: &asks,
+                    rl_cache: &rl_cache,
+                    rl_path: rl_path.as_deref(),
+                };
+                if let Flow::Shutdown = handle_shell(
+                    &ctx,
+                    id,
+                    &command,
                     &mut target,
                     &mut history,
                     &mut thread_id,
@@ -2023,6 +2055,22 @@ async fn handle_resume(
         std::collections::HashMap::new();
     let mut tool_seq: u64 = 0;
     for stored in messages {
+        if stored.role == "shell" {
+            let content = parse_content_blocks(&stored.body);
+            if let Some(ContentBlock::Text { text }) = content.first() {
+                match shell::decode(text) {
+                    Some((command, output)) => {
+                        entries.push(TranscriptEntry::Shell { command, output });
+                    }
+                    None => entries.push(TranscriptEntry::User(text.clone())),
+                }
+            }
+            new_history.push(Message {
+                role: MessageRole::User,
+                content,
+            });
+            continue;
+        }
         let role = match stored.role.as_str() {
             "user" => MessageRole::User,
             "assistant" => MessageRole::Assistant,
@@ -2179,6 +2227,130 @@ async fn handle_turn(
     if matches!(turn_end, TurnEnd::Shutdown) {
         return Flow::Shutdown;
     }
+
+    for op in deferred {
+        handle_idle_op(op, ctx.store, *thread_id, target, ctx.events).await;
+    }
+
+    Flow::Continue
+}
+
+const SHELL_TIMEOUT: Duration = Duration::from_mins(10);
+const SHELL_INTERRUPTED: &str = "[interrupted]";
+
+enum ShellEnd {
+    Done(String),
+    Interrupted,
+    Shutdown,
+}
+
+async fn run_shell_command(tools: &ToolRegistry, command: &str, cwd: &Path) -> String {
+    let mut tool_ctx = match ToolContext::new(cwd) {
+        Ok(tool_ctx) => tool_ctx,
+        Err(err) => return err.to_string(),
+    };
+    tool_ctx.bash_timeout = SHELL_TIMEOUT;
+    let Some(tool) = tools.get("Bash") else {
+        return "shell tool unavailable".to_owned();
+    };
+    let input = serde_json::json!({ "command": command }).to_string();
+    match tool.run(&input, &tool_ctx).await {
+        Ok(output) => output.as_text().unwrap_or_default().to_owned(),
+        Err(ToolError::Timeout { .. }) => {
+            format!("[timed out after {}m]", SHELL_TIMEOUT.as_secs() / 60)
+        }
+        Err(err) => err.to_string(),
+    }
+}
+
+async fn handle_shell(
+    ctx: &Ctx<'_>,
+    id: TaskId,
+    command: &str,
+    target: &mut Option<ModelTarget>,
+    history: &mut Vec<Message>,
+    thread_id: &mut Option<i64>,
+    ops: &mut mpsc::Receiver<Op>,
+) -> Flow {
+    if ctx.events.send(Event::TaskStarted { id }).await.is_err() {
+        return Flow::Shutdown;
+    }
+    let stored_thread = match target.as_ref() {
+        Some(resolved) => {
+            ensure_thread(
+                ctx.store,
+                thread_id,
+                resolved,
+                thread_title(&format!("! {command}")),
+            )
+            .await
+        }
+        None => None,
+    };
+    let cwd = resolve_thread_cwd(ctx, stored_thread).await;
+
+    let mut deferred: Vec<Op> = Vec::new();
+    let outcome = {
+        let fut = run_shell_command(ctx.tools, command, &cwd);
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                biased;
+                output = &mut fut => break ShellEnd::Done(output),
+                maybe_op = ops.recv() => match maybe_op {
+                    Some(Op::Interrupt { id: target_id }) if target_id == id => {
+                        break ShellEnd::Interrupted;
+                    }
+                    Some(Op::Shutdown) | None => break ShellEnd::Shutdown,
+                    Some(op) => deferred.push(op),
+                },
+            }
+        }
+    };
+
+    let output = match outcome {
+        ShellEnd::Shutdown => return Flow::Shutdown,
+        ShellEnd::Interrupted => SHELL_INTERRUPTED.to_owned(),
+        ShellEnd::Done(output) => output,
+    };
+
+    let encoded = shell::encode(command, &output);
+    if history.is_empty() {
+        history.push(Message::text(
+            MessageRole::System,
+            build_system_prompt(ctx.skills, ctx.instructions),
+        ));
+    }
+    history.push(Message::text(MessageRole::User, encoded.clone()));
+
+    if let Some(tid) = stored_thread {
+        let body = serde_json::to_string(&vec![ContentBlock::Text {
+            text: encoded.clone(),
+        }])
+        .unwrap_or(encoded);
+        if let Err(err) = ctx
+            .store
+            .create_message(NewMessage {
+                thread_id: tid,
+                turn_id: None,
+                role: "shell".to_owned(),
+                body,
+                created_at: now_ms(),
+            })
+            .await
+        {
+            tracing::warn!(%err, "failed to persist shell message");
+        }
+    }
+
+    let _ = ctx.events.send(Event::ShellDone { id, output }).await;
+    let _ = ctx
+        .events
+        .send(Event::TaskDone {
+            id,
+            interrupted: false,
+        })
+        .await;
 
     for op in deferred {
         handle_idle_op(op, ctx.store, *thread_id, target, ctx.events).await;
@@ -2525,5 +2697,105 @@ mod tests {
         drain_until_task_done(&mut events).await;
 
         assert!(store.get_thread(2).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn shell_runs_and_reports_output() {
+        let session = Session::spawn(agent_with("unused", 0));
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitShell {
+            id: TaskId(7),
+            command: "echo hello".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        let mut started = false;
+        let mut output = None;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::TaskStarted { .. } => started = true,
+                Event::ShellDone { output: text, .. } => output = Some(text),
+                Event::TaskDone { interrupted, .. } => {
+                    assert!(!interrupted);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(started);
+        assert!(
+            output
+                .expect("ShellDone must precede TaskDone")
+                .contains("hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_interrupt_kills_command() {
+        let session = Session::spawn(agent_with("unused", 0));
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitShell {
+            id: TaskId(8),
+            command: "sleep 999".to_owned(),
+        })
+        .await
+        .unwrap();
+        ops.send(Op::Interrupt { id: TaskId(8) }).await.unwrap();
+
+        let mut output = None;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::ShellDone { output: text, .. } => output = Some(text),
+                Event::TaskDone { interrupted, .. } => {
+                    assert!(!interrupted);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(output.as_deref(), Some(super::SHELL_INTERRUPTED));
+    }
+
+    #[tokio::test]
+    async fn shell_persists_role_and_resumes() {
+        let provider = MockProvider {
+            id: "mock".to_owned(),
+            reply: "ok".to_owned(),
+            delay_ms: 0,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-shell.json"));
+        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+
+        ops.send(Op::SubmitShell {
+            id: TaskId(1),
+            command: "echo persisted".to_owned(),
+        })
+        .await
+        .unwrap();
+        drain_until_task_done(&mut events).await;
+
+        let thread = store.get_thread(1).await.unwrap().expect("thread created");
+        assert_eq!(thread.title.as_deref(), Some("! echo persisted"));
+        let messages = store.get_messages(1).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "shell");
+
+        ops.send(Op::Resume { thread_id: 1 }).await.unwrap();
+        while let Some(event) = events.recv().await {
+            if let Event::ConversationRestored { entries, .. } = event {
+                assert!(entries.iter().any(|entry| matches!(
+                    entry,
+                    goat_protocol::TranscriptEntry::Shell { command, output }
+                        if command == "echo persisted" && output.contains("persisted")
+                )));
+                return;
+            }
+        }
+        panic!("expected ConversationRestored");
     }
 }

@@ -129,8 +129,12 @@ impl App {
                 self.submit()
             }
             KeyCode::Backspace => {
-                self.composer.backspace();
-                self.update_command_menu();
+                if self.composer.is_empty() && self.composer.shell() {
+                    self.composer.exit_shell();
+                } else {
+                    self.composer.backspace();
+                    self.update_command_menu();
+                }
                 self.dirty = true;
                 Vec::new()
             }
@@ -206,6 +210,7 @@ impl App {
                 self.overlay = Overlay::None;
                 if self.composer.is_empty() {
                     self.clear_arm = None;
+                    self.composer.exit_shell();
                     return Vec::new();
                 }
                 if self.clear_arm.take().is_some() {
@@ -213,6 +218,11 @@ impl App {
                 } else {
                     self.clear_arm = Some(CLEAR_ARM_TICKS);
                 }
+                Vec::new()
+            }
+            KeyCode::Char('!') if self.composer.is_empty() && !self.composer.shell() => {
+                self.composer.enter_shell();
+                self.dirty = true;
                 Vec::new()
             }
             KeyCode::Char(c) => {
@@ -501,6 +511,11 @@ impl App {
     pub(crate) fn on_ctrl_c(&mut self) -> Vec<Op> {
         self.dirty = true;
         self.clear_arm = None;
+        if self.active_shell
+            && let Some(id) = self.active
+        {
+            return vec![Op::Interrupt { id }];
+        }
         if self.quit_arm.is_some() {
             self.should_quit = true;
         } else {

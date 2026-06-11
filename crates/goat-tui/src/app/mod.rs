@@ -78,6 +78,7 @@ pub struct App {
     pub(crate) highlighter: SyntectHighlighter,
     pub(crate) cwd: String,
     pub(crate) active: Option<TaskId>,
+    pub(crate) active_shell: bool,
     pub(crate) next_task: u64,
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
@@ -123,6 +124,7 @@ impl App {
             highlighter: SyntectHighlighter::new(),
             cwd,
             active: None,
+            active_shell: false,
             next_task: 1,
             spinner: 0,
             quit_arm: None,
@@ -439,6 +441,13 @@ impl App {
         if self.composer.is_empty() {
             return Vec::new();
         }
+        if self.composer.shell() {
+            if self.composer.text().trim().is_empty() {
+                return Vec::new();
+            }
+            let command = self.composer.take();
+            return self.submit_shell(command);
+        }
         let text = self.composer.take();
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -449,6 +458,16 @@ impl App {
             return self.dispatch_slash_command(&cmd);
         }
         self.submit_text(text)
+    }
+
+    pub(crate) fn submit_shell(&mut self, command: String) -> Vec<Op> {
+        let id = TaskId(self.next_task);
+        self.next_task += 1;
+        self.active = Some(id);
+        self.active_shell = true;
+        self.transcript.push_shell(id, command.clone());
+        self.follow = true;
+        vec![Op::SubmitShell { id, command }]
     }
 
     pub(crate) fn submit_text(&mut self, text: String) -> Vec<Op> {
@@ -511,6 +530,12 @@ impl App {
     }
 
     pub(crate) fn update_command_menu(&mut self) {
+        if self.composer.shell() {
+            if matches!(self.overlay, Overlay::Commands(_)) {
+                self.overlay = Overlay::None;
+            }
+            return;
+        }
         let text = self.composer.text();
         let trimmed = text.trim_start();
         if trimmed.starts_with('/') && !trimmed.contains(' ') {
@@ -603,6 +628,9 @@ impl App {
     }
 
     pub(crate) fn working_state(&self) -> Option<crate::transcript::Working> {
+        if self.active_shell {
+            return None;
+        }
         self.is_busy().then(|| crate::transcript::Working {
             elapsed: self.elapsed_secs(),
             label: self.agent_status(),
@@ -863,6 +891,159 @@ mod tests {
         assert!(!app.should_quit);
         app.on_ctrl_c();
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn bang_on_empty_enters_shell_mode() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::SHIFT));
+        assert!(app.composer.shell());
+        assert!(app.composer.is_empty());
+    }
+
+    #[test]
+    fn bang_mid_text_is_literal() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('l'), KeyModifiers::NONE));
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::SHIFT));
+        assert!(!app.composer.shell());
+        assert_eq!(app.composer.text(), "l!");
+    }
+
+    #[test]
+    fn backspace_on_empty_exits_shell_mode() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.on_key(press(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(!app.composer.shell());
+    }
+
+    #[test]
+    fn esc_on_empty_exits_shell_mode() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.composer.shell());
+    }
+
+    #[test]
+    fn shell_submit_emits_submit_shell() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("echo hi");
+        let ops = app.submit();
+        assert!(
+            matches!(ops.as_slice(), [Op::SubmitShell { command, .. }] if command == "echo hi")
+        );
+        assert!(app.active.is_some());
+        assert!(app.active_shell);
+        assert!(matches!(
+            app.transcript.items.last(),
+            Some(crate::transcript::Item::Shell { .. })
+        ));
+    }
+
+    #[test]
+    fn shell_mode_slash_text_is_not_a_command() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.on_key(press(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(!matches!(app.overlay, Overlay::Commands(_)));
+        app.composer.insert_str("usr/bin/true");
+        let ops = app.submit();
+        assert!(
+            matches!(ops.as_slice(), [Op::SubmitShell { command, .. }] if command == "/usr/bin/true")
+        );
+    }
+
+    #[test]
+    fn whitespace_shell_submit_keeps_mode() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("   ");
+        let ops = app.submit();
+        assert!(ops.is_empty());
+        assert!(app.composer.shell());
+        assert_eq!(app.composer.text(), "   ");
+    }
+
+    #[test]
+    fn ctrl_c_during_shell_run_interrupts() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("sleep 5");
+        app.submit();
+        let ops = app.on_ctrl_c();
+        assert!(matches!(ops.as_slice(), [Op::Interrupt { .. }]));
+        assert!(!app.quit_armed());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn shell_run_suppresses_working_line() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("sleep 5");
+        app.submit();
+        app.on_engine(EngineEvent::TaskStarted { id: TaskId(1) });
+        assert!(app.working_state().is_none());
+    }
+
+    #[test]
+    fn shell_done_completes_cell_and_clears_state() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("echo hi");
+        let ops = app.submit();
+        let [Op::SubmitShell { id, .. }] = ops.as_slice() else {
+            panic!("expected SubmitShell");
+        };
+        app.on_engine(EngineEvent::ShellDone {
+            id: *id,
+            output: "hi".to_owned(),
+        });
+        app.on_engine(EngineEvent::TaskDone {
+            id: *id,
+            interrupted: false,
+        });
+        assert!(app.active.is_none());
+        assert!(!app.active_shell);
+        assert!(matches!(
+            app.transcript.items.last(),
+            Some(crate::transcript::Item::Shell {
+                status: crate::transcript::ShellStatus::Done(output),
+                ..
+            }) if output == "hi"
+        ));
+    }
+
+    #[test]
+    fn shell_history_recall_restores_mode() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("echo 1");
+        app.submit();
+        assert!(!app.composer.shell());
+        app.on_engine(EngineEvent::TaskDone {
+            id: TaskId(1),
+            interrupted: false,
+        });
+        app.on_key(press(KeyCode::Up, KeyModifiers::NONE));
+        assert!(app.composer.shell());
+        assert_eq!(app.composer.text(), "echo 1");
+    }
+
+    #[test]
+    fn shell_submit_while_active_denies() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("hi");
+        app.submit();
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("echo hi");
+        let ops = app.submit();
+        assert!(ops.is_empty());
+        assert!(app.deny_arm.is_some());
+        assert!(app.composer.shell());
     }
 
     #[test]

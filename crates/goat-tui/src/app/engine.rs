@@ -54,6 +54,11 @@ impl App {
                             self.transcript.push_tool(call);
                             self.transcript.finish_tool(id, outcome);
                         }
+                        TranscriptEntry::Shell { command, output } => {
+                            let id = TaskId(0);
+                            self.transcript.push_shell(id, command);
+                            self.transcript.finish_shell(id, output);
+                        }
                     }
                 }
                 self.model = Some(target);
@@ -116,6 +121,9 @@ impl App {
                     self.transcript.finish_tool(call, outcome);
                 }
             }
+            EngineEvent::ShellDone { id, output } => {
+                self.transcript.finish_shell(id, output);
+            }
             EngineEvent::AgentStarted {
                 id,
                 agent_type,
@@ -142,12 +150,14 @@ impl App {
                 self.transcript
                     .complete(interrupted, &self.highlighter, self.theme);
                 self.active = None;
+                self.active_shell = false;
                 self.task_start = None;
                 self.thinking = false;
             }
             EngineEvent::Error { message, .. } => {
                 self.transcript.push_error(message);
                 self.active = None;
+                self.active_shell = false;
                 self.task_start = None;
                 self.thinking = false;
             }
