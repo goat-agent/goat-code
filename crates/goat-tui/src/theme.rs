@@ -17,6 +17,7 @@ pub struct CodePalette {
 pub struct Theme {
     bg: Color,
     fg: Color,
+    dark: bool,
     user: Color,
     agent: Color,
     tool: Color,
@@ -40,7 +41,8 @@ impl Default for Theme {
 impl Theme {
     pub const fn dark() -> Self {
         Self {
-            bg: Color::Rgb(0x12, 0x12, 0x14),
+            bg: Color::Reset,
+            dark: true,
             fg: Color::Rgb(0xe6, 0xe6, 0xe6),
             user: Color::Rgb(0x7a, 0xa2, 0xf7),
             agent: Color::Rgb(0x9e, 0xce, 0x6a),
@@ -68,6 +70,7 @@ impl Theme {
     pub const fn light() -> Self {
         Self {
             bg: Color::Rgb(0xfa, 0xfa, 0xfa),
+            dark: false,
             fg: Color::Rgb(0x1c, 0x1e, 0x22),
             user: Color::Rgb(0x2e, 0x5c, 0xc9),
             agent: Color::Rgb(0x2f, 0x7d, 0x32),
@@ -179,12 +182,6 @@ impl Theme {
     }
 
     pub fn is_dark(self) -> bool {
-        match self.bg {
-            Color::Rgb(r, g, b) => {
-                let luminance = u32::from(r) + u32::from(g) + u32::from(b);
-                luminance < 384
-            }
-            _ => true,
-        }
+        self.dark
     }
 }
