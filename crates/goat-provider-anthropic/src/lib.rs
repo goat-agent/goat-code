@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use eventsource_stream::Eventsource;
+mod error;
 use futures::StreamExt;
 use goat_auth::{
     Credential, CredentialKey, CredentialStore, Pkce, TokenSet, ensure_valid, random_state,
@@ -494,6 +495,12 @@ struct MessageDeltaUsage {
 #[derive(Deserialize)]
 struct MessageDelta {
     usage: Option<MessageDeltaUsage>,
+    delta: Option<MessageDeltaBody>,
+}
+
+#[derive(Deserialize)]
+struct MessageDeltaBody {
+    stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -595,6 +602,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
     let mut stream = response.bytes_stream().eventsource();
     let mut tool_calls: HashMap<u32, (String, String, String)> = HashMap::new();
     let mut usage = Usage::default();
+    let mut window_exceeded = false;
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => match event.event.as_str() {
@@ -609,10 +617,17 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
                     }
                 }
                 "message_delta" => {
-                    if let Ok(delta) = serde_json::from_str::<MessageDelta>(&event.data)
-                        && let Some(u) = delta.usage
-                    {
-                        usage.output_tokens = u.output_tokens;
+                    if let Ok(delta) = serde_json::from_str::<MessageDelta>(&event.data) {
+                        if let Some(u) = delta.usage {
+                            usage.output_tokens = u.output_tokens;
+                        }
+                        if delta
+                            .delta
+                            .and_then(|body| body.stop_reason)
+                            .is_some_and(|reason| reason == "model_context_window_exceeded")
+                        {
+                            window_exceeded = true;
+                        }
                     }
                 }
                 "content_block_start" => {
@@ -680,12 +695,22 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
                 }
                 "message_stop" => {
                     let _ = events.send(StreamEvent::Usage { usage }).await;
+                    if window_exceeded {
+                        let _ = events
+                            .send(StreamEvent::Failed {
+                                error: goat_provider::StreamError::context_overflow(
+                                    "model context window exceeded mid-stream",
+                                ),
+                            })
+                            .await;
+                        return;
+                    }
                     break;
                 }
                 "error" => {
                     let _ = events
                         .send(StreamEvent::Failed {
-                            message: event.data,
+                            error: error::classify_sse_error(&event.data),
                         })
                         .await;
                     return;
@@ -695,7 +720,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
             Err(err) => {
                 let _ = events
                     .send(StreamEvent::Failed {
-                        message: err.to_string(),
+                        error: goat_provider::StreamError::transport(err.to_string()),
                     })
                     .await;
                 return;
@@ -726,7 +751,7 @@ impl Provider for AnthropicProvider {
             let Some(auth) = current_auth(&store, &key).await else {
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: "not logged in to anthropic".to_owned(),
+                        error: goat_provider::StreamError::auth("not logged in to anthropic"),
                     })
                     .await;
                 return;
@@ -763,7 +788,7 @@ impl Provider for AnthropicProvider {
                 Err(err) => {
                     let _ = tx
                         .send(StreamEvent::Failed {
-                            message: err.to_string(),
+                            error: error::transport(&err),
                         })
                         .await;
                     return;
@@ -771,10 +796,11 @@ impl Provider for AnthropicProvider {
             };
             if !resp.status().is_success() {
                 let status = resp.status();
+                let headers = resp.headers().clone();
                 let detail = resp.text().await.unwrap_or_default();
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: format!("{status}: {detail}"),
+                        error: error::classify_http(status, &headers, &detail),
                     })
                     .await;
                 return;
