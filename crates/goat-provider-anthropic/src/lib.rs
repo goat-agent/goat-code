@@ -236,7 +236,64 @@ fn build_system(system: &str, oauth: bool) -> Option<serde_json::Value> {
     } else if system.is_empty() {
         None
     } else {
-        Some(serde_json::Value::String(system.to_owned()))
+        Some(serde_json::Value::Array(vec![json!({
+            "type": "text",
+            "text": system,
+        })]))
+    }
+}
+
+fn cache_marker() -> serde_json::Value {
+    json!({ "type": "ephemeral" })
+}
+
+fn mark_last_cacheable_block(message: &mut serde_json::Value) -> bool {
+    let Some(blocks) = message
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    for block in blocks.iter_mut().rev() {
+        let kind = block
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if kind == "thinking" || kind == "redacted_thinking" {
+            continue;
+        }
+        if let Some(object) = block.as_object_mut() {
+            object.insert("cache_control".to_owned(), cache_marker());
+            return true;
+        }
+    }
+    false
+}
+
+fn apply_cache_control(
+    system: &mut Option<serde_json::Value>,
+    messages: &mut [serde_json::Value],
+    tools: &mut [serde_json::Value],
+) {
+    if let Some(tool) = tools.last_mut()
+        && let Some(object) = tool.as_object_mut()
+    {
+        object.insert("cache_control".to_owned(), cache_marker());
+    }
+    if let Some(serde_json::Value::Array(blocks)) = system
+        && let Some(last) = blocks.last_mut()
+        && let Some(object) = last.as_object_mut()
+    {
+        object.insert("cache_control".to_owned(), cache_marker());
+    }
+    let mut marked = 0;
+    for message in messages.iter_mut().rev() {
+        if marked == 2 {
+            break;
+        }
+        if mark_last_cacheable_block(message) {
+            marked += 1;
+        }
     }
 }
 
@@ -768,14 +825,16 @@ impl Provider for AnthropicProvider {
                     .await;
                 return;
             };
-            let (system, messages, tools) = split_request(&req);
+            let (system, mut messages, mut tools) = split_request(&req);
             let cfg = thinking_config(&req.model, req.effort);
             let oauth = matches!(auth, Auth::OAuth(_));
+            let mut system_value = build_system(&system, oauth);
+            apply_cache_control(&mut system_value, &mut messages, &mut tools);
             let body = MessagesRequest {
                 model: &req.model,
                 max_tokens: cfg.max_tokens,
                 stream: true,
-                system: build_system(&system, oauth),
+                system: system_value,
                 messages,
                 tools,
                 tool_choice: matches!(req.tool_choice, goat_provider::ToolChoice::None)
@@ -952,8 +1011,40 @@ mod tests {
         assert_eq!(blocks[0]["text"], super::CLAUDE_CODE_SYSTEM);
         assert_eq!(blocks[1]["text"], "be helpful");
         let plain = super::build_system("be helpful", false).unwrap();
-        assert_eq!(plain, serde_json::Value::String("be helpful".to_owned()));
+        assert_eq!(plain[0]["text"], "be helpful");
         assert!(super::build_system("", false).is_none());
+    }
+
+    #[test]
+    fn cache_control_marks_tools_system_and_last_two_messages() {
+        let mut system = super::build_system("be helpful", false);
+        let mut tools = vec![
+            serde_json::json!({ "name": "Read" }),
+            serde_json::json!({ "name": "Bash" }),
+        ];
+        let mut messages = vec![
+            serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "one" }] }),
+            serde_json::json!({ "role": "assistant", "content": [
+                { "type": "text", "text": "two" },
+                { "type": "thinking", "thinking": "t", "signature": "s" },
+            ] }),
+            serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "three" }] }),
+        ];
+        super::apply_cache_control(&mut system, &mut messages, &mut tools);
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+        let system = system.unwrap();
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        assert_eq!(
+            messages[1]["content"][0]["cache_control"]["type"], "ephemeral",
+            "thinking blocks must be skipped when marking"
+        );
+        assert!(messages[1]["content"][1].get("cache_control").is_none());
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
