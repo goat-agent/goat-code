@@ -56,6 +56,7 @@ fn anthropic_context_window(model: &str) -> u32 {
 }
 
 const CATALOG: &[&str] = &[
+    "claude-fable-5",
     "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-haiku-4-5-20251001",
@@ -323,7 +324,8 @@ struct ThinkingConfig {
 
 fn uses_effort_param(model: &str) -> bool {
     let id = model.to_ascii_lowercase();
-    id.contains("opus-4-8")
+    id.contains("fable")
+        || id.contains("opus-4-8")
         || id.contains("opus-4-7")
         || id.contains("opus-4-6")
         || id.contains("sonnet-4-6")
@@ -451,7 +453,7 @@ fn gregorian_to_unix(year: i64, month: i64, day: i64, h: i64, m: i64, s: i64) ->
 
 fn anthropic_efforts(model: &str) -> Vec<Effort> {
     let id = model.to_ascii_lowercase();
-    if id.contains("opus-4-8") || id.contains("opus-4-7") {
+    if id.contains("fable") || id.contains("opus-4-8") || id.contains("opus-4-7") {
         vec![
             Effort::Low,
             Effort::Medium,
@@ -1120,6 +1122,19 @@ mod tests {
         let cfg = super::thinking_config("claude-opus-4-8", Some(Effort::High));
         assert_eq!(cfg.thinking.unwrap()["type"], "adaptive");
         assert_eq!(cfg.output_config.unwrap()["effort"], "high");
+    }
+
+    #[test]
+    fn fable_uses_output_config_with_xhigh() {
+        use goat_provider::Effort;
+        let cfg = super::thinking_config("claude-fable-5", Some(Effort::Xhigh));
+        assert_eq!(cfg.thinking.unwrap()["type"], "adaptive");
+        assert_eq!(cfg.output_config.unwrap()["effort"], "xhigh");
+        assert_eq!(super::anthropic_context_window("claude-fable-5"), 1_000_000);
+        assert!(super::anthropic_efforts("claude-fable-5").contains(&Effort::Xhigh));
+        let off = super::thinking_config("claude-fable-5", Some(Effort::Off));
+        assert!(off.thinking.is_none());
+        assert!(off.output_config.is_none());
     }
 
     #[test]
