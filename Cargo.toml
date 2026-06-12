@@ -27,7 +27,9 @@ goat-provider-local = { path = "crates/goat-provider-local" }
 goat-providers = { path = "crates/goat-providers" }
 goat-agent = { path = "crates/goat-agent" }
 goat-tool = { path = "crates/goat-tool" }
+goat-sandbox = { path = "crates/goat-sandbox" }
 goat-tool-fs = { path = "crates/goat-tool-fs" }
+goat-tool-web = { path = "crates/goat-tool-web" }
 goat-tool-shell = { path = "crates/goat-tool-shell" }
 goat-tool-search = { path = "crates/goat-tool-search" }
 goat-tool-skill = { path = "crates/goat-tool-skill" }
@@ -63,6 +65,7 @@ syntect = { version = "5", default-features = false, features = ["default-fancy"
 
 rusqlite = { version = "0.40", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+htmd = "0.5"
 eventsource-stream = "0.2"
 sha2 = "0.11"
 base64 = "0.22"
