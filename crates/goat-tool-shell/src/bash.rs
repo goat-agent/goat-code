@@ -221,7 +221,7 @@ fn build_summary(body: &str, code: Option<i32>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::BashTool;
-    use goat_tool::{SandboxPolicy, Tool, ToolContext, ToolError};
+    use goat_tool::{Tool, ToolContext, ToolError};
 
     fn ctx() -> ToolContext {
         ToolContext::new(&std::env::temp_dir()).unwrap()
@@ -293,7 +293,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
         let mut ctx = ToolContext::new(dir.path()).unwrap();
-        ctx.exec_policy = SandboxPolicy::ReadOnly { network: false };
+        ctx.exec_policy = goat_tool::SandboxPolicy::ReadOnly { network: false };
         let out = BashTool
             .run(r#"{"command":"cat a.txt"}"#, &ctx)
             .await
@@ -310,7 +310,7 @@ mod tests {
         let dir = home.join(format!(".goat-sandbox-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut ctx = ToolContext::new(&dir).unwrap();
-        ctx.exec_policy = SandboxPolicy::ReadOnly { network: false };
+        ctx.exec_policy = goat_tool::SandboxPolicy::ReadOnly { network: false };
         let target = ctx.cwd.join("should-not-exist.txt");
         let command = format!("echo x > {}", target.display());
         let input = serde_json::json!({ "command": command }).to_string();
