@@ -6,7 +6,8 @@ use goat_auth::{
     ensure_valid, random_state,
 };
 use goat_provider::{
-    AuthMethod, Capabilities, Model, Provider, ProviderId, Request, StreamEvent, now_secs,
+    AuthMethod, Capabilities, Model, Provider, ProviderId, Request, SearchResult, StreamError,
+    StreamEvent, now_secs,
 };
 use serde::Deserialize;
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -25,6 +26,7 @@ const DEFAULT_INSTRUCTIONS: &str = "You are goat, a coding assistant running in 
 const DEVICE_USERCODE: &str = "https://auth.openai.com/deviceauth/usercode";
 
 const CATALOG: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+const SEARCH_MODEL: &str = "gpt-5.4-mini";
 
 const CONTEXT_WINDOWS: &[(&str, u32)] = &[("gpt-5", 272_000)];
 const DEVICE_TOKEN: &str = "https://auth.openai.com/deviceauth/token";
@@ -344,6 +346,32 @@ impl Provider for CodexProvider {
             tools: true,
             auth: AuthMethod::OAuth,
         }
+    }
+
+    fn supports_web_search(&self) -> bool {
+        true
+    }
+
+    fn web_search(&self, query: String) -> JoinHandle<Result<Vec<SearchResult>, StreamError>> {
+        let client = self.client.clone();
+        let url = format!("{BASE}/responses");
+        let store = self.store.clone();
+        let key = self.key.clone();
+        tokio::spawn(async move {
+            let Some((access, account)) = current_access(&store, &key).await else {
+                return Err(StreamError::auth("not logged in to codex"));
+            };
+            goat_provider_openai_compat::run_web_search(
+                &client,
+                &url,
+                Some(&access),
+                account.as_deref(),
+                SEARCH_MODEL,
+                Some(DEFAULT_INSTRUCTIONS),
+                &query,
+            )
+            .await
+        })
     }
 
     fn login(&self, status: mpsc::Sender<String>) -> JoinHandle<Result<TokenSet, String>> {
