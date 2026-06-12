@@ -151,6 +151,9 @@ impl Highlighter for SyntectHighlighter {
                     if style.font_style.contains(FontStyle::ITALIC) {
                         s = s.add_modifier(Modifier::ITALIC);
                     }
+                    if style.font_style.contains(FontStyle::UNDERLINE) {
+                        s = s.add_modifier(Modifier::UNDERLINED);
+                    }
                     Some(Span::styled(text.to_owned(), s))
                 })
                 .collect();
