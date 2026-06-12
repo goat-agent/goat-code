@@ -1,4 +1,5 @@
 mod codeassist;
+mod error;
 mod oauth;
 mod wire;
 
@@ -129,7 +130,7 @@ async fn stream_response(resp: reqwest::Response, tx: &mpsc::Sender<StreamEvent>
             Err(err) => {
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: err.to_string(),
+                        error: goat_provider::StreamError::transport(err.to_string()),
                     })
                     .await;
                 return;
@@ -231,7 +232,7 @@ impl Provider for GeminiProvider {
             let Some(auth) = oauth::current_auth(&store, &key).await else {
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: "not logged in to gemini".to_owned(),
+                        error: goat_provider::StreamError::auth("not logged in to gemini"),
                     })
                     .await;
                 return;
@@ -260,7 +261,7 @@ impl Provider for GeminiProvider {
                         match codeassist::resolve_project(&client, access, &project_cache).await {
                             Ok(p) => p,
                             Err(e) => {
-                                let _ = tx.send(StreamEvent::Failed { message: e }).await;
+                                let _ = tx.send(StreamEvent::Failed { error: e }).await;
                                 return;
                             }
                         };
@@ -277,7 +278,7 @@ impl Provider for GeminiProvider {
                 Err(err) => {
                     let _ = tx
                         .send(StreamEvent::Failed {
-                            message: err.to_string(),
+                            error: goat_provider::StreamError::transport(err.to_string()),
                         })
                         .await;
                     return;
@@ -289,7 +290,7 @@ impl Provider for GeminiProvider {
                 let detail = resp.text().await.unwrap_or_default();
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: format!("{status}: {detail}"),
+                        error: error::classify_http(status, &detail),
                     })
                     .await;
                 return;
