@@ -14,7 +14,7 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
     let mut bold = false;
     let mut strikethrough = false;
     let mut in_code_block = false;
-    let mut in_blockquote = false;
+    let mut blockquote_depth: usize = 0;
     let mut code_lang = String::new();
     let mut code_buf = String::new();
     let mut list_stack: Vec<Option<u64>> = Vec::new();
@@ -55,17 +55,23 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
             }
 
             Event::End(TagEnd::Paragraph) => {
-                flush_line(&mut current_spans, &mut lines);
-                lines.push(Line::default());
+                if blockquote_depth > 0 {
+                    flush_line_blockquote(&mut current_spans, &mut lines, theme, blockquote_depth);
+                } else {
+                    flush_line(&mut current_spans, &mut lines);
+                    lines.push(Line::default());
+                }
             }
 
             Event::Start(Tag::BlockQuote(_)) => {
                 flush_line(&mut current_spans, &mut lines);
-                in_blockquote = true;
+                blockquote_depth += 1;
             }
             Event::End(TagEnd::BlockQuote(_)) => {
-                flush_line_blockquote(&mut current_spans, &mut lines, theme);
-                in_blockquote = false;
+                blockquote_depth = blockquote_depth.saturating_sub(1);
+                if blockquote_depth == 0 {
+                    lines.push(Line::default());
+                }
             }
 
             Event::Start(Tag::List(start)) => {
@@ -77,8 +83,8 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
                 list_item_index.pop();
             }
             Event::Start(Tag::Item) => {
-                if in_blockquote {
-                    flush_line_blockquote(&mut current_spans, &mut lines, theme);
+                if blockquote_depth > 0 {
+                    flush_line_blockquote(&mut current_spans, &mut lines, theme, blockquote_depth);
                 } else {
                     flush_line(&mut current_spans, &mut lines);
                 }
@@ -189,8 +195,13 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
                     let segments: Vec<&str> = text.split('\n').collect();
                     for (i, segment) in segments.iter().enumerate() {
                         if i > 0 {
-                            if in_blockquote {
-                                flush_line_blockquote(&mut current_spans, &mut lines, theme);
+                            if blockquote_depth > 0 {
+                                flush_line_blockquote(
+                                    &mut current_spans,
+                                    &mut lines,
+                                    theme,
+                                    blockquote_depth,
+                                );
                             } else {
                                 flush_line(&mut current_spans, &mut lines);
                             }
@@ -212,8 +223,8 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
             }
 
             Event::End(TagEnd::Item) | Event::HardBreak => {
-                if in_blockquote {
-                    flush_line_blockquote(&mut current_spans, &mut lines, theme);
+                if blockquote_depth > 0 {
+                    flush_line_blockquote(&mut current_spans, &mut lines, theme, blockquote_depth);
                 } else {
                     flush_line(&mut current_spans, &mut lines);
                 }
@@ -267,13 +278,14 @@ fn flush_line_blockquote(
     spans: &mut Vec<Span<'static>>,
     lines: &mut Vec<Line<'static>>,
     theme: Theme,
+    depth: usize,
 ) {
-    let mut row_spans = vec![Span::styled(symbols::ui::QUOTE_GUTTER, theme.muted())];
-    row_spans.extend(
-        std::mem::take(spans)
-            .into_iter()
-            .map(|s| Span::styled(s.content, theme.muted())),
-    );
+    if spans.is_empty() {
+        return;
+    }
+    let gutter = symbols::ui::QUOTE_GUTTER.repeat(depth);
+    let mut row_spans = vec![Span::styled(gutter, theme.muted())];
+    row_spans.extend(std::mem::take(spans));
     lines.push(Line::from(row_spans));
 }
 
@@ -496,13 +508,31 @@ mod tests {
     }
 
     #[test]
-    fn blockquote_has_gutter() {
-        let lines = render_plain("> quoted text");
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.spans.first().is_some_and(|s| s.content.contains('▎')))
-        );
+    fn blockquote_content_line_has_gutter() {
+        let theme = Theme::dark();
+        let lines = render("> quoted text", theme, &PlainHighlighter);
+        let line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("quoted")))
+            .expect("quoted content line");
+        assert!(line.spans.first().is_some_and(|s| s.content.contains('▎')));
+        let content = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("quoted"))
+            .expect("content span");
+        assert_eq!(content.style.fg, Some(theme.fg_color()));
+    }
+
+    #[test]
+    fn nested_blockquote_repeats_gutter() {
+        let lines = render_plain("> outer\n>> nested");
+        let line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("nested")))
+            .expect("nested content line");
+        let gutter = line.spans.first().expect("gutter span");
+        assert_eq!(gutter.content.matches('▎').count(), 2);
     }
 
     #[test]
