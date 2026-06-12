@@ -2,12 +2,12 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, Overlay},
+    app::{App, Overlay, PlanFocus, PlanOverlay},
     layout::{LIST_MAX, PAD_X, SCROLL_GUTTER},
     overlay, symbols,
     theme::Theme,
@@ -42,6 +42,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         if let Overlay::Ask(picker, _) = app.overlay() {
             picker.render(frame, area, theme);
         }
+        render_toasts(frame, area, app, theme);
+        return;
+    }
+
+    if let Overlay::Plan(plan) = app.overlay() {
+        let [header, body] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+        render_header(frame, header, app, theme);
+        render_plan_overlay(frame, body, plan, theme);
         render_toasts(frame, area, app, theme);
         return;
     }
@@ -350,20 +359,86 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     }
     let model_w: usize = model_spans.iter().map(|s| s.content.width()).sum();
 
+    let plan_badge = plan_badge(app);
+    let badge_w = plan_badge
+        .as_ref()
+        .map_or(0, |span| span.content.width() + 1);
+
     let cwd_max = inner_w
         .saturating_sub(model_w)
+        .saturating_sub(badge_w)
         .saturating_sub(if ctx_w > 0 { ctx_w + 2 } else { 0 });
     let cwd = fit_cwd(app.cwd(), cwd_max);
 
-    let mut spans = vec![Span::styled(cwd.clone(), theme.muted())];
+    let mut spans: Vec<Span> = Vec::new();
+    if let Some(badge) = plan_badge {
+        spans.push(badge);
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(cwd.clone(), theme.muted()));
     spans.extend(model_spans);
     if let Some((ctx_spans, _)) = ctx {
-        let left_w = cwd.width() + model_w;
+        let left_w = badge_w + cwd.width() + model_w;
         let pad = inner_w.saturating_sub(left_w + ctx_w);
         spans.push(Span::raw(" ".repeat(pad)));
         spans.extend(ctx_spans);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
+}
+
+fn plan_badge(app: &App) -> Option<Span<'static>> {
+    let plan = app.mode == goat_protocol::Mode::Plan;
+    if !plan && !app.mode_pending {
+        return None;
+    }
+    let theme = app.theme();
+    let label = if app.mode_pending && !plan {
+        " PLAN ▸ "
+    } else {
+        " PLAN "
+    };
+    Some(Span::styled(label, theme.accent()))
+}
+
+fn render_plan_overlay(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme: Theme) {
+    let block = Block::bordered()
+        .title(format!(" Plan · {} ", plan.path))
+        .border_style(theme.accent())
+        .style(theme.base());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [body, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let para = Paragraph::new(plan.plan.as_str())
+        .wrap(Wrap { trim: false })
+        .scroll((plan.scroll, 0))
+        .style(theme.base());
+    frame.render_widget(para, body);
+
+    let footer_line = if let Some(feedback) = &plan.feedback {
+        Line::from(vec![
+            Span::styled("changes: ", theme.muted()),
+            Span::styled(feedback.clone(), theme.base()),
+            Span::styled("▌", theme.accent()),
+            Span::styled("   enter send · esc cancel", theme.muted()),
+        ])
+    } else {
+        Line::from(vec![
+            plan_button("approve", plan.focus == PlanFocus::Approve, theme),
+            Span::raw("  "),
+            plan_button("request changes", plan.focus == PlanFocus::Reject, theme),
+            Span::styled("   ↑↓ scroll · a/r · esc dismiss", theme.muted()),
+        ])
+    };
+    frame.render_widget(Paragraph::new(footer_line), footer);
+}
+
+fn plan_button(label: &str, focused: bool, theme: Theme) -> Span<'static> {
+    let text = format!(" {label} ");
+    if focused {
+        Span::styled(text, theme.key())
+    } else {
+        Span::styled(text, theme.muted())
+    }
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
