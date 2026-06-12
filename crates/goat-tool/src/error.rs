@@ -11,6 +11,8 @@ pub enum ToolError {
     },
     #[error("path escapes the session directory: {path}")]
     PathEscape { path: String },
+    #[error("writes are restricted to the plan file while planning: {path}")]
+    WriteBlocked { path: String },
     #[error("file not found: {path}")]
     NotFound { path: String },
     #[error("io error on {path}: {source}")]

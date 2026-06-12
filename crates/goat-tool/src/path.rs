@@ -11,6 +11,14 @@ pub fn relative_display(cwd: &Path, resolved: &Path) -> String {
 }
 
 pub fn resolve_in_cwd(cwd: &Path, raw: &str) -> Result<PathBuf, ToolError> {
+    resolve_with_extra(cwd, None, raw)
+}
+
+pub fn resolve_with_extra(
+    cwd: &Path,
+    extra: Option<&Path>,
+    raw: &str,
+) -> Result<PathBuf, ToolError> {
     let candidate = Path::new(raw);
     let joined = if candidate.is_absolute() {
         candidate.to_path_buf()
@@ -18,7 +26,7 @@ pub fn resolve_in_cwd(cwd: &Path, raw: &str) -> Result<PathBuf, ToolError> {
         cwd.join(candidate)
     };
     let normalized = lexical_normalize(&joined);
-    if !normalized.starts_with(cwd) {
+    if !within(cwd, extra, &normalized) {
         return Err(ToolError::PathEscape {
             path: raw.to_owned(),
         });
@@ -28,13 +36,17 @@ pub fn resolve_in_cwd(cwd: &Path, raw: &str) -> Result<PathBuf, ToolError> {
             path: raw.to_owned(),
             source,
         })?;
-        if !canonical.starts_with(cwd) {
+        if !within(cwd, extra, &canonical) {
             return Err(ToolError::PathEscape {
                 path: raw.to_owned(),
             });
         }
     }
     Ok(normalized)
+}
+
+fn within(cwd: &Path, extra: Option<&Path>, path: &Path) -> bool {
+    path.starts_with(cwd) || extra.is_some_and(|allowed| path == allowed)
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
