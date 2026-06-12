@@ -93,7 +93,7 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
                     flush_line(&mut current_spans, &mut lines);
                 }
                 let bullet = next_bullet(&list_stack, &mut list_item_index);
-                current_spans.push(Span::styled(bullet, theme.muted()));
+                current_spans.push(Span::styled(bullet, theme.base()));
             }
 
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -453,13 +453,21 @@ mod tests {
 
     #[test]
     fn unordered_list_renders_bullets() {
-        let lines = render_plain("- one\n- two");
+        let theme = Theme::dark();
+        let lines = render("- one\n- two", theme, &PlainHighlighter);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(text.contains('•'));
+        assert!(text.contains("- one"));
+        assert!(!text.contains('•'));
+        let bullet = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.as_ref() == "- ")
+            .expect("bullet span");
+        assert_eq!(bullet.style.fg, Some(theme.fg_color()));
     }
 
     #[test]

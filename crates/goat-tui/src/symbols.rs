@@ -9,7 +9,7 @@ pub mod marker {
 pub mod ui {
     pub const CARET: &str = "›";
     pub const BANG: &str = "!";
-    pub const BULLET: &str = "• ";
+    pub const BULLET: &str = "- ";
     pub const DOT_FULL: &str = "●";
     pub const DOT_EMPTY: &str = "○";
     pub const CHECK: &str = "✓";
