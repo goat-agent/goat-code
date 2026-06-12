@@ -486,7 +486,7 @@ fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
             let mut spans = vec![
                 Span::styled(marker, marker_style),
                 Span::raw(" "),
-                Span::styled(name.clone(), theme.tool_name()),
+                Span::styled(name.clone(), theme.role_tool()),
                 Span::styled("(", theme.muted()),
                 Span::styled(primary, theme.base()),
             ];

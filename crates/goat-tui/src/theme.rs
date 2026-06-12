@@ -139,10 +139,6 @@ impl Theme {
         Style::new().fg(self.tool)
     }
 
-    pub fn tool_name(self) -> Style {
-        Style::new().fg(self.tool)
-    }
-
     pub fn selected_row(self) -> Style {
         Style::new().bg(self.selection)
     }
@@ -155,7 +151,7 @@ impl Theme {
         if pct >= METER_HIGH {
             self.error()
         } else if pct >= METER_WARN {
-            self.tool_name()
+            self.role_tool()
         } else {
             self.muted()
         }
