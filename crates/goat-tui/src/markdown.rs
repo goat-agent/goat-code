@@ -117,20 +117,9 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
                 link_text_start = current_spans.len();
             }
             Event::End(TagEnd::Link) => {
-                if let Some(url) = link_url.take() {
-                    let link_spans = &mut current_spans[link_text_start..];
-                    for span in link_spans.iter_mut() {
-                        span.style = span
-                            .style
-                            .fg(theme.accent_color())
-                            .add_modifier(Modifier::UNDERLINED);
-                    }
-                    let link_text: String = current_spans[link_text_start..]
-                        .iter()
-                        .map(|s| s.content.as_ref())
-                        .collect();
-                    if !link_text.is_empty() && url != link_text {
-                        current_spans.push(Span::styled(format!(" ({url})"), theme.muted()));
+                if link_url.take().is_some() {
+                    for span in &mut current_spans[link_text_start..] {
+                        span.style = span.style.fg(theme.accent_color());
                     }
                 }
                 link_text_start = 0;
@@ -559,15 +548,19 @@ mod tests {
     }
 
     #[test]
-    fn link_text_has_underline() {
+    fn link_text_accent_no_url() {
         let theme = Theme::dark();
         let lines = render("[docs](https://example.com)", theme, &PlainHighlighter);
         let spans: Vec<_> = lines.iter().flat_map(|l| &l.spans).collect();
-        assert!(
-            spans
-                .iter()
-                .any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED))
-        );
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("docs"));
+        assert!(!text.contains("example.com"));
+        let link = spans
+            .iter()
+            .find(|s| s.content.contains("docs"))
+            .expect("link span");
+        assert_eq!(link.style.fg, Some(theme.accent_color()));
+        assert!(!link.style.add_modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]
