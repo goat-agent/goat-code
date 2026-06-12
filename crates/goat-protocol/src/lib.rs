@@ -161,6 +161,10 @@ pub enum TranscriptEntry {
         call: ToolCall,
         outcome: ToolOutcome,
     },
+    Compaction {
+        tokens_before: u32,
+        tokens_after: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +247,13 @@ pub enum Op {
         call: ToolCallId,
         answers: Vec<String>,
     },
+    Compact {
+        id: TaskId,
+        instructions: Option<String>,
+    },
+    DequeueMessage {
+        id: TaskId,
+    },
     Shutdown,
 }
 
@@ -302,6 +313,8 @@ pub enum Event {
     ConversationRestored {
         target: ModelTarget,
         entries: Vec<TranscriptEntry>,
+        context_tokens: Option<u32>,
+        compaction_threshold: Option<u32>,
     },
     ThinkingDelta {
         id: TaskId,
@@ -343,12 +356,38 @@ pub enum Event {
         id: TaskId,
         usage: Usage,
         context_window: Option<u32>,
+        compaction_threshold: Option<u32>,
     },
     RateLimits {
         provider: String,
         account: String,
         snapshot: RateLimitSnapshot,
         cached_at: i64,
+    },
+    Retrying {
+        id: TaskId,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        reason: String,
+    },
+    UserMessage {
+        id: TaskId,
+        text: String,
+    },
+    MessageDequeued {
+        id: TaskId,
+        text: String,
+    },
+    CompactionStarted {
+        id: TaskId,
+    },
+    CompactionDone {
+        id: TaskId,
+        ok: bool,
+        tokens_before: u32,
+        tokens_after: u32,
+        usage: Usage,
     },
 }
 
