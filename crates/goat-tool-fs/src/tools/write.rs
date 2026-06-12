@@ -1,7 +1,5 @@
 use goat_protocol::ToolDisplay;
-use goat_tool::{
-    Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display, path::resolve_in_cwd,
-};
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display};
 use serde::Deserialize;
 
 use crate::tools::relative_display;
@@ -44,7 +42,8 @@ impl Tool for WriteTool {
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
-            let resolved = resolve_in_cwd(&ctx.cwd, &args.path)?;
+            let resolved = ctx.resolve(&args.path)?;
+            ctx.ensure_writable(&resolved, &args.path)?;
             if let Some(parent) = resolved.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
@@ -112,5 +111,37 @@ mod tests {
             .run(r#"{"path":"../evil.txt","content":"x"}"#, &ctx)
             .await;
         assert!(matches!(result, Err(ToolError::PathEscape { .. })));
+    }
+
+    #[tokio::test]
+    async fn write_allow_restricts_to_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = ctx(dir.path());
+        let plan = ctx.cwd.join("PLAN.md");
+        ctx.write_allow = Some(plan.clone());
+        ctx.extra_path = Some(plan);
+        let blocked = WriteTool
+            .run(r#"{"path":"other.txt","content":"x"}"#, &ctx)
+            .await;
+        assert!(matches!(blocked, Err(ToolError::WriteBlocked { .. })));
+        let allowed = WriteTool
+            .run(r#"{"path":"PLAN.md","content":"plan"}"#, &ctx)
+            .await;
+        assert!(allowed.is_ok());
+    }
+
+    #[tokio::test]
+    async fn extra_path_allows_file_outside_cwd() {
+        let cwd = tempfile::tempdir().unwrap();
+        let plandir = tempfile::tempdir().unwrap();
+        let plan = plandir.path().canonicalize().unwrap().join("p.md");
+        let mut ctx = ToolContext::new(cwd.path()).unwrap();
+        ctx.extra_path = Some(plan.clone());
+        ctx.write_allow = Some(plan.clone());
+        let input =
+            serde_json::json!({ "path": plan.to_str().unwrap(), "content": "x" }).to_string();
+        let out = WriteTool.run(&input, &ctx).await;
+        assert!(out.is_ok(), "plan file outside cwd must be writable");
+        assert!(plan.exists());
     }
 }
