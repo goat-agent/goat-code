@@ -140,6 +140,14 @@ pub struct Model {
     pub id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    None,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub model: String,
@@ -148,6 +156,8 @@ pub struct Request {
     pub tools: Vec<ToolDefinition>,
     #[serde(default)]
     pub effort: Option<Effort>,
+    #[serde(default)]
+    pub tool_choice: ToolChoice,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,6 +346,7 @@ mod tests {
                 messages: vec![Message::text(MessageRole::User, "hi")],
                 tools: vec![],
                 effort: None,
+                tool_choice: super::ToolChoice::Auto,
             },
             tx,
         );

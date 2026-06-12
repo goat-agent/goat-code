@@ -378,6 +378,7 @@ impl Provider for CodexProvider {
                 Some(DEFAULT_INSTRUCTIONS),
                 false,
                 req.effort,
+                req.tool_choice,
             );
             goat_provider_openai_compat::run_request(
                 &client,

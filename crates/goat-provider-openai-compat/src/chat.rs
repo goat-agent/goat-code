@@ -55,6 +55,8 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
 }
 
@@ -321,6 +323,9 @@ impl Provider for OpenAiCompatProvider {
                 stream_options: StreamOptions {
                     include_usage: true,
                 },
+                tool_choice: (!req.tools.is_empty()
+                    && matches!(req.tool_choice, goat_provider::ToolChoice::None))
+                .then_some("none"),
                 tools: to_chat_tools(&req),
                 reasoning_effort: req.effort.and_then(chat_effort_wire),
             };

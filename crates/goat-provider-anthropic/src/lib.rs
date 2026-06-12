@@ -238,6 +238,8 @@ struct MessagesRequest<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<serde_json::Value>,
@@ -739,6 +741,8 @@ impl Provider for AnthropicProvider {
                 system: build_system(&system, oauth),
                 messages,
                 tools,
+                tool_choice: matches!(req.tool_choice, goat_provider::ToolChoice::None)
+                    .then(|| json!({ "type": "none" })),
                 thinking: cfg.thinking,
                 output_config: cfg.output_config,
             };

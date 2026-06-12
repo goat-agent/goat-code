@@ -179,6 +179,7 @@ pub struct InnerRequest {
     pub contents: Vec<Value>,
     pub system_instruction: Option<Value>,
     pub tools: Option<Value>,
+    pub tool_config: Option<Value>,
     pub generation_config: Option<Value>,
 }
 
@@ -249,12 +250,17 @@ pub fn build_request(req: &Request) -> InnerRequest {
         Some(tool_declarations(&req.tools))
     };
 
+    let tool_config = (tools.is_some()
+        && matches!(req.tool_choice, goat_provider::ToolChoice::None))
+    .then(|| json!({ "functionCallingConfig": { "mode": "NONE" } }));
+
     let gen_cfg = generation_config(&req.model, req.effort);
 
     InnerRequest {
         contents,
         system_instruction,
         tools,
+        tool_config,
         generation_config: gen_cfg,
     }
 }
@@ -267,6 +273,9 @@ pub fn inner_request_to_value(inner: &InnerRequest) -> Value {
     }
     if let Some(tools) = &inner.tools {
         obj.insert("tools".to_owned(), tools.clone());
+    }
+    if let Some(tool_config) = &inner.tool_config {
+        obj.insert("toolConfig".to_owned(), tool_config.clone());
     }
     if let Some(gc) = &inner.generation_config {
         obj.insert("generationConfig".to_owned(), gc.clone());
@@ -368,6 +377,7 @@ mod tests {
         Request {
             model: "gemini-2.5-flash".to_owned(),
             messages,
+            tool_choice: goat_provider::ToolChoice::Auto,
             tools: vec![],
             effort: None,
         }
@@ -649,6 +659,7 @@ mod tests {
         let req = Request {
             model: "gemini-2.5-flash".to_owned(),
             messages: vec![],
+            tool_choice: goat_provider::ToolChoice::Auto,
             tools: vec![ToolDefinition {
                 name: "fn1".to_owned(),
                 description: "does fn1".to_owned(),
