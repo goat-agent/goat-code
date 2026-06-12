@@ -63,7 +63,7 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
                     flush_line_blockquote(&mut current_spans, &mut lines, theme, blockquote_depth);
                 } else {
                     flush_line(&mut current_spans, &mut lines);
-                    lines.push(Line::default());
+                    ensure_blank_gap(&mut lines);
                 }
             }
 
@@ -74,7 +74,7 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
             Event::End(TagEnd::BlockQuote(_)) => {
                 blockquote_depth = blockquote_depth.saturating_sub(1);
                 if blockquote_depth == 0 {
-                    lines.push(Line::default());
+                    ensure_blank_gap(&mut lines);
                 }
             }
 
@@ -85,6 +85,9 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
             Event::End(TagEnd::List(_)) => {
                 list_stack.pop();
                 list_item_index.pop();
+                if list_stack.is_empty() {
+                    ensure_blank_gap(&mut lines);
+                }
             }
             Event::Start(Tag::Item) => {
                 if blockquote_depth > 0 {
@@ -104,11 +107,12 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
                 };
                 code_buf.clear();
                 flush_line(&mut current_spans, &mut lines);
+                ensure_blank_gap(&mut lines);
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
                 lines.extend(hl.highlight(&code_lang, code_buf.trim_end_matches('\n'), theme));
-                lines.push(Line::default());
+                ensure_blank_gap(&mut lines);
                 code_lang.clear();
             }
 
@@ -135,7 +139,7 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
             Event::End(TagEnd::Table) => {
                 in_table = false;
                 render_table(&table_headers, &table_rows, theme, &mut lines);
-                lines.push(Line::default());
+                ensure_blank_gap(&mut lines);
                 table_headers.clear();
                 table_rows.clear();
                 col_alignments.clear();
@@ -272,6 +276,12 @@ fn heading_style(level: HeadingLevel, theme: Theme) -> ratatui::style::Style {
 fn flush_line(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
     if !spans.is_empty() {
         lines.push(Line::from(std::mem::take(spans)));
+    }
+}
+
+fn ensure_blank_gap(lines: &mut Vec<Line<'static>>) {
+    if lines.last().is_some_and(|l| !l.spans.is_empty()) {
+        lines.push(Line::default());
     }
 }
 
@@ -436,6 +446,28 @@ mod tests {
             .expect("inline code span without padding");
         assert_eq!(code_span.style.fg, Some(theme.accent_color()));
         assert_eq!(code_span.style.bg, None);
+    }
+
+    #[test]
+    fn code_block_preceded_by_blank_line() {
+        let lines = render_plain("before\n```rust\nfn x() {}\n```");
+        let code_idx = lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.contains("fn x")))
+            .expect("code line");
+        assert!(lines[code_idx - 1].spans.is_empty());
+        assert!(!lines[code_idx - 2].spans.is_empty());
+    }
+
+    #[test]
+    fn list_followed_by_paragraph_has_gap() {
+        let lines = render_plain("- one\n- two\n\nafter");
+        let after_idx = lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.contains("after")))
+            .expect("after line");
+        assert!(lines[after_idx - 1].spans.is_empty());
+        assert!(!lines[after_idx - 2].spans.is_empty());
     }
 
     #[test]
