@@ -318,9 +318,9 @@ fn render_table(
 
     let sep: String = col_widths
         .iter()
-        .map(|&w| "─".repeat(w + 2))
+        .map(|&w| "─".repeat(w))
         .collect::<Vec<_>>()
-        .join(" ");
+        .join("─┼─");
     lines.push(Line::from(Span::styled(sep, theme.muted())));
 
     for row in rows {
@@ -340,7 +340,7 @@ where
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (col, cell) in cells.enumerate() {
         if col > 0 {
-            spans.push(Span::styled("  ", theme.muted()));
+            spans.push(Span::styled(" │ ", theme.muted()));
         }
         let w = col_widths.get(col).copied().unwrap_or(1);
         let text_w = span_text_width(cell);
@@ -580,6 +580,31 @@ mod tests {
                 .iter()
                 .any(|s| s.style.add_modifier.contains(Modifier::BOLD))
         );
+    }
+
+    #[test]
+    fn table_separator_aligns_with_cells() {
+        use unicode_width::UnicodeWidthStr;
+        let lines = render_plain("| name | x |\n|---|---|\n| alice | 1 |");
+        let widths: Vec<usize> = lines
+            .iter()
+            .filter(|l| !l.spans.is_empty())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref().width())
+                    .sum::<usize>()
+            })
+            .collect();
+        assert_eq!(widths.len(), 3);
+        assert!(widths.iter().all(|w| *w == widths[0]));
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains('│'));
+        assert!(text.contains('┼'));
     }
 
     #[test]
