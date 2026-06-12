@@ -56,7 +56,7 @@ impl Theme {
             shell: Color::Rgb(0xdb, 0x4b, 0x4b),
             shell_dim: Color::Rgb(0x54, 0x29, 0x2e),
             code: CodePalette {
-                bg: Color::Rgb(0x1a, 0x1b, 0x26),
+                bg: Color::Reset,
                 keyword: Color::Rgb(0x56, 0x9c, 0xd6),
                 string: Color::Rgb(0xce, 0x91, 0x78),
                 comment: Color::Rgb(0x6a, 0x99, 0x55),
@@ -84,7 +84,7 @@ impl Theme {
             shell: Color::Rgb(0xb0, 0x35, 0x54),
             shell_dim: Color::Rgb(0xe6, 0xc2, 0xcb),
             code: CodePalette {
-                bg: Color::Rgb(0xf0, 0xf0, 0xf5),
+                bg: Color::Reset,
                 keyword: Color::Rgb(0x00, 0x00, 0xff),
                 string: Color::Rgb(0xa3, 0x15, 0x15),
                 comment: Color::Rgb(0x00, 0x80, 0x00),
@@ -162,7 +162,7 @@ impl Theme {
     }
 
     pub fn code_plain(self) -> Style {
-        Style::new().fg(self.fg).bg(self.code.bg)
+        Style::new().fg(self.fg)
     }
 
     pub fn fg_color(self) -> Color {
