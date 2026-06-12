@@ -10,7 +10,7 @@ pub async fn run() -> color_eyre::Result<()> {
                 "No install receipt found. To use self-update, install goat via the official installer:"
             );
             println!(
-                "  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jbj338033/goat-code/releases/latest/download/goat-installer.sh | sh"
+                "  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/goat-agent/goat-code/releases/latest/download/goat-code-installer.sh | sh"
             );
             return Ok(());
         }

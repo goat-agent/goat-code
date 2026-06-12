@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/jbj338033/goat-code"
+repository = "https://github.com/goat-agent/goat-code"
 authors = ["jbj338033"]
 
 [workspace.dependencies]
