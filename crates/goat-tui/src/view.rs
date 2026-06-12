@@ -195,6 +195,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
     };
     app.clamp_scroll(content.height, content.width);
     let working = app.working_state();
+    let queued = app.queued_labels();
     app.transcript().render(
         frame,
         content,
@@ -203,6 +204,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
             scroll: app.scroll(),
             spinner: app.spinner_frame(),
             working: working.as_ref(),
+            queued: &queued,
             hl: &app.highlighter,
         },
     );
@@ -325,12 +327,13 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     }
     if app.is_busy() {
         let mut spans: Vec<Span> = Vec::new();
-        if app.deny_armed() {
-            spans.push(Span::styled("task running", theme.error()));
-            spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
-        }
         spans.push(Span::styled(symbols::key::ESC, theme.hint_key()));
         spans.push(Span::styled(" interrupt", theme.muted()));
+        if !app.queued.is_empty() {
+            spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
+            spans.push(Span::styled(symbols::key::BACKSPACE, theme.hint_key()));
+            spans.push(Span::styled(" edit queued", theme.muted()));
+        }
         if !app.agent_runs().is_empty() {
             spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
             spans.push(Span::styled(symbols::key::ARROW_DOWN, theme.hint_key()));

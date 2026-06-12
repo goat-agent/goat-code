@@ -129,6 +129,11 @@ impl App {
                 self.submit()
             }
             KeyCode::Backspace => {
+                if self.composer.is_empty()
+                    && let Some((id, _)) = self.queued.last()
+                {
+                    return vec![Op::DequeueMessage { id: *id }];
+                }
                 self.composer.backspace();
                 self.update_command_menu();
                 self.dirty = true;

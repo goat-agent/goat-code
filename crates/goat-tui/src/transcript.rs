@@ -9,12 +9,13 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::{highlight::Highlighter, markdown, symbols, theme::Theme, wrap};
+use crate::{highlight::Highlighter, layout::format_tokens, markdown, symbols, theme::Theme, wrap};
 
 pub(crate) struct Working {
     pub elapsed: Option<u64>,
     pub label: Option<String>,
     pub thinking: bool,
+    pub tokens: Option<u64>,
 }
 
 pub(crate) struct RenderCtx<'a> {
@@ -22,6 +23,7 @@ pub(crate) struct RenderCtx<'a> {
     pub scroll: usize,
     pub spinner: &'static str,
     pub working: Option<&'a Working>,
+    pub queued: &'a [String],
     pub hl: &'a dyn Highlighter,
 }
 
@@ -56,6 +58,10 @@ pub(crate) enum Item {
     },
     Error(String),
     Notice(String),
+    Compaction {
+        tokens_before: u32,
+        tokens_after: u32,
+    },
 }
 
 #[derive(Default)]
@@ -125,10 +131,27 @@ impl Transcript {
         }
     }
 
-    pub fn push_error(&mut self, text: impl Into<String>) {
+    pub fn push_error(&mut self, text: impl Into<String>, hl: &dyn Highlighter, theme: Theme) {
+        self.bump_version();
+        if let Some(buffer) = self.streaming.take() {
+            let text = format!("{buffer} {} stopped", symbols::ui::ELLIPSIS);
+            self.items
+                .push(Item::Agent(markdown::render(&text, theme, hl)));
+        }
+        self.items.push(Item::Error(text.into()));
+    }
+
+    pub fn discard_stream(&mut self) {
         self.bump_version();
         self.streaming = None;
-        self.items.push(Item::Error(text.into()));
+    }
+
+    pub fn push_compaction(&mut self, tokens_before: u32, tokens_after: u32) {
+        self.bump_version();
+        self.items.push(Item::Compaction {
+            tokens_before,
+            tokens_after,
+        });
     }
 
     pub fn complete(&mut self, interrupted: bool, hl: &dyn Highlighter, theme: Theme) {
@@ -153,7 +176,7 @@ impl Transcript {
             };
             self.items
                 .push(Item::Agent(markdown::render(&text, theme, hl)));
-        } else if interrupted {
+        } else if interrupted && !matches!(self.items.last(), Some(Item::Error(_))) {
             self.items.push(Item::Notice("interrupted".into()));
         }
     }
@@ -210,6 +233,7 @@ impl Transcript {
         rows
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn tail_rows(
         &self,
         theme: Theme,
@@ -217,6 +241,7 @@ impl Transcript {
         hl: &dyn Highlighter,
         spinner: &'static str,
         working: Option<&Working>,
+        queued: &[String],
         base_nonempty: bool,
     ) -> Vec<Line<'static>> {
         let mut tail: Vec<Line<'static>> = Vec::new();
@@ -233,6 +258,12 @@ impl Transcript {
             }
             tail.extend(working_rows(theme, width, spinner, w));
         }
+        if !queued.is_empty() {
+            if working.is_none() && (base_nonempty || !tail.is_empty()) {
+                tail.push(Line::default());
+            }
+            tail.extend(queued_rows(theme, width, queued));
+        }
         tail
     }
 
@@ -242,11 +273,20 @@ impl Transcript {
         theme: Theme,
         hl: &dyn Highlighter,
         working: Option<&Working>,
+        queued: &[String],
     ) -> usize {
         self.ensure_cache(theme, width);
         let base = self.cache.borrow().as_ref().map_or(0, |c| c.lines.len());
         base + self
-            .tail_rows(theme, width, hl, symbols::SPINNER[0], working, base > 0)
+            .tail_rows(
+                theme,
+                width,
+                hl,
+                symbols::SPINNER[0],
+                working,
+                queued,
+                base > 0,
+            )
             .len()
     }
 
@@ -262,6 +302,7 @@ impl Transcript {
             ctx.hl,
             ctx.spinner,
             ctx.working,
+            ctx.queued,
             !cache.lines.is_empty(),
         );
         let total = cache.lines.len() + tail.len();
@@ -325,6 +366,30 @@ fn format_elapsed(secs: u64) -> String {
     }
 }
 
+const QUEUED_ROW_CAP: usize = 3;
+
+fn queued_rows(theme: Theme, width: u16, queued: &[String]) -> Vec<Line<'static>> {
+    let inner = usize::from(width.saturating_sub(2));
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    for label in queued.iter().take(QUEUED_ROW_CAP) {
+        rows.push(Line::from(vec![
+            Span::styled(symbols::marker::USER, theme.muted()),
+            Span::styled(truncate_to_width(label, inner), theme.muted()),
+        ]));
+    }
+    if queued.len() > QUEUED_ROW_CAP {
+        rows.push(Line::from(Span::styled(
+            format!(
+                "{} {} more queued",
+                symbols::ui::ELLIPSIS,
+                queued.len() - QUEUED_ROW_CAP
+            ),
+            theme.muted(),
+        )));
+    }
+    rows
+}
+
 fn working_rows(
     theme: Theme,
     width: u16,
@@ -339,6 +404,12 @@ fn working_rows(
     if let Some(secs) = w.elapsed {
         spans.push(Span::styled(
             format!("{}{}", symbols::ui::SEPARATOR, format_elapsed(secs)),
+            theme.muted(),
+        ));
+    }
+    if let Some(tokens) = w.tokens {
+        spans.push(Span::styled(
+            format!("{}{} tok", symbols::ui::SEPARATOR, format_tokens(tokens)),
             theme.muted(),
         ));
     }
@@ -406,6 +477,20 @@ fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
             Span::styled(symbols::marker::NOTICE, theme.muted()),
             width,
         ),
+        Item::Compaction {
+            tokens_before,
+            tokens_after,
+        } => vec![Line::from(Span::styled(
+            format!(
+                "{} context compacted{}{} → {} {}",
+                symbols::ui::RULE,
+                symbols::ui::SEPARATOR,
+                format_tokens(u64::from(*tokens_before)),
+                format_tokens(u64::from(*tokens_after)),
+                symbols::ui::RULE,
+            ),
+            theme.muted(),
+        ))],
         Item::Tool {
             name,
             display,
@@ -556,7 +641,7 @@ mod tests {
     }
 
     fn height(t: &Transcript, width: u16) -> usize {
-        t.content_height(width, Theme::dark(), &PlainHighlighter, None)
+        t.content_height(width, Theme::dark(), &PlainHighlighter, None, &[])
     }
 
     fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
@@ -668,8 +753,9 @@ mod tests {
             elapsed: None,
             label: None,
             thinking: false,
+            tokens: None,
         };
-        let busy = t.content_height(80, Theme::dark(), &PlainHighlighter, Some(&working));
+        let busy = t.content_height(80, Theme::dark(), &PlainHighlighter, Some(&working), &[]);
         assert!(
             busy > idle,
             "content_height must be larger when busy (working line)"
@@ -684,6 +770,31 @@ mod tests {
             matches!(t.items.last(), Some(Item::Notice(_))),
             "interrupting with no stream must push a Notice item"
         );
+    }
+
+    #[test]
+    fn error_commits_partial_stream_before_error_row() {
+        let mut t = Transcript::default();
+        t.push_delta("partial answer");
+        t.push_error("boom", &PlainHighlighter, Theme::dark());
+        assert!(matches!(&t.items[0], Item::Agent(_)));
+        assert!(matches!(&t.items[1], Item::Error(_)));
+        t.complete(true, &PlainHighlighter, Theme::dark());
+        assert!(
+            !matches!(t.items.last(), Some(Item::Notice(_))),
+            "interrupted notice must be suppressed right after an error row"
+        );
+    }
+
+    #[test]
+    fn discard_stream_drops_partial_only() {
+        let mut t = Transcript::default();
+        commit(&mut t, "committed");
+        t.push_delta("doomed partial");
+        let before = height(&t, 80);
+        t.discard_stream();
+        assert!(height(&t, 80) < before);
+        assert_eq!(t.items.len(), 1);
     }
 
     #[test]
@@ -703,6 +814,7 @@ mod tests {
                         scroll: h - 2,
                         spinner: symbols::SPINNER[0],
                         working: None,
+                        queued: &[],
                         hl: &PlainHighlighter,
                     },
                 );
@@ -726,6 +838,7 @@ mod tests {
                         scroll: 0,
                         spinner: symbols::SPINNER[3],
                         working: None,
+                        queued: &[],
                         hl: &PlainHighlighter,
                     },
                 );
@@ -739,6 +852,16 @@ mod tests {
         let mut t = Transcript::default();
         t.push_user("x\n".repeat(70_000));
         assert!(height(&t, 80) > usize::from(u16::MAX));
+    }
+
+    #[test]
+    fn queued_rows_render_below_working_and_cap() {
+        let mut t = Transcript::default();
+        commit(&mut t, "answer");
+        let queued: Vec<String> = (0..5).map(|i| format!("queued {i}")).collect();
+        let with_queue = t.content_height(80, Theme::dark(), &PlainHighlighter, None, &queued);
+        let without = t.content_height(80, Theme::dark(), &PlainHighlighter, None, &[]);
+        assert_eq!(with_queue - without, 5, "3 rows + overflow row + spacer");
     }
 
     #[test]
