@@ -209,7 +209,7 @@ pub async fn run_request(
         Err(err) => {
             let _ = events
                 .send(StreamEvent::Failed {
-                    message: err.to_string(),
+                    error: common::transport(&err),
                 })
                 .await;
             return;
@@ -217,10 +217,11 @@ pub async fn run_request(
     };
     if !resp.status().is_success() {
         let status = resp.status();
+        let headers = resp.headers().clone();
         let detail = resp.text().await.unwrap_or_default();
         let _ = events
             .send(StreamEvent::Failed {
-                message: format!("{status}: {detail}"),
+                error: common::classify_http(status, &headers, &detail),
             })
             .await;
         return;
@@ -282,7 +283,7 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Str
                 "response.failed" | "error" => {
                     let _ = events
                         .send(StreamEvent::Failed {
-                            message: event.data,
+                            error: common::classify_stream_error(&event.data),
                         })
                         .await;
                     return;
@@ -292,7 +293,7 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Str
             Err(err) => {
                 let _ = events
                     .send(StreamEvent::Failed {
-                        message: err.to_string(),
+                        error: goat_provider::StreamError::transport(err.to_string()),
                     })
                     .await;
                 return;

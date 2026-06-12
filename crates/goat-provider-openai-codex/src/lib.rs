@@ -366,7 +366,7 @@ impl Provider for CodexProvider {
             let Some((access, account)) = current_access(&store, &key).await else {
                 let _ = events
                     .send(StreamEvent::Failed {
-                        message: "not logged in to codex".to_owned(),
+                        error: goat_provider::StreamError::auth("not logged in to codex"),
                     })
                     .await;
                 return;
