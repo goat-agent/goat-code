@@ -41,7 +41,19 @@ pub enum AnthropicAuthError {
     Auth(#[from] goat_auth::AuthError),
 }
 
-const ANTHROPIC_CONTEXT_WINDOW: u32 = 200_000;
+fn anthropic_context_window(model: &str) -> u32 {
+    let id = model.to_ascii_lowercase();
+    if id.contains("fable")
+        || id.contains("opus-4-8")
+        || id.contains("opus-4-7")
+        || id.contains("opus-4-6")
+        || id.contains("sonnet-4-6")
+    {
+        1_000_000
+    } else {
+        200_000
+    }
+}
 
 const CATALOG: &[&str] = &[
     "claude-opus-4-8",
@@ -851,8 +863,8 @@ impl Provider for AnthropicProvider {
         })
     }
 
-    fn context_window(&self, _model: &str) -> Option<u32> {
-        Some(ANTHROPIC_CONTEXT_WINDOW)
+    fn context_window(&self, model: &str) -> Option<u32> {
+        Some(anthropic_context_window(model))
     }
 
     fn catalog(&self) -> &'static [&'static str] {
