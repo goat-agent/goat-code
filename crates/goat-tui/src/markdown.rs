@@ -12,6 +12,7 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
     let mut bold = false;
+    let mut italic = false;
     let mut strikethrough = false;
     let mut in_code_block = false;
     let mut blockquote_depth: usize = 0;
@@ -34,6 +35,9 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
         match event {
             Event::Start(Tag::Strong) => bold = true,
             Event::End(TagEnd::Strong) => bold = false,
+
+            Event::Start(Tag::Emphasis) => italic = true,
+            Event::End(TagEnd::Emphasis) => italic = false,
 
             Event::Start(Tag::Strikethrough) => strikethrough = true,
             Event::End(TagEnd::Strikethrough) => strikethrough = false,
@@ -191,7 +195,7 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
                 if in_code_block {
                     code_buf.push_str(&text);
                 } else {
-                    let style = text_style(bold, strikethrough, theme);
+                    let style = text_style(bold, italic, strikethrough, theme);
                     let segments: Vec<&str> = text.split('\n').collect();
                     for (i, segment) in segments.iter().enumerate() {
                         if i > 0 {
@@ -249,10 +253,18 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
     lines
 }
 
-fn text_style(bold: bool, strikethrough: bool, theme: Theme) -> ratatui::style::Style {
+fn text_style(
+    bold: bool,
+    italic: bool,
+    strikethrough: bool,
+    theme: Theme,
+) -> ratatui::style::Style {
     let mut style = theme.base();
     if bold {
         style = style.add_modifier(Modifier::BOLD);
+    }
+    if italic {
+        style = style.add_modifier(Modifier::ITALIC);
     }
     if strikethrough {
         style = style.add_modifier(Modifier::CROSSED_OUT);
@@ -399,6 +411,17 @@ mod tests {
             spans
                 .iter()
                 .any(|s| s.style.add_modifier.contains(Modifier::BOLD))
+        );
+    }
+
+    #[test]
+    fn italic_text_has_italic_modifier() {
+        let lines = render_plain("*hello*");
+        let spans: Vec<_> = lines.iter().flat_map(|l| &l.spans).collect();
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::ITALIC))
         );
     }
 
