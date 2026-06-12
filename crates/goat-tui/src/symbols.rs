@@ -3,10 +3,12 @@ pub mod marker {
     pub const AGENT: &str = "● ";
     pub const NOTICE: &str = "→ ";
     pub const ERROR: &str = "✗ ";
+    pub const SHELL: &str = "! ";
 }
 
 pub mod ui {
     pub const CARET: &str = "›";
+    pub const BANG: &str = "!";
     pub const BULLET: &str = "• ";
     pub const DOT_FULL: &str = "●";
     pub const DOT_EMPTY: &str = "○";

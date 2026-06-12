@@ -77,6 +77,11 @@ impl App {
                         } => {
                             self.transcript.push_compaction(tokens_before, tokens_after);
                         }
+                        TranscriptEntry::Shell { command, output } => {
+                            let id = TaskId(0);
+                            self.transcript.push_shell(id, command);
+                            self.transcript.finish_shell(id, output);
+                        }
                     }
                 }
                 self.clear_ctx_indicator();
@@ -248,6 +253,9 @@ impl App {
                     self.transcript.finish_tool(call, outcome);
                 }
             }
+            EngineEvent::ShellDone { id, output } => {
+                self.transcript.finish_shell(id, output);
+            }
             EngineEvent::AgentStarted {
                 id,
                 agent_type,
@@ -277,6 +285,7 @@ impl App {
                 self.transcript
                     .complete(interrupted, &self.highlighter, self.theme);
                 self.active = None;
+                self.active_shell = false;
                 self.task_start = None;
                 self.thinking = false;
                 self.retry = None;
@@ -289,6 +298,7 @@ impl App {
                 self.transcript
                     .push_error(message, &self.highlighter, self.theme);
                 self.active = None;
+                self.active_shell = false;
                 self.task_start = None;
                 self.thinking = false;
                 self.retry = None;

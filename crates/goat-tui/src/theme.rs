@@ -17,6 +17,7 @@ pub struct CodePalette {
 pub struct Theme {
     bg: Color,
     fg: Color,
+    dark: bool,
     user: Color,
     agent: Color,
     tool: Color,
@@ -26,6 +27,8 @@ pub struct Theme {
     border: Color,
     selection: Color,
     panel: Color,
+    shell: Color,
+    shell_dim: Color,
     pub code: CodePalette,
 }
 
@@ -38,7 +41,8 @@ impl Default for Theme {
 impl Theme {
     pub const fn dark() -> Self {
         Self {
-            bg: Color::Rgb(0x12, 0x12, 0x14),
+            bg: Color::Reset,
+            dark: true,
             fg: Color::Rgb(0xe6, 0xe6, 0xe6),
             user: Color::Rgb(0x7a, 0xa2, 0xf7),
             agent: Color::Rgb(0x9e, 0xce, 0x6a),
@@ -49,6 +53,8 @@ impl Theme {
             border: Color::Rgb(0x2a, 0x2c, 0x32),
             selection: Color::Rgb(0x2f, 0x33, 0x3e),
             panel: Color::Rgb(0x1b, 0x1b, 0x1e),
+            shell: Color::Rgb(0xdb, 0x4b, 0x4b),
+            shell_dim: Color::Rgb(0x54, 0x29, 0x2e),
             code: CodePalette {
                 bg: Color::Rgb(0x1a, 0x1b, 0x26),
                 keyword: Color::Rgb(0xbb, 0x9a, 0xf7),
@@ -64,6 +70,7 @@ impl Theme {
     pub const fn light() -> Self {
         Self {
             bg: Color::Rgb(0xfa, 0xfa, 0xfa),
+            dark: false,
             fg: Color::Rgb(0x1c, 0x1e, 0x22),
             user: Color::Rgb(0x2e, 0x5c, 0xc9),
             agent: Color::Rgb(0x2f, 0x7d, 0x32),
@@ -74,6 +81,8 @@ impl Theme {
             border: Color::Rgb(0xd9, 0xdc, 0xe1),
             selection: Color::Rgb(0xdd, 0xe3, 0xec),
             panel: Color::Rgb(0xee, 0xee, 0xf0),
+            shell: Color::Rgb(0xb0, 0x35, 0x54),
+            shell_dim: Color::Rgb(0xe6, 0xc2, 0xcb),
             code: CodePalette {
                 bg: Color::Rgb(0xf0, 0xf0, 0xf5),
                 keyword: Color::Rgb(0x6a, 0x3d, 0xc9),
@@ -108,6 +117,14 @@ impl Theme {
 
     pub fn border_dim(self) -> Style {
         Style::new().fg(self.panel)
+    }
+
+    pub fn shell(self) -> Style {
+        Style::new().fg(self.shell)
+    }
+
+    pub fn shell_dim(self) -> Style {
+        Style::new().fg(self.shell_dim)
     }
 
     pub fn role_user(self) -> Style {
@@ -165,12 +182,6 @@ impl Theme {
     }
 
     pub fn is_dark(self) -> bool {
-        match self.bg {
-            Color::Rgb(r, g, b) => {
-                let luminance = u32::from(r) + u32::from(g) + u32::from(b);
-                luminance < 384
-            }
-            _ => true,
-        }
+        self.dark
     }
 }

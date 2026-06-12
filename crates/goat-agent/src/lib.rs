@@ -28,6 +28,7 @@ mod prompt;
 mod rate_limit_cache;
 mod retry;
 mod rounds;
+mod shell;
 mod threads;
 mod tools_exec;
 mod turn;
@@ -280,6 +281,38 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     &ctx,
                     id,
                     instructions,
+                    &mut target,
+                    &mut conversation,
+                    &mut tracker,
+                    &mut thread_id,
+                    &mut ops,
+                )
+                .await
+                {
+                    break;
+                }
+            }
+            Op::SubmitShell { id, command } => {
+                let ctx = Ctx {
+                    registry: &registry,
+                    account_registries: &account_registries,
+                    credentials: &credentials,
+                    tools: &tools,
+                    agents: &agents,
+                    store: &store,
+                    events: &events,
+                    skills: &skills,
+                    instructions: project_instructions.as_deref(),
+                    semaphore: &semaphore,
+                    child_ids: &child_ids,
+                    asks: &asks,
+                    rl_cache: &rl_cache,
+                    rl_path: rl_path.as_deref(),
+                };
+                if let Flow::Shutdown = turn::handle_shell(
+                    &ctx,
+                    id,
+                    &command,
                     &mut target,
                     &mut conversation,
                     &mut tracker,
@@ -1193,6 +1226,106 @@ mod tests {
             }
         }
         assert!(saw_error);
+    }
+
+    #[tokio::test]
+    async fn shell_runs_and_reports_output() {
+        let session = Session::spawn(agent_with("unused", 0));
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitShell {
+            id: TaskId(7),
+            command: "echo hello".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        let mut started = false;
+        let mut output = None;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::TaskStarted { .. } => started = true,
+                Event::ShellDone { output: text, .. } => output = Some(text),
+                Event::TaskDone { interrupted, .. } => {
+                    assert!(!interrupted);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(started);
+        assert!(
+            output
+                .expect("ShellDone must precede TaskDone")
+                .contains("hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_interrupt_kills_command() {
+        let session = Session::spawn(agent_with("unused", 0));
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitShell {
+            id: TaskId(8),
+            command: "sleep 999".to_owned(),
+        })
+        .await
+        .unwrap();
+        ops.send(Op::Interrupt { id: TaskId(8) }).await.unwrap();
+
+        let mut output = None;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::ShellDone { output: text, .. } => output = Some(text),
+                Event::TaskDone { interrupted, .. } => {
+                    assert!(!interrupted);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(output.as_deref(), Some(crate::turn::SHELL_INTERRUPTED));
+    }
+
+    #[tokio::test]
+    async fn shell_persists_role_and_resumes() {
+        let provider = MockProvider {
+            id: "mock".to_owned(),
+            reply: "ok".to_owned(),
+            delay_ms: 0,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-shell.json"));
+        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+
+        ops.send(Op::SubmitShell {
+            id: TaskId(1),
+            command: "echo persisted".to_owned(),
+        })
+        .await
+        .unwrap();
+        drain_until_task_done(&mut events).await;
+
+        let thread = store.get_thread(1).await.unwrap().expect("thread created");
+        assert_eq!(thread.title.as_deref(), Some("! echo persisted"));
+        let messages = store.get_messages(1).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "shell");
+
+        ops.send(Op::Resume { thread_id: 1 }).await.unwrap();
+        while let Some(event) = events.recv().await {
+            if let Event::ConversationRestored { entries, .. } = event {
+                assert!(entries.iter().any(|entry| matches!(
+                    entry,
+                    goat_protocol::TranscriptEntry::Shell { command, output }
+                        if command == "echo persisted" && output.contains("persisted")
+                )));
+                return;
+            }
+        }
+        panic!("expected ConversationRestored");
     }
 
     async fn drain_until_task_done(events: &mut mpsc::Receiver<Event>) {

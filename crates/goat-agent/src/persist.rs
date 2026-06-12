@@ -200,6 +200,34 @@ pub(crate) async fn persist_message(
     }
 }
 
+pub(crate) async fn persist_shell_message(
+    ctx: &Ctx<'_>,
+    thread_id: i64,
+    encoded: &str,
+) -> Option<i64> {
+    let body = serde_json::to_string(&vec![ContentBlock::Text {
+        text: encoded.to_owned(),
+    }])
+    .unwrap_or_else(|_| encoded.to_owned());
+    match ctx
+        .store
+        .create_message(NewMessage {
+            thread_id,
+            turn_id: None,
+            role: "shell".to_owned(),
+            body,
+            created_at: now_ms(),
+        })
+        .await
+    {
+        Ok(row) => Some(row),
+        Err(err) => {
+            tracing::warn!(%err, "failed to persist shell message");
+            None
+        }
+    }
+}
+
 pub(crate) async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &TurnEnd, ids: &TurnIds) {
     match outcome {
         TurnEnd::Done => {

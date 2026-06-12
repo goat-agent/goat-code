@@ -165,6 +165,10 @@ pub enum TranscriptEntry {
         tokens_before: u32,
         tokens_after: u32,
     },
+    Shell {
+        command: String,
+        output: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +218,10 @@ pub enum Op {
     SubmitMessage {
         id: TaskId,
         text: String,
+    },
+    SubmitShell {
+        id: TaskId,
+        command: String,
     },
     Interrupt {
         id: TaskId,
@@ -286,6 +294,10 @@ pub enum Event {
         id: TaskId,
         call: ToolCallId,
         outcome: ToolOutcome,
+    },
+    ShellDone {
+        id: TaskId,
+        output: String,
     },
     TaskDone {
         id: TaskId,

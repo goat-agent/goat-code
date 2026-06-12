@@ -144,6 +144,19 @@ pub(crate) async fn handle_resume(
             });
             next_compaction += 1;
         }
+        if stored.role == "shell" {
+            let content = parse_content_blocks(&stored.body);
+            if let Some(ContentBlock::Text { text }) = content.first() {
+                match crate::shell::decode(text) {
+                    Some((command, output)) => {
+                        entries.push(TranscriptEntry::Shell { command, output });
+                    }
+                    None => entries.push(TranscriptEntry::User(text.clone())),
+                }
+            }
+            parsed.push((stored.id, MessageRole::User, content));
+            continue;
+        }
         let role = match stored.role.as_str() {
             "user" => MessageRole::User,
             "assistant" => MessageRole::Assistant,

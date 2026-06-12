@@ -238,7 +238,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
 fn onboarding_hint(app: &App) -> String {
     let sep = symbols::ui::SEPARATOR;
     if app.current_model().is_some() || !app.models_loaded {
-        format!("/ for commands{sep}/help for keys")
+        format!("/ for commands{sep}! for shell{sep}/help for keys")
     } else if app.models.is_empty() {
         format!("no provider connected{sep}/config to add one")
     } else {
