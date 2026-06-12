@@ -97,13 +97,7 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
-                render_code_block(
-                    code_buf.trim_end_matches('\n'),
-                    &code_lang,
-                    theme,
-                    hl,
-                    &mut lines,
-                );
+                lines.extend(hl.highlight(&code_lang, code_buf.trim_end_matches('\n'), theme));
                 lines.push(Line::default());
                 code_lang.clear();
             }
@@ -283,29 +277,6 @@ fn flush_line_blockquote(
     lines.push(Line::from(row_spans));
 }
 
-fn render_code_block(
-    code: &str,
-    lang: &str,
-    theme: Theme,
-    hl: &dyn Highlighter,
-    lines: &mut Vec<Line<'static>>,
-) {
-    let highlighted = hl.highlight(lang, code, theme);
-    for (i, hl_line) in highlighted.into_iter().enumerate() {
-        let mut spans = vec![Span::styled(symbols::ui::CODE_GUTTER, theme.muted())];
-        spans.extend(
-            hl_line
-                .spans
-                .into_iter()
-                .map(|s| Span::styled(s.content.into_owned(), s.style)),
-        );
-        if i == 0 && !lang.is_empty() {
-            spans.push(Span::styled(format!("  {lang}"), theme.muted()));
-        }
-        lines.push(Line::from(spans));
-    }
-}
-
 fn render_table(
     headers: &[Vec<Span<'static>>],
     rows: &[Vec<Vec<Span<'static>>>],
@@ -444,13 +415,16 @@ mod tests {
     }
 
     #[test]
-    fn code_block_has_bar_prefix() {
+    fn code_block_renders_content() {
         let lines = render_plain("```rust\nfn main() {}\n```");
-        assert!(
-            lines
-                .iter()
-                .any(|l| { l.spans.first().is_some_and(|s| s.content.contains('│')) })
-        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("fn main() {}"));
+        assert!(!text.contains('│'));
+        assert!(!text.contains("rust"));
     }
 
     #[test]
