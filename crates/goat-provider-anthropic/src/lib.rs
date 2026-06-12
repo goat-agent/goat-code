@@ -8,7 +8,8 @@ use goat_auth::{
 };
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, RateLimitSnapshot, RateWindow, Request, StreamEvent, Usage,
+    ProviderId, RateLimitSnapshot, RateWindow, Request, SearchResult, StreamError, StreamEvent,
+    Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -18,6 +19,7 @@ pub const PROVIDER_ID: &str = "anthropic";
 const BASE_URL: &str = "https://api.anthropic.com/v1";
 const ENV_VAR: &str = "ANTHROPIC_API_KEY";
 const VERSION: &str = "2023-06-01";
+const WEB_SEARCH_MODEL: &str = "claude-haiku-4-5-20251001";
 const MAX_TOKENS: u32 = 16384;
 
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -801,6 +803,47 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
     let _ = events.send(StreamEvent::Completed).await;
 }
 
+fn parse_web_search_results(value: &serde_json::Value) -> Vec<SearchResult> {
+    let mut out = Vec::new();
+    let Some(content) = value.get("content").and_then(|content| content.as_array()) else {
+        return out;
+    };
+    for block in content {
+        if block.get("type").and_then(|kind| kind.as_str()) != Some("web_search_tool_result") {
+            continue;
+        }
+        let Some(results) = block.get("content").and_then(|content| content.as_array()) else {
+            continue;
+        };
+        for result in results {
+            if result.get("type").and_then(|kind| kind.as_str()) != Some("web_search_result") {
+                continue;
+            }
+            let url = result
+                .get("url")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if url.is_empty() {
+                continue;
+            }
+            out.push(SearchResult {
+                title: result
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                url: url.to_owned(),
+                snippet: result
+                    .get("page_age")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+            });
+        }
+    }
+    out
+}
+
 impl Provider for AnthropicProvider {
     fn id(&self) -> ProviderId {
         ProviderId::from(PROVIDER_ID)
@@ -811,6 +854,52 @@ impl Provider for AnthropicProvider {
             tools: true,
             auth: AuthMethod::ApiKeyOrOAuth,
         }
+    }
+
+    fn supports_web_search(&self) -> bool {
+        true
+    }
+
+    fn web_search(&self, query: String) -> JoinHandle<Result<Vec<SearchResult>, StreamError>> {
+        let client = self.client.clone();
+        let url = format!("{}/messages", self.base_url);
+        let store = self.store.clone();
+        let key = self.key.clone();
+        tokio::spawn(async move {
+            let Some(auth) = current_auth(&store, &key).await else {
+                return Err(StreamError::auth("not logged in to anthropic"));
+            };
+            let body = json!({
+                "model": WEB_SEARCH_MODEL,
+                "max_tokens": 1024,
+                "messages": [{ "role": "user", "content": query }],
+                "tools": [{ "type": "web_search_20250305", "name": "web_search", "max_uses": 5 }],
+            });
+            let builder = client
+                .post(&url)
+                .header("anthropic-version", VERSION)
+                .json(&body);
+            let builder = match &auth {
+                Auth::ApiKey(api_key) => builder.header("x-api-key", api_key),
+                Auth::OAuth(access) => builder
+                    .bearer_auth(access)
+                    .header("anthropic-beta", OAUTH_BETA)
+                    .header("user-agent", OAUTH_USER_AGENT)
+                    .header("x-app", "cli"),
+            };
+            let resp = builder.send().await.map_err(|err| error::transport(&err))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let headers = resp.headers().clone();
+                let detail = resp.text().await.unwrap_or_default();
+                return Err(error::classify_http(status, &headers, &detail));
+            }
+            let value: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|err| StreamError::other(format!("invalid search response: {err}")))?;
+            Ok(parse_web_search_results(&value))
+        })
     }
 
     fn stream(&self, req: Request, tx: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
@@ -985,7 +1074,38 @@ impl Provider for AnthropicProvider {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{event_index, parse_input_json_delta, parse_text_delta};
+    use super::{event_index, parse_input_json_delta, parse_text_delta, parse_web_search_results};
+
+    #[test]
+    fn extracts_web_search_results() {
+        let value = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "here are results" },
+                { "type": "web_search_tool_result", "content": [
+                    { "type": "web_search_result", "url": "https://a.example", "title": "A", "page_age": "today" },
+                    { "type": "web_search_result", "url": "https://b.example", "title": "B" }
+                ]}
+            ]
+        });
+        let results = parse_web_search_results(&value);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, "https://a.example");
+        assert_eq!(results[0].title, "A");
+        assert_eq!(results[0].snippet, "today");
+        assert_eq!(results[1].url, "https://b.example");
+    }
+
+    #[test]
+    fn ignores_search_errors() {
+        let value = serde_json::json!({
+            "content": [
+                { "type": "web_search_tool_result", "content": {
+                    "type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"
+                }}
+            ]
+        });
+        assert!(parse_web_search_results(&value).is_empty());
+    }
 
     #[test]
     fn parses_text_delta() {

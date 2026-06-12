@@ -166,6 +166,13 @@ pub struct Capabilities {
     pub auth: AuthMethod,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StreamEvent {
     TextDelta {
@@ -285,6 +292,15 @@ pub trait Provider: Send + Sync + 'static {
     }
     fn context_window(&self, _model: &str) -> Option<u32> {
         None
+    }
+
+    fn supports_web_search(&self) -> bool {
+        false
+    }
+
+    fn web_search(&self, query: String) -> JoinHandle<Result<Vec<SearchResult>, StreamError>> {
+        let _ = query;
+        tokio::spawn(async { Err(StreamError::other("web search is not supported")) })
     }
 
     fn login(&self, status: mpsc::Sender<String>) -> JoinHandle<Result<TokenSet, String>> {

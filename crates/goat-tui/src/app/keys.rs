@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use goat_protocol::Op;
+use goat_protocol::{NotifyKind, Op, PlanDecision};
 
-use super::{App, CLEAR_ARM_TICKS, Overlay, QUIT_ARM_TICKS};
+use super::{App, CLEAR_ARM_TICKS, Overlay, PlanFocus, QUIT_ARM_TICKS};
 use crate::{
     config::ConfigOutcome,
     keymap,
@@ -18,6 +18,7 @@ impl App {
             Overlay::Config(_) => return self.on_config_key(key),
             Overlay::Agents(_) => return self.on_agent_selector_key(key),
             Overlay::Ask(_, _) => return self.on_ask_picker_key(key),
+            Overlay::Plan(_) => return self.on_plan_overlay_key(key),
             Overlay::Commands(_) => {
                 if let Some(result) = self.on_command_menu_key(key) {
                     return result;
@@ -25,6 +26,9 @@ impl App {
             }
             Overlay::Usage | Overlay::Help => return self.on_usage_key(key),
             Overlay::None => {}
+        }
+        if matches!(key.code, KeyCode::BackTab) {
+            return self.plan_command(None);
         }
         if let Some(ch) = keymap::ctrl_key(&key) {
             if ch == 'c' {
@@ -508,6 +512,162 @@ impl App {
             if let Some(id) = self.active {
                 return vec![Op::Answer { id, call, answers }];
             }
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn on_plan_overlay_key(&mut self, key: KeyEvent) -> Vec<Op> {
+        self.dirty = true;
+        if let Some(ch) = keymap::ctrl_key(&key) {
+            if ch == 'c' {
+                return self.plan_dismiss();
+            }
+            return Vec::new();
+        }
+        let in_feedback = matches!(&self.overlay, Overlay::Plan(p) if p.feedback.is_some());
+        if in_feedback {
+            match key.code {
+                KeyCode::Esc => {
+                    if let Overlay::Plan(ref mut plan) = self.overlay {
+                        plan.feedback = None;
+                    }
+                }
+                KeyCode::Enter => {
+                    let submit = if let Overlay::Plan(ref plan) = self.overlay {
+                        plan.feedback.clone().map(|fb| (plan.id, plan.call, fb))
+                    } else {
+                        None
+                    };
+                    if let Some((id, call, feedback)) = submit {
+                        self.overlay = Overlay::None;
+                        return vec![Op::ResolvePlan {
+                            id,
+                            call,
+                            decision: PlanDecision::Reject { feedback },
+                        }];
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Overlay::Plan(ref mut plan) = self.overlay
+                        && let Some(feedback) = plan.feedback.as_mut()
+                    {
+                        feedback.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Overlay::Plan(ref mut plan) = self.overlay
+                        && let Some(feedback) = plan.feedback.as_mut()
+                    {
+                        feedback.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return Vec::new();
+        }
+        if !matches!(key.code, KeyCode::Esc)
+            && let Overlay::Plan(ref mut plan) = self.overlay
+        {
+            plan.esc_armed = false;
+        }
+        match key.code {
+            KeyCode::Esc => return self.plan_esc(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Overlay::Plan(ref mut plan) = self.overlay {
+                    plan.scroll = plan.scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Overlay::Plan(ref mut plan) = self.overlay {
+                    plan.scroll = plan.scroll.saturating_add(1);
+                }
+            }
+            KeyCode::PageUp => {
+                if let Overlay::Plan(ref mut plan) = self.overlay {
+                    plan.scroll = plan.scroll.saturating_sub(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Overlay::Plan(ref mut plan) = self.overlay {
+                    plan.scroll = plan.scroll.saturating_add(10);
+                }
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                if let Overlay::Plan(ref mut plan) = self.overlay {
+                    plan.focus = match plan.focus {
+                        PlanFocus::Approve => PlanFocus::Reject,
+                        PlanFocus::Reject => PlanFocus::Approve,
+                    };
+                }
+            }
+            KeyCode::Char('a') => return self.plan_approve(),
+            KeyCode::Char('r') => {
+                if let Overlay::Plan(ref mut plan) = self.overlay {
+                    plan.feedback = Some(String::new());
+                }
+            }
+            KeyCode::Enter => {
+                let focus = if let Overlay::Plan(ref plan) = self.overlay {
+                    Some(plan.focus)
+                } else {
+                    None
+                };
+                match focus {
+                    Some(PlanFocus::Approve) => return self.plan_approve(),
+                    Some(PlanFocus::Reject) => {
+                        if let Overlay::Plan(ref mut plan) = self.overlay {
+                            plan.feedback = Some(String::new());
+                        }
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn plan_approve(&mut self) -> Vec<Op> {
+        let ids = if let Overlay::Plan(ref plan) = self.overlay {
+            Some((plan.id, plan.call))
+        } else {
+            None
+        };
+        if let Some((id, call)) = ids {
+            self.overlay = Overlay::None;
+            return vec![Op::ResolvePlan {
+                id,
+                call,
+                decision: PlanDecision::Approve,
+            }];
+        }
+        Vec::new()
+    }
+
+    fn plan_esc(&mut self) -> Vec<Op> {
+        let armed = matches!(&self.overlay, Overlay::Plan(plan) if plan.esc_armed);
+        if armed {
+            return self.plan_dismiss();
+        }
+        if let Overlay::Plan(ref mut plan) = self.overlay {
+            plan.esc_armed = true;
+        }
+        self.push_toast(
+            NotifyKind::Info,
+            "press Esc again to dismiss the plan".to_owned(),
+        );
+        Vec::new()
+    }
+
+    fn plan_dismiss(&mut self) -> Vec<Op> {
+        let id = if let Overlay::Plan(ref plan) = self.overlay {
+            Some(plan.id)
+        } else {
+            None
+        };
+        self.overlay = Overlay::None;
+        if let Some(id) = id {
+            return vec![Op::Interrupt { id }];
         }
         Vec::new()
     }

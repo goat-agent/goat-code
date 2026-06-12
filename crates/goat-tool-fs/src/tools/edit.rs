@@ -1,7 +1,5 @@
 use goat_protocol::ToolDisplay;
-use goat_tool::{
-    Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display, path::resolve_in_cwd,
-};
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display};
 use serde::Deserialize;
 
 use crate::tools::relative_display;
@@ -49,7 +47,8 @@ impl Tool for EditTool {
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
-            let resolved = resolve_in_cwd(&ctx.cwd, &args.path)?;
+            let resolved = ctx.resolve(&args.path)?;
+            ctx.ensure_writable(&resolved, &args.path)?;
             if !resolved.exists() {
                 return Err(ToolError::NotFound { path: args.path });
             }

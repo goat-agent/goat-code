@@ -5,7 +5,7 @@ use std::{
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-const LATEST_VERSION: i64 = 4;
+const LATEST_VERSION: i64 = 5;
 
 const SCHEMA_V1: &str = "\
 CREATE TABLE threads (
@@ -73,6 +73,8 @@ CREATE TABLE compactions (
 );
 CREATE INDEX idx_compactions_thread ON compactions(thread_id);";
 
+const SCHEMA_V5: &str = "ALTER TABLE threads ADD COLUMN mode TEXT;";
+
 fn migrate(conn: &Connection) -> Result<(), StoreError> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > LATEST_VERSION {
@@ -84,6 +86,7 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
             1 => conn.execute_batch(SCHEMA_V2)?,
             2 => conn.execute_batch(SCHEMA_V3)?,
             3 => conn.execute_batch(SCHEMA_V4)?,
+            4 => conn.execute_batch(SCHEMA_V5)?,
             _ => return Err(StoreError::UnknownVersion(version)),
         }
         version += 1;
@@ -108,6 +111,7 @@ pub struct NewThread {
     pub model: String,
     pub account: String,
     pub effort: Option<String>,
+    pub mode: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -121,6 +125,7 @@ pub struct Thread {
     pub model: String,
     pub account: String,
     pub effort: Option<String>,
+    pub mode: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -200,8 +205,9 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
         model: row.get(4)?,
         account: row.get(5)?,
         effort: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        mode: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -244,8 +250,8 @@ impl Store {
     pub async fn create_thread(&self, thread: NewThread) -> Result<i64, StoreError> {
         self.run(move |conn| {
             conn.execute(
-                "INSERT INTO threads (cwd, title, provider, model, account, effort, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO threads (cwd, title, provider, model, account, effort, mode, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     thread.cwd,
                     thread.title,
@@ -253,6 +259,7 @@ impl Store {
                     thread.model,
                     thread.account,
                     thread.effort,
+                    thread.mode,
                     thread.created_at,
                     thread.updated_at,
                 ],
@@ -265,7 +272,7 @@ impl Store {
     pub async fn get_thread(&self, id: i64) -> Result<Option<Thread>, StoreError> {
         self.run(move |conn| {
             conn.query_row(
-                "SELECT id, cwd, title, provider, model, account, effort, created_at, updated_at
+                "SELECT id, cwd, title, provider, model, account, effort, mode, created_at, updated_at
                  FROM threads WHERE id = ?1",
                 params![id],
                 thread_from_row,
@@ -279,7 +286,7 @@ impl Store {
     pub async fn latest_thread_in(&self, cwd: String) -> Result<Option<Thread>, StoreError> {
         self.run(move |conn| {
             conn.query_row(
-                "SELECT id, cwd, title, provider, model, account, effort, created_at, updated_at
+                "SELECT id, cwd, title, provider, model, account, effort, mode, created_at, updated_at
                  FROM threads WHERE cwd = ?1 ORDER BY updated_at DESC, id DESC LIMIT 1",
                 params![cwd],
                 thread_from_row,
@@ -297,7 +304,7 @@ impl Store {
     ) -> Result<Vec<Thread>, StoreError> {
         self.run(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, cwd, title, provider, model, account, effort, created_at, updated_at
+                "SELECT id, cwd, title, provider, model, account, effort, mode, created_at, updated_at
                  FROM threads WHERE cwd = ?1 ORDER BY updated_at DESC, id DESC LIMIT ?2",
             )?;
             let rows = stmt.query_map(params![cwd, limit], thread_from_row)?;
@@ -348,6 +355,22 @@ impl Store {
                 "UPDATE threads SET provider = ?2, model = ?3, account = ?4, effort = ?5, updated_at = ?6
                  WHERE id = ?1",
                 params![id, provider, model, account, effort, updated_at],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn update_thread_mode(
+        &self,
+        id: i64,
+        mode: Option<String>,
+        updated_at: i64,
+    ) -> Result<(), StoreError> {
+        self.run(move |conn| {
+            conn.execute(
+                "UPDATE threads SET mode = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, mode, updated_at],
             )?;
             Ok(())
         })
@@ -526,6 +549,7 @@ mod tests {
             model: "gpt-x".into(),
             account: "default".into(),
             effort: None,
+            mode: None,
             created_at: 100,
             updated_at: 100,
         }
@@ -539,6 +563,22 @@ mod tests {
         assert_eq!(thread.provider, "openai");
         assert_eq!(thread.model, "gpt-x");
         assert_eq!(thread.title.as_deref(), Some("first"));
+        assert_eq!(thread.mode, None);
+    }
+
+    #[tokio::test]
+    async fn updates_thread_mode() {
+        let store = Store::open_in_memory().unwrap();
+        let id = store.create_thread(sample_thread()).await.unwrap();
+        store
+            .update_thread_mode(id, Some("plan".into()), 200)
+            .await
+            .unwrap();
+        let thread = store.get_thread(id).await.unwrap().unwrap();
+        assert_eq!(thread.mode.as_deref(), Some("plan"));
+        store.update_thread_mode(id, None, 300).await.unwrap();
+        let thread = store.get_thread(id).await.unwrap().unwrap();
+        assert_eq!(thread.mode, None);
     }
 
     #[tokio::test]
@@ -551,6 +591,7 @@ mod tests {
             model: model.into(),
             account: "default".into(),
             effort: None,
+            mode: None,
             created_at: updated,
             updated_at: updated,
         };
@@ -654,6 +695,7 @@ mod tests {
             model: model.into(),
             account: "default".into(),
             effort: Some("high".into()),
+            mode: None,
             created_at: updated,
             updated_at: updated,
         };

@@ -16,6 +16,7 @@ goat-auth = { workspace = true }
 goat-store = { workspace = true }
 goat-config = { workspace = true }
 goat-tool = { workspace = true }
+goat-sandbox = { workspace = true }
 goat-tools = { workspace = true }
 rand = { workspace = true }
 goat-tool-computer = { workspace = true }

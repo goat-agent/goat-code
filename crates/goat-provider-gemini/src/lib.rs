@@ -9,13 +9,16 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_auth::{CredentialKey, CredentialStore, TokenSet};
 use goat_provider::{
-    AuthMethod, Capabilities, Effort, Model, Provider, ProviderId, Request, StreamEvent,
+    AuthMethod, Capabilities, Effort, Model, Provider, ProviderId, Request, SearchResult,
+    StreamError, StreamEvent,
 };
+use serde_json::json;
 use tokio::{sync::Mutex, sync::mpsc, task::JoinHandle};
 
 pub const PROVIDER_ID: &str = "gemini";
 pub const ENV_VAR: &str = "GEMINI_API_KEY";
 const GL_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+const SEARCH_MODEL: &str = "gemini-2.5-flash";
 
 const CATALOG: &[&str] = &[
     "gemini-3.5-flash",
@@ -140,6 +143,47 @@ async fn stream_response(resp: reqwest::Response, tx: &mpsc::Sender<StreamEvent>
     let _ = tx.send(StreamEvent::Completed).await;
 }
 
+fn parse_grounding_results(value: &serde_json::Value) -> Vec<SearchResult> {
+    let root = value.get("response").unwrap_or(value);
+    let mut out = Vec::new();
+    let Some(candidate) = root
+        .get("candidates")
+        .and_then(|candidates| candidates.as_array())
+        .and_then(|candidates| candidates.first())
+    else {
+        return out;
+    };
+    let Some(chunks) = candidate
+        .get("groundingMetadata")
+        .and_then(|meta| meta.get("groundingChunks"))
+        .and_then(|chunks| chunks.as_array())
+    else {
+        return out;
+    };
+    for chunk in chunks {
+        let Some(web) = chunk.get("web") else {
+            continue;
+        };
+        let url = web
+            .get("uri")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if url.is_empty() {
+            continue;
+        }
+        out.push(SearchResult {
+            title: web
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            url: url.to_owned(),
+            snippet: String::new(),
+        });
+    }
+    out
+}
+
 impl Provider for GeminiProvider {
     fn id(&self) -> ProviderId {
         ProviderId::from(PROVIDER_ID)
@@ -223,6 +267,56 @@ impl Provider for GeminiProvider {
         })
     }
 
+    fn supports_web_search(&self) -> bool {
+        true
+    }
+
+    fn web_search(&self, query: String) -> JoinHandle<Result<Vec<SearchResult>, StreamError>> {
+        let client = self.client.clone();
+        let store = self.store.clone();
+        let key = self.key.clone();
+        let project_cache = Arc::clone(&self.project);
+        tokio::spawn(async move {
+            let Some(auth) = oauth::current_auth(&store, &key).await else {
+                return Err(StreamError::auth("not logged in to gemini"));
+            };
+            let inner = json!({
+                "contents": [{ "role": "user", "parts": [{ "text": query }] }],
+                "tools": [{ "google_search": {} }],
+            });
+            let builder = match &auth {
+                oauth::Auth::ApiKey(api_key) => {
+                    let url = format!("{GL_BASE}/models/{SEARCH_MODEL}:generateContent");
+                    client
+                        .post(&url)
+                        .header("x-goog-api-key", api_key)
+                        .json(&inner)
+                }
+                oauth::Auth::OAuth(access) => {
+                    let project =
+                        codeassist::resolve_project(&client, access, &project_cache).await?;
+                    let body = codeassist::wrap_request(SEARCH_MODEL, project.as_deref(), &inner);
+                    let url = format!("{}:generateContent", codeassist::CA_BASE);
+                    client.post(&url).bearer_auth(access).json(&body)
+                }
+            };
+            let resp = builder
+                .send()
+                .await
+                .map_err(|err| StreamError::transport(err.to_string()))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let detail = resp.text().await.unwrap_or_default();
+                return Err(error::classify_http(status, &detail));
+            }
+            let value: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|err| StreamError::other(format!("invalid search response: {err}")))?;
+            Ok(parse_grounding_results(&value))
+        })
+    }
+
     fn stream(&self, req: Request, tx: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
         let client = self.client.clone();
         let store = self.store.clone();
@@ -302,5 +396,44 @@ impl Provider for GeminiProvider {
 
     fn login(&self, status: mpsc::Sender<String>) -> JoinHandle<Result<TokenSet, String>> {
         tokio::spawn(async move { oauth::do_login(&status).await.map_err(|e| e.to_string()) })
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::parse_grounding_results;
+
+    #[test]
+    fn extracts_grounding_chunks() {
+        let value = serde_json::json!({
+            "candidates": [{
+                "groundingMetadata": {
+                    "groundingChunks": [
+                        { "web": { "uri": "https://a.example", "title": "A" } },
+                        { "web": { "uri": "https://b.example", "title": "B" } }
+                    ]
+                }
+            }]
+        });
+        let results = parse_grounding_results(&value);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, "https://a.example");
+        assert_eq!(results[1].title, "B");
+    }
+
+    #[test]
+    fn unwraps_codeassist_envelope() {
+        let value = serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "groundingMetadata": {
+                        "groundingChunks": [{ "web": { "uri": "https://x.example", "title": "X" } }]
+                    }
+                }]
+            }
+        });
+        let results = parse_grounding_results(&value);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://x.example");
     }
 }

@@ -28,6 +28,19 @@ impl Conversation {
         }
     }
 
+    pub(crate) fn set_system(&mut self, text: String) -> bool {
+        match self.messages.first() {
+            Some(first) if first.role == goat_provider::MessageRole::System => {
+                if first.text_content() == text {
+                    return false;
+                }
+                self.messages[0] = Message::text(goat_provider::MessageRole::System, text);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn messages(&self) -> &[Message] {
         &self.messages
     }

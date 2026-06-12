@@ -119,6 +119,27 @@ impl fmt::Display for Effort {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    Normal,
+    Plan,
+}
+
+impl Mode {
+    #[must_use]
+    pub fn is_plan(self) -> bool {
+        matches!(self, Self::Plan)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanDecision {
+    Approve,
+    Reject { feedback: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelTarget {
     pub provider: String,
@@ -262,6 +283,14 @@ pub enum Op {
     DequeueMessage {
         id: TaskId,
     },
+    SetMode {
+        mode: Mode,
+    },
+    ResolvePlan {
+        id: TaskId,
+        call: ToolCallId,
+        decision: PlanDecision,
+    },
     Shutdown,
 }
 
@@ -327,6 +356,8 @@ pub enum Event {
         entries: Vec<TranscriptEntry>,
         context_tokens: Option<u32>,
         compaction_threshold: Option<u32>,
+        #[serde(default)]
+        mode: Mode,
     },
     ThinkingDelta {
         id: TaskId,
@@ -400,6 +431,20 @@ pub enum Event {
         tokens_before: u32,
         tokens_after: u32,
         usage: Usage,
+    },
+    ModeChanged {
+        mode: Mode,
+        plan_path: Option<String>,
+    },
+    PlanProposed {
+        id: TaskId,
+        call: ToolCallId,
+        plan: String,
+        path: String,
+    },
+    PlanDismissed {
+        id: TaskId,
+        call: ToolCallId,
     },
 }
 

@@ -1,12 +1,22 @@
-use std::{fmt::Write as _, process::Stdio, time::Duration};
+use std::{
+    ffi::OsString, fmt::Write as _, path::PathBuf, process::Stdio, sync::OnceLock, time::Duration,
+};
 
 use goat_protocol::ToolDisplay;
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display};
+use goat_tool::{SandboxPolicy, Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display};
 use serde::Deserialize;
 use tokio::{io::AsyncReadExt, process::Command, time};
 
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 300_000;
+
+fn sandbox_tmp() -> &'static PathBuf {
+    static TMP: OnceLock<PathBuf> = OnceLock::new();
+    TMP.get_or_init(|| {
+        let raw = std::env::temp_dir();
+        raw.canonicalize().unwrap_or(raw)
+    })
+}
 
 struct ChildGuard(tokio::process::Child);
 
@@ -59,13 +69,37 @@ impl Tool for BashTool {
                 None => ctx.bash_timeout,
             };
 
-            let child = Command::new("sh")
-                .arg("-c")
-                .arg(&args.command)
+            let read_only = ctx.exec_policy.is_read_only();
+            let (program, prog_args, tmpdir) = match &ctx.exec_policy {
+                SandboxPolicy::Full => (
+                    OsString::from("sh"),
+                    vec![OsString::from("-c"), OsString::from(&args.command)],
+                    None,
+                ),
+                SandboxPolicy::ReadOnly { network } => {
+                    let tmp = sandbox_tmp();
+                    match goat_sandbox::read_only_command(&args.command, &ctx.cwd, tmp, *network) {
+                        Ok(sc) => (sc.program, sc.args, Some(tmp.clone())),
+                        Err(_) => {
+                            return Err(ToolError::Execution {
+                                message: "no sandbox backend is available, so shell commands are disabled while planning".to_owned(),
+                            });
+                        }
+                    }
+                }
+            };
+
+            let mut builder = Command::new(&program);
+            builder
+                .args(&prog_args)
                 .current_dir(&ctx.cwd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(tmp) = &tmpdir {
+                builder.env("TMPDIR", tmp);
+            }
+            let child = builder
                 .spawn()
                 .map_err(|source| ToolError::Spawn { source })?;
 
@@ -106,14 +140,32 @@ impl Tool for BashTool {
             };
 
             let code = status.ok().and_then(|s| s.code());
-            Ok(build_output(&stdout, &stderr, code, ctx.max_output_bytes))
+            Ok(build_output(
+                &stdout,
+                &stderr,
+                code,
+                ctx.max_output_bytes,
+                read_only,
+            ))
         })
     }
 }
 
 const SUMMARY_LINE_THRESHOLD: usize = 5;
 
-fn build_output(stdout: &[u8], stderr: &[u8], code: Option<i32>, max_bytes: usize) -> ToolOutput {
+const DENIAL_MARKERS: [&str; 3] = [
+    "Operation not permitted",
+    "Read-only file system",
+    "Permission denied",
+];
+
+fn build_output(
+    stdout: &[u8],
+    stderr: &[u8],
+    code: Option<i32>,
+    max_bytes: usize,
+    read_only: bool,
+) -> ToolOutput {
     let mut out = String::new();
     out.push_str(&String::from_utf8_lossy(stdout));
     if !stderr.is_empty() {
@@ -126,10 +178,18 @@ fn build_output(stdout: &[u8], stderr: &[u8], code: Option<i32>, max_bytes: usiz
         out.push_str("\n[output truncated]");
     }
     let summary = build_summary(&out, code);
+    let denied = read_only
+        && matches!(code, Some(c) if c != 0)
+        && DENIAL_MARKERS.iter().any(|marker| out.contains(marker));
     if let Some(c) = code
         && c != 0
     {
         let _ = write!(out, "\nexit code: {c}");
+    }
+    if denied {
+        out.push_str(
+            "\n[note] this command ran under a read-only sandbox; writes outside scratch space are blocked while planning",
+        );
     }
     let output = ToolOutput::text(out);
     match summary {
@@ -225,5 +285,41 @@ mod tests {
             .run(r#"{"command":"sleep 999","timeout_ms":100}"#, &ctx())
             .await;
         assert!(matches!(result, Err(ToolError::Timeout { .. })));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn read_only_allows_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let mut ctx = ToolContext::new(dir.path()).unwrap();
+        ctx.exec_policy = goat_tool::SandboxPolicy::ReadOnly { network: false };
+        let out = BashTool
+            .run(r#"{"command":"cat a.txt"}"#, &ctx)
+            .await
+            .unwrap();
+        assert!(out.as_text().unwrap().contains("hello"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn read_only_blocks_writes_outside_scratch() {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap();
+        let dir = home.join(format!(".goat-sandbox-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ctx = ToolContext::new(&dir).unwrap();
+        ctx.exec_policy = goat_tool::SandboxPolicy::ReadOnly { network: false };
+        let target = ctx.cwd.join("should-not-exist.txt");
+        let command = format!("echo x > {}", target.display());
+        let input = serde_json::json!({ "command": command }).to_string();
+        let _ = BashTool.run(&input, &ctx).await.unwrap();
+        let blocked = !target.exists();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            blocked,
+            "read-only sandbox must block writes outside scratch"
+        );
     }
 }

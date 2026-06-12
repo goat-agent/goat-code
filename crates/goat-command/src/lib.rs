@@ -20,6 +20,7 @@ pub enum CommandEffect {
     Notice(String),
     Error(String),
     OpenUsage,
+    PlanMode(Option<String>),
     Noop,
     Quit,
 }

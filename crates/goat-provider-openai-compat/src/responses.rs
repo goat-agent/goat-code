@@ -4,7 +4,8 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, RateLimitSnapshot, Request, StreamEvent, ToolChoice, ToolDefinition, Usage,
+    ProviderId, RateLimitSnapshot, Request, SearchResult, StreamError, StreamEvent, ToolChoice,
+    ToolDefinition, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -420,6 +421,7 @@ pub struct ResponsesProvider {
     catalog: &'static [&'static str],
     rate_limits_parser: Option<fn(&reqwest::header::HeaderMap) -> Option<RateLimitSnapshot>>,
     context_windows: &'static [(&'static str, u32)],
+    search_model: Option<&'static str>,
 }
 
 impl ResponsesProvider {
@@ -439,7 +441,14 @@ impl ResponsesProvider {
             catalog: &[],
             rate_limits_parser: None,
             context_windows: &[],
+            search_model: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_search_model(mut self, model: &'static str) -> Self {
+        self.search_model = Some(model);
+        self
     }
 
     #[must_use]
@@ -470,6 +479,91 @@ impl ResponsesProvider {
     }
 }
 
+pub async fn run_web_search(
+    client: &reqwest::Client,
+    url: &str,
+    bearer: Option<&str>,
+    account_id: Option<&str>,
+    model: &str,
+    instructions: Option<&str>,
+    query: &str,
+) -> Result<Vec<SearchResult>, StreamError> {
+    let mut body = json!({
+        "model": model,
+        "input": query,
+        "tools": [{ "type": "web_search" }],
+        "tool_choice": "auto",
+    });
+    if let Some(instructions) = instructions {
+        body["instructions"] = json!(instructions);
+    }
+    let mut builder = client.post(url).json(&body);
+    if let Some(token) = bearer {
+        builder = builder.bearer_auth(token);
+    }
+    if let Some(account) = account_id {
+        builder = builder.header("chatgpt-account-id", account);
+    }
+    let resp = builder
+        .send()
+        .await
+        .map_err(|err| common::transport(&err))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(common::classify_http(status, &headers, &detail));
+    }
+    let value: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|err| StreamError::other(format!("invalid search response: {err}")))?;
+    Ok(parse_responses_citations(&value))
+}
+
+fn parse_responses_citations(value: &serde_json::Value) -> Vec<SearchResult> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let Some(output) = value.get("output").and_then(|output| output.as_array()) else {
+        return out;
+    };
+    for item in output {
+        let Some(content) = item.get("content").and_then(|content| content.as_array()) else {
+            continue;
+        };
+        for part in content {
+            let Some(annotations) = part
+                .get("annotations")
+                .and_then(|annotations| annotations.as_array())
+            else {
+                continue;
+            };
+            for annotation in annotations {
+                if annotation.get("type").and_then(|kind| kind.as_str()) != Some("url_citation") {
+                    continue;
+                }
+                let url = annotation
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                if url.is_empty() || !seen.insert(url.to_owned()) {
+                    continue;
+                }
+                out.push(SearchResult {
+                    title: annotation
+                        .get("title")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    url: url.to_owned(),
+                    snippet: String::new(),
+                });
+            }
+        }
+    }
+    out
+}
+
 impl Provider for ResponsesProvider {
     fn id(&self) -> ProviderId {
         self.id.clone()
@@ -493,6 +587,23 @@ impl Provider for ResponsesProvider {
             tools: true,
             auth: self.auth,
         }
+    }
+
+    fn supports_web_search(&self) -> bool {
+        self.search_model.is_some()
+    }
+
+    fn web_search(&self, query: String) -> JoinHandle<Result<Vec<SearchResult>, StreamError>> {
+        let client = self.client.clone();
+        let url = format!("{}/responses", self.base_url);
+        let bearer = self.bearer.clone();
+        let model = self.search_model;
+        tokio::spawn(async move {
+            let Some(model) = model else {
+                return Err(StreamError::other("web search is not supported"));
+            };
+            run_web_search(&client, &url, bearer.as_deref(), None, model, None, &query).await
+        })
     }
 
     fn catalog(&self) -> &'static [&'static str] {
@@ -553,9 +664,29 @@ impl Provider for ResponsesProvider {
 mod tests {
     use super::{
         build_body, parse_arguments_delta, parse_function_call_item, parse_item_id,
-        parse_output_delta,
+        parse_output_delta, parse_responses_citations,
     };
     use goat_provider::{ContentBlock, Message, MessageRole, ToolDefinition};
+
+    #[test]
+    fn extracts_url_citations() {
+        let value = serde_json::json!({
+            "output": [
+                { "type": "web_search_call", "status": "completed" },
+                { "type": "message", "content": [
+                    { "type": "output_text", "text": "see sources", "annotations": [
+                        { "type": "url_citation", "url": "https://a.example", "title": "A" },
+                        { "type": "url_citation", "url": "https://a.example", "title": "A dup" },
+                        { "type": "url_citation", "url": "https://b.example", "title": "B" }
+                    ]}
+                ]}
+            ]
+        });
+        let results = parse_responses_citations(&value);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, "https://a.example");
+        assert_eq!(results[1].url, "https://b.example");
+    }
     use serde_json::json;
 
     #[test]
