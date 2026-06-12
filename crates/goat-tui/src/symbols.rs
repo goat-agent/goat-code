@@ -9,7 +9,7 @@ pub mod marker {
 pub mod ui {
     pub const CARET: &str = "›";
     pub const BANG: &str = "!";
-    pub const BULLET: &str = "• ";
+    pub const BULLET: &str = "- ";
     pub const DOT_FULL: &str = "●";
     pub const DOT_EMPTY: &str = "○";
     pub const CHECK: &str = "✓";
@@ -17,7 +17,6 @@ pub mod ui {
     pub const MIDDOT: &str = "·";
     pub const SEPARATOR: &str = " · ";
     pub const ELLIPSIS: &str = "…";
-    pub const CODE_GUTTER: &str = "│ ";
     pub const QUOTE_GUTTER: &str = "▎ ";
     pub const RULE: &str = "──────────";
     pub const MORE_ABOVE: &str = "↑";

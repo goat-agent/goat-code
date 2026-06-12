@@ -56,13 +56,13 @@ impl Theme {
             shell: Color::Rgb(0xdb, 0x4b, 0x4b),
             shell_dim: Color::Rgb(0x54, 0x29, 0x2e),
             code: CodePalette {
-                bg: Color::Rgb(0x1a, 0x1b, 0x26),
-                keyword: Color::Rgb(0xbb, 0x9a, 0xf7),
-                string: Color::Rgb(0x9e, 0xce, 0x6a),
-                comment: Color::Rgb(0x56, 0x5f, 0x89),
-                number: Color::Rgb(0xff, 0x9e, 0x64),
-                type_: Color::Rgb(0x2a, 0xc3, 0xde),
-                function: Color::Rgb(0x7a, 0xa2, 0xf7),
+                bg: Color::Reset,
+                keyword: Color::Rgb(0x56, 0x9c, 0xd6),
+                string: Color::Rgb(0xce, 0x91, 0x78),
+                comment: Color::Rgb(0x6a, 0x99, 0x55),
+                number: Color::Rgb(0xb5, 0xce, 0xa8),
+                type_: Color::Rgb(0x4e, 0xc9, 0xb0),
+                function: Color::Rgb(0xdc, 0xdc, 0xaa),
             },
         }
     }
@@ -84,13 +84,13 @@ impl Theme {
             shell: Color::Rgb(0xb0, 0x35, 0x54),
             shell_dim: Color::Rgb(0xe6, 0xc2, 0xcb),
             code: CodePalette {
-                bg: Color::Rgb(0xf0, 0xf0, 0xf5),
-                keyword: Color::Rgb(0x6a, 0x3d, 0xc9),
-                string: Color::Rgb(0x2f, 0x7d, 0x32),
-                comment: Color::Rgb(0x9e, 0xa3, 0xb0),
-                number: Color::Rgb(0xb5, 0x6a, 0x00),
-                type_: Color::Rgb(0x00, 0x7a, 0x8a),
-                function: Color::Rgb(0x2e, 0x5c, 0xc9),
+                bg: Color::Reset,
+                keyword: Color::Rgb(0x00, 0x00, 0xff),
+                string: Color::Rgb(0xa3, 0x15, 0x15),
+                comment: Color::Rgb(0x00, 0x80, 0x00),
+                number: Color::Rgb(0x09, 0x88, 0x58),
+                type_: Color::Rgb(0x26, 0x7f, 0x99),
+                function: Color::Rgb(0x79, 0x5e, 0x26),
             },
         }
     }
@@ -139,10 +139,6 @@ impl Theme {
         Style::new().fg(self.tool)
     }
 
-    pub fn tool_name(self) -> Style {
-        Style::new().fg(self.tool)
-    }
-
     pub fn selected_row(self) -> Style {
         Style::new().bg(self.selection)
     }
@@ -155,14 +151,18 @@ impl Theme {
         if pct >= METER_HIGH {
             self.error()
         } else if pct >= METER_WARN {
-            self.tool_name()
+            self.role_tool()
         } else {
             self.muted()
         }
     }
 
     pub fn code_plain(self) -> Style {
-        Style::new().fg(self.fg).bg(self.code.bg)
+        Style::new().fg(self.fg)
+    }
+
+    pub fn inline_code(self) -> Style {
+        Style::new().fg(self.accent)
     }
 
     pub fn fg_color(self) -> Color {

@@ -131,7 +131,6 @@ impl Highlighter for SyntectHighlighter {
 
         let syntect_theme = self.get_or_build_syntect_theme(theme);
         let mut hl = HighlightLines::new(syntax, &syntect_theme);
-        let code_bg = theme.code.bg;
         let mut result = Vec::new();
 
         for raw_line in LinesWithEndings::from(code) {
@@ -145,12 +144,15 @@ impl Highlighter for SyntectHighlighter {
                         return None;
                     }
                     let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
-                    let mut s = Style::new().fg(fg).bg(code_bg);
+                    let mut s = Style::new().fg(fg);
                     if style.font_style.contains(FontStyle::BOLD) {
                         s = s.add_modifier(Modifier::BOLD);
                     }
                     if style.font_style.contains(FontStyle::ITALIC) {
                         s = s.add_modifier(Modifier::ITALIC);
+                    }
+                    if style.font_style.contains(FontStyle::UNDERLINE) {
+                        s = s.add_modifier(Modifier::UNDERLINED);
                     }
                     Some(Span::styled(text.to_owned(), s))
                 })
