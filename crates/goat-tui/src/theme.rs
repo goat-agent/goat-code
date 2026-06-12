@@ -165,6 +165,10 @@ impl Theme {
         Style::new().fg(self.fg)
     }
 
+    pub fn inline_code(self) -> Style {
+        Style::new().fg(self.accent)
+    }
+
     pub fn fg_color(self) -> Color {
         self.fg
     }

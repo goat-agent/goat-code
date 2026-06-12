@@ -179,7 +179,7 @@ pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>
             }
 
             Event::Code(text) => {
-                let span = Span::styled(format!(" {text} "), theme.code_plain());
+                let span = Span::styled(text.to_string(), theme.inline_code());
                 if in_table {
                     current_cell.push(span);
                 } else {
@@ -431,11 +431,16 @@ mod tests {
     }
 
     #[test]
-    fn inline_code_uses_code_bg() {
+    fn inline_code_uses_accent() {
         let theme = Theme::dark();
         let lines = render("use `foo` here", theme, &PlainHighlighter);
         let spans: Vec<_> = lines.iter().flat_map(|l| &l.spans).collect();
-        assert!(spans.iter().any(|s| s.style.bg == Some(theme.code.bg)));
+        let code_span = spans
+            .iter()
+            .find(|s| s.content.as_ref() == "foo")
+            .expect("inline code span without padding");
+        assert_eq!(code_span.style.fg, Some(theme.accent_color()));
+        assert_eq!(code_span.style.bg, None);
     }
 
     #[test]
