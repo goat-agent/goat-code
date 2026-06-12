@@ -195,6 +195,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
     };
     app.clamp_scroll(content.height, content.width);
     let working = app.working_state();
+    let queued = app.queued_labels();
     app.transcript().render(
         frame,
         content,
@@ -203,6 +204,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
             scroll: app.scroll(),
             spinner: app.spinner_frame(),
             working: working.as_ref(),
+            queued: &queued,
             hl: &app.highlighter,
         },
     );
@@ -262,6 +264,62 @@ fn fit_cwd(cwd: &str, max: usize) -> String {
     )
 }
 
+const GAUGE_CELLS: usize = 12;
+const GAUGE_PARTIALS: [char; 7] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+const GAUGE_TRACK: char = '╌';
+const GAUGE_TICK: char = '┆';
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn context_gauge(
+    theme: Theme,
+    used: u64,
+    window: u32,
+    threshold: Option<u32>,
+) -> (Vec<Span<'static>>, usize) {
+    let total_eighths = GAUGE_CELLS * 8;
+    let fill_eighths = ((used as f64 / f64::from(window)) * total_eighths as f64).round() as usize;
+    let fill_eighths = fill_eighths.min(total_eighths);
+    let tick_cell = threshold.map(|limit| {
+        (((f64::from(limit) / f64::from(window)) * GAUGE_CELLS as f64) as usize)
+            .min(GAUGE_CELLS - 1)
+    });
+    let fill_pct = threshold.map_or_else(
+        || (used as f64 / f64::from(window) * 100.0).min(100.0) as f32,
+        |limit| (used as f64 / f64::from(limit) * 100.0).min(100.0) as f32,
+    );
+    let mut fill = String::new();
+    let mut track = String::new();
+    for cell in 0..GAUGE_CELLS {
+        let cell_eighths = fill_eighths.saturating_sub(cell * 8).min(8);
+        if cell_eighths == 8 {
+            fill.push('█');
+        } else if cell_eighths > 0 {
+            fill.push(GAUGE_PARTIALS[cell_eighths - 1]);
+        } else if Some(cell) == tick_cell {
+            track.push(GAUGE_TICK);
+        } else {
+            track.push(GAUGE_TRACK);
+        }
+    }
+    let pct = (used as f64 / f64::from(window) * 100.0).min(100.0);
+    let label = format!(" {pct:>3.0}%");
+    let width = 2 + GAUGE_CELLS + label.width();
+    (
+        vec![
+            Span::styled("▕", theme.muted()),
+            Span::styled(fill, theme.meter(fill_pct)),
+            Span::styled(track, theme.muted()),
+            Span::styled("▏", theme.muted()),
+            Span::styled(label, theme.meter(fill_pct)),
+        ],
+        width,
+    )
+}
+
 fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let row = Rect { height: 1, ..area }.inner(Margin {
         horizontal: PAD_X,
@@ -269,10 +327,10 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     });
     let inner_w = usize::from(row.width);
 
-    let ctx_span = app
+    let ctx = app
         .ctx_indicator()
-        .map(|(pct, _, _)| Span::styled(format!("ctx {pct:>3.0}%"), theme.meter(pct)));
-    let ctx_w = ctx_span.as_ref().map_or(0, |s| s.content.width());
+        .map(|(_, used, window)| context_gauge(theme, used, window, app.compaction_threshold));
+    let ctx_w = ctx.as_ref().map_or(0, |(_, width)| *width);
 
     let mut model_spans: Vec<Span> = Vec::new();
     if let Some(model) = app.current_model() {
@@ -299,11 +357,11 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 
     let mut spans = vec![Span::styled(cwd.clone(), theme.muted())];
     spans.extend(model_spans);
-    if let Some(ctx) = ctx_span {
+    if let Some((ctx_spans, _)) = ctx {
         let left_w = cwd.width() + model_w;
         let pad = inner_w.saturating_sub(left_w + ctx_w);
         spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(ctx);
+        spans.extend(ctx_spans);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
 }
@@ -325,12 +383,13 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     }
     if app.is_busy() {
         let mut spans: Vec<Span> = Vec::new();
-        if app.deny_armed() {
-            spans.push(Span::styled("task running", theme.error()));
-            spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
-        }
         spans.push(Span::styled(symbols::key::ESC, theme.hint_key()));
         spans.push(Span::styled(" interrupt", theme.muted()));
+        if !app.queued.is_empty() {
+            spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
+            spans.push(Span::styled(symbols::key::BACKSPACE, theme.hint_key()));
+            spans.push(Span::styled(" edit queued", theme.muted()));
+        }
         if !app.agent_runs().is_empty() {
             spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
             spans.push(Span::styled(symbols::key::ARROW_DOWN, theme.hint_key()));

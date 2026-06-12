@@ -366,7 +366,7 @@ impl Provider for CodexProvider {
             let Some((access, account)) = current_access(&store, &key).await else {
                 let _ = events
                     .send(StreamEvent::Failed {
-                        message: "not logged in to codex".to_owned(),
+                        error: goat_provider::StreamError::auth("not logged in to codex"),
                     })
                     .await;
                 return;
@@ -378,6 +378,7 @@ impl Provider for CodexProvider {
                 Some(DEFAULT_INSTRUCTIONS),
                 false,
                 req.effort,
+                req.tool_choice,
             );
             goat_provider_openai_compat::run_request(
                 &client,

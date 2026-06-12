@@ -5,7 +5,7 @@ use std::{
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-const LATEST_VERSION: i64 = 3;
+const LATEST_VERSION: i64 = 4;
 
 const SCHEMA_V1: &str = "\
 CREATE TABLE threads (
@@ -59,6 +59,20 @@ CREATE INDEX idx_messages_thread ON messages(thread_id);
 CREATE INDEX idx_tool_calls_thread ON tool_calls(thread_id);
 CREATE INDEX idx_threads_cwd ON threads(cwd);";
 
+const SCHEMA_V4: &str = "\
+CREATE TABLE compactions (
+    id INTEGER PRIMARY KEY,
+    thread_id INTEGER NOT NULL,
+    summary TEXT NOT NULL,
+    after_message_id INTEGER NOT NULL,
+    tail_from_message_id INTEGER,
+    preserved_message_ids TEXT NOT NULL,
+    tokens_before INTEGER NOT NULL,
+    tokens_after INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_compactions_thread ON compactions(thread_id);";
+
 fn migrate(conn: &Connection) -> Result<(), StoreError> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > LATEST_VERSION {
@@ -69,6 +83,7 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
             0 => conn.execute_batch(SCHEMA_V1)?,
             1 => conn.execute_batch(SCHEMA_V2)?,
             2 => conn.execute_batch(SCHEMA_V3)?,
+            3 => conn.execute_batch(SCHEMA_V4)?,
             _ => return Err(StoreError::UnknownVersion(version)),
         }
         version += 1;
@@ -133,9 +148,35 @@ pub struct NewMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredMessage {
+    pub id: i64,
     pub turn_id: Option<i64>,
     pub role: String,
     pub body: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewCompaction {
+    pub thread_id: i64,
+    pub summary: String,
+    pub after_message_id: i64,
+    pub tail_from_message_id: Option<i64>,
+    pub preserved_message_ids: Vec<i64>,
+    pub tokens_before: i64,
+    pub tokens_after: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compaction {
+    pub id: i64,
+    pub thread_id: i64,
+    pub summary: String,
+    pub after_message_id: i64,
+    pub tail_from_message_id: Option<i64>,
+    pub preserved_message_ids: Vec<i64>,
+    pub tokens_before: i64,
+    pub tokens_after: i64,
     pub created_at: i64,
 }
 
@@ -272,15 +313,16 @@ impl Store {
     pub async fn get_messages(&self, thread_id: i64) -> Result<Vec<StoredMessage>, StoreError> {
         self.run(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT turn_id, role, body, created_at
+                "SELECT id, turn_id, role, body, created_at
                  FROM messages WHERE thread_id = ?1 ORDER BY id ASC",
             )?;
             let rows = stmt.query_map(params![thread_id], |row| {
                 Ok(StoredMessage {
-                    turn_id: row.get(0)?,
-                    role: row.get(1)?,
-                    body: row.get(2)?,
-                    created_at: row.get(3)?,
+                    id: row.get(0)?,
+                    turn_id: row.get(1)?,
+                    role: row.get(2)?,
+                    body: row.get(3)?,
+                    created_at: row.get(4)?,
                 })
             })?;
             let mut messages = Vec::new();
@@ -411,6 +453,62 @@ impl Store {
                 params![id, status, summary, finished_at],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    pub async fn create_compaction(&self, compaction: NewCompaction) -> Result<i64, StoreError> {
+        self.run(move |conn| {
+            let preserved = serde_json::to_string(&compaction.preserved_message_ids)
+                .unwrap_or_else(|_| "[]".to_owned());
+            conn.execute(
+                "INSERT INTO compactions (thread_id, summary, after_message_id, tail_from_message_id, preserved_message_ids, tokens_before, tokens_after, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    compaction.thread_id,
+                    compaction.summary,
+                    compaction.after_message_id,
+                    compaction.tail_from_message_id,
+                    preserved,
+                    compaction.tokens_before,
+                    compaction.tokens_after,
+                    compaction.created_at,
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+        .await
+    }
+
+    pub async fn compactions_for_thread(
+        &self,
+        thread_id: i64,
+    ) -> Result<Vec<Compaction>, StoreError> {
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, thread_id, summary, after_message_id, tail_from_message_id, preserved_message_ids, tokens_before, tokens_after, created_at
+                 FROM compactions WHERE thread_id = ?1 ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map(params![thread_id], |row| {
+                let preserved_raw: String = row.get(5)?;
+                Ok(Compaction {
+                    id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    summary: row.get(2)?,
+                    after_message_id: row.get(3)?,
+                    tail_from_message_id: row.get(4)?,
+                    preserved_message_ids: serde_json::from_str(&preserved_raw)
+                        .unwrap_or_default(),
+                    tokens_before: row.get(6)?,
+                    tokens_after: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })?;
+            let mut compactions = Vec::new();
+            for row in rows {
+                compactions.push(row?);
+            }
+            Ok(compactions)
         })
         .await
     }
@@ -587,6 +685,101 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].body, "[{\"type\":\"text\",\"text\":\"hi\"}]");
         assert_eq!(messages[1].body, "second");
+    }
+
+    #[tokio::test]
+    async fn compaction_roundtrip() {
+        let store = Store::open_in_memory().unwrap();
+        let thread_id = store.create_thread(sample_thread()).await.unwrap();
+        let id = store
+            .create_compaction(super::NewCompaction {
+                thread_id,
+                summary: "## Task\nbuild the thing".into(),
+                after_message_id: 42,
+                tail_from_message_id: Some(40),
+                preserved_message_ids: vec![38, 41],
+                tokens_before: 170_000,
+                tokens_after: 24_000,
+                created_at: 500,
+            })
+            .await
+            .unwrap();
+        let compactions = store.compactions_for_thread(thread_id).await.unwrap();
+        assert_eq!(compactions.len(), 1);
+        assert_eq!(compactions[0].id, id);
+        assert_eq!(compactions[0].after_message_id, 42);
+        assert_eq!(compactions[0].tail_from_message_id, Some(40));
+        assert_eq!(compactions[0].preserved_message_ids, vec![38, 41]);
+        assert_eq!(compactions[0].tokens_before, 170_000);
+        assert!(
+            store
+                .compactions_for_thread(thread_id + 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_messages_carry_row_ids() {
+        let store = Store::open_in_memory().unwrap();
+        let thread_id = store.create_thread(sample_thread()).await.unwrap();
+        let first = store
+            .create_message(NewMessage {
+                thread_id,
+                turn_id: None,
+                role: "user".into(),
+                body: "one".into(),
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        let second = store
+            .create_message(NewMessage {
+                thread_id,
+                turn_id: None,
+                role: "assistant".into(),
+                body: "two".into(),
+                created_at: 2,
+            })
+            .await
+            .unwrap();
+        let messages = store.get_messages(thread_id).await.unwrap();
+        assert_eq!(messages[0].id, first);
+        assert_eq!(messages[1].id, second);
+    }
+
+    #[tokio::test]
+    async fn migrates_v3_database_to_v4() {
+        let path = std::env::temp_dir().join("goat-store-v3-migration-test.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(super::SCHEMA_V1).unwrap();
+            conn.execute_batch(super::SCHEMA_V2).unwrap();
+            conn.execute_batch(super::SCHEMA_V3).unwrap();
+            conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let thread_id = store.create_thread(sample_thread()).await.unwrap();
+        store
+            .create_compaction(super::NewCompaction {
+                thread_id,
+                summary: "s".into(),
+                after_message_id: 1,
+                tail_from_message_id: None,
+                preserved_message_ids: vec![],
+                tokens_before: 10,
+                tokens_after: 5,
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.compactions_for_thread(thread_id).await.unwrap().len(),
+            1
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

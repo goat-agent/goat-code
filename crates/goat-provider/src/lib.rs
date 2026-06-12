@@ -140,6 +140,14 @@ pub struct Model {
     pub id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    None,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub model: String,
@@ -148,6 +156,8 @@ pub struct Request {
     pub tools: Vec<ToolDefinition>,
     #[serde(default)]
     pub effort: Option<Effort>,
+    #[serde(default)]
+    pub tool_choice: ToolChoice,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,7 +187,7 @@ pub enum StreamEvent {
     },
     Completed,
     Failed {
-        message: String,
+        error: StreamError,
     },
     Usage {
         usage: Usage,
@@ -185,6 +195,75 @@ pub enum StreamEvent {
     RateLimits {
         snapshot: RateLimitSnapshot,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
+pub enum StreamError {
+    #[error("rate limited: {message}")]
+    RateLimited {
+        retry_after: Option<std::time::Duration>,
+        message: String,
+    },
+    #[error("provider overloaded: {message}")]
+    Overloaded { message: String },
+    #[error("context window exceeded: {message}")]
+    ContextOverflow { message: String },
+    #[error("authentication failed: {message}")]
+    Auth { message: String },
+    #[error("invalid request: {message}")]
+    InvalidRequest { message: String },
+    #[error("connection failed: {message}")]
+    Transport { message: String },
+    #[error("{message}")]
+    Other { message: String },
+}
+
+impl StreamError {
+    pub fn rate_limited(
+        message: impl Into<String>,
+        retry_after: Option<std::time::Duration>,
+    ) -> Self {
+        Self::RateLimited {
+            retry_after,
+            message: message.into(),
+        }
+    }
+
+    pub fn overloaded(message: impl Into<String>) -> Self {
+        Self::Overloaded {
+            message: message.into(),
+        }
+    }
+
+    pub fn context_overflow(message: impl Into<String>) -> Self {
+        Self::ContextOverflow {
+            message: message.into(),
+        }
+    }
+
+    pub fn auth(message: impl Into<String>) -> Self {
+        Self::Auth {
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            message: message.into(),
+        }
+    }
+
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::Transport {
+            message: message.into(),
+        }
+    }
+
+    pub fn other(message: impl Into<String>) -> Self {
+        Self::Other {
+            message: message.into(),
+        }
+    }
 }
 
 pub trait Provider: Send + Sync + 'static {
@@ -267,6 +346,7 @@ mod tests {
                 messages: vec![Message::text(MessageRole::User, "hi")],
                 tools: vec![],
                 effort: None,
+                tool_choice: super::ToolChoice::Auto,
             },
             tx,
         );

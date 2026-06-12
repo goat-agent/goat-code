@@ -1873,6 +1873,7 @@ dependencies = [
  "goat-tool-browser",
  "goat-tool-computer",
  "goat-tools",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -1992,6 +1993,7 @@ dependencies = [
  "goat-protocol",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -2104,6 +2106,7 @@ name = "goat-store"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]

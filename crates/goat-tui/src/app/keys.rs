@@ -131,6 +131,10 @@ impl App {
             KeyCode::Backspace => {
                 if self.composer.is_empty() && self.composer.shell() {
                     self.composer.exit_shell();
+                } else if self.composer.is_empty()
+                    && let Some((id, _)) = self.queued.last()
+                {
+                    return vec![Op::DequeueMessage { id: *id }];
                 } else {
                     self.composer.backspace();
                     self.update_command_menu();

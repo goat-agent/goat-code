@@ -1,87 +1,41 @@
 use std::{
-    collections::{HashMap, HashSet},
-    fmt::Write as _,
+    collections::HashMap,
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, atomic::AtomicU64},
 };
 
-use goat_auth::{
-    Credential, CredentialKey, CredentialKind, CredentialStore, SecretString, TokenSet,
-};
+use goat_auth::CredentialStore;
 use goat_core::Engine;
-use goat_protocol::{
-    AccountChoice, AccountEntry, AccountInfo, AskQuestion, AuthMethod, Effort, Event,
-    LoginCredential, LoginProvider, ModelEntry, ModelTarget, NotifyKind, Op, SkillInfo, TaskId,
-    ThreadSummary, ToolCall, ToolCallId, ToolDisplay, ToolOutcome, TranscriptEntry,
-};
-use goat_provider::{
-    ContentBlock, Message, MessageRole, Provider, Request, StreamEvent, ToolDefinition,
-};
+use goat_protocol::{Event, ModelTarget, Op, SkillInfo, TaskId, ToolCallId};
+use goat_provider::{Provider, ToolDefinition};
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
-use goat_store::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
-use goat_tool::{ToolContent, ToolContext, ToolError, ToolOutput};
+use goat_store::Store;
 use goat_tools::ToolRegistry;
 use tokio::{
     sync::{Mutex, Semaphore, mpsc, oneshot},
     task::JoinHandle,
 };
-use tokio_util::sync::CancellationToken;
 
+mod accounts;
 mod agent;
+mod ask;
+mod compaction;
+mod conversation;
+mod delegate;
 mod instructions;
+mod persist;
+mod prompt;
 mod rate_limit_cache;
+mod retry;
+mod rounds;
 mod shell;
+mod threads;
+mod tools_exec;
+mod turn;
 
 pub use agent::{AgentRegistry, AgentSpec, ToolSelection};
 
-const MAX_TOOL_ROUNDS: usize = 20;
-const MAX_CONCURRENT_AGENTS: usize = 8;
-const AGENT_TOOL_NAME: &str = "Agent";
-const ASK_TOOL_NAME: &str = "Ask";
 const CHILD_ID_BASE: u64 = 1 << 32;
-const SYSTEM_PROMPT: &str = "You are Goat, an expert software engineering assistant. You help users understand, build, and improve software by reading code, running tools, and providing accurate, actionable guidance. When using tools, prefer targeted reads and searches over broad exploration. Always verify your understanding before making changes.";
-
-fn build_system_prompt(skills: &[SkillInfo], instructions: Option<&str>) -> String {
-    let mut prompt = String::from(SYSTEM_PROMPT);
-    if !skills.is_empty() {
-        prompt.push_str(
-            "\n\nAvailable skills. Call the Skill tool with a skill's name to load its full instructions before following it:",
-        );
-        for skill in skills {
-            let _ = write!(prompt, "\n- {}: {}", skill.name, skill.description);
-        }
-    }
-    if let Some(content) = instructions {
-        let _ = write!(
-            prompt,
-            "\n\n# Project instructions (AGENTS.md)\n\n{content}"
-        );
-    }
-    prompt
-}
-
-fn compose_child_system(base_prompt: &str, instructions: Option<&str>) -> String {
-    match instructions {
-        None => base_prompt.to_owned(),
-        Some(content) => {
-            format!("{base_prompt}\n\n# Project instructions (AGENTS.md)\n\n{content}")
-        }
-    }
-}
-
-fn load_skill_infos(cwd: &std::path::Path) -> Vec<SkillInfo> {
-    goat_skill::load(cwd)
-        .iter()
-        .map(|skill| SkillInfo {
-            name: skill.name.clone(),
-            description: skill.description.clone(),
-        })
-        .collect()
-}
 
 pub struct GoatAgent {
     registry: Registry,
@@ -125,202 +79,98 @@ impl Engine for GoatAgent {
     }
 }
 
-struct Ctx<'a> {
-    registry: &'a Registry,
-    account_registries: &'a std::sync::Mutex<HashMap<String, Arc<Registry>>>,
-    credentials: &'a CredentialStore,
-    tools: &'a ToolRegistry,
-    agents: &'a AgentRegistry,
-    store: &'a Store,
-    events: &'a mpsc::Sender<Event>,
-    skills: &'a [SkillInfo],
-    instructions: Option<&'a str>,
-    semaphore: &'a Arc<Semaphore>,
-    child_ids: &'a AtomicU64,
-    asks: &'a Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>>,
-    rl_cache: &'a std::sync::Mutex<rate_limit_cache::RateLimitCache>,
-    rl_path: Option<&'a std::path::Path>,
+pub(crate) struct Ctx<'a> {
+    pub(crate) registry: &'a Registry,
+    pub(crate) account_registries: &'a std::sync::Mutex<HashMap<String, Arc<Registry>>>,
+    pub(crate) credentials: &'a CredentialStore,
+    pub(crate) tools: &'a ToolRegistry,
+    pub(crate) agents: &'a AgentRegistry,
+    pub(crate) store: &'a Store,
+    pub(crate) events: &'a mpsc::Sender<Event>,
+    pub(crate) skills: &'a [SkillInfo],
+    pub(crate) instructions: Option<&'a str>,
+    pub(crate) semaphore: &'a Arc<Semaphore>,
+    pub(crate) child_ids: &'a AtomicU64,
+    pub(crate) asks: &'a Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>>,
+    pub(crate) rl_cache: &'a std::sync::Mutex<rate_limit_cache::RateLimitCache>,
+    pub(crate) rl_path: Option<&'a std::path::Path>,
 }
 
-enum Flow {
+pub(crate) enum Flow {
     Continue,
     Shutdown,
 }
 
-struct TurnIds {
-    stored_thread: Option<i64>,
-    turn_db_id: Option<i64>,
+pub(crate) struct TurnIds {
+    pub(crate) stored_thread: Option<i64>,
+    pub(crate) turn_db_id: Option<i64>,
+    pub(crate) user_message_db_id: Option<i64>,
 }
 
+pub(crate) type SteeringQueue = std::sync::Mutex<std::collections::VecDeque<(TaskId, String)>>;
+
 enum Report<'a> {
-    Top(&'a TurnIds),
+    Top {
+        ids: &'a TurnIds,
+        steering: &'a SteeringQueue,
+    },
     Child,
 }
 
-struct Run<'a> {
-    id: TaskId,
+pub(crate) struct Run<'a> {
+    pub(crate) id: TaskId,
     report: Report<'a>,
 }
 
 impl<'a> Run<'a> {
-    fn top(id: TaskId, ids: &'a TurnIds) -> Self {
+    pub(crate) fn top(id: TaskId, ids: &'a TurnIds, steering: &'a SteeringQueue) -> Self {
         Self {
             id,
-            report: Report::Top(ids),
+            report: Report::Top { ids, steering },
         }
     }
 
-    fn child(id: TaskId) -> Self {
+    pub(crate) fn child(id: TaskId) -> Self {
         Self {
             id,
             report: Report::Child,
         }
     }
 
-    fn ids(&self) -> Option<&TurnIds> {
+    pub(crate) fn ids(&self) -> Option<&TurnIds> {
         match &self.report {
-            Report::Top(ids) => Some(ids),
+            Report::Top { ids, .. } => Some(ids),
             Report::Child => None,
         }
     }
 
-    fn is_top(&self) -> bool {
-        matches!(self.report, Report::Top(_))
+    pub(crate) fn steering(&self) -> Option<&SteeringQueue> {
+        match &self.report {
+            Report::Top { steering, .. } => Some(steering),
+            Report::Child => None,
+        }
     }
-}
 
-struct LoopEnv<'a> {
-    provider: &'a dyn Provider,
-    target: &'a ModelTarget,
-    tool_defs: &'a [ToolDefinition],
-    cwd: &'a Path,
-    allow_delegate: bool,
-}
-
-enum RoundEnd {
-    Completed,
-    Cancelled,
-    Failed(String),
-}
-
-struct RoundResult {
-    end: RoundEnd,
-    raw: String,
-    thinking: Option<(String, String)>,
-    redacted: Vec<String>,
-    pending_calls: Vec<(String, String, String)>,
-    usage: Option<goat_provider::Usage>,
-    rate_limits: Option<goat_provider::RateLimitSnapshot>,
-}
-
-struct ToolExecResult {
-    result_content: ContentBlock,
-    cancelled: bool,
-}
-
-struct ToolBatchResult {
-    tool_results: Vec<ContentBlock>,
-    cancelled: bool,
-}
-
-struct Prepared<'a> {
-    vendor_id: &'a str,
-    name: &'a str,
-    input_json: &'a str,
-    tui_id: u64,
-    db_id: Option<i64>,
-}
-
-enum RoundOutcome {
-    Done,
-    Continue,
-    Cancelled,
-}
-
-enum LoopOutcome {
-    Completed,
-    Cancelled,
-    Failed(String),
-}
-
-enum TurnEnd {
-    Done,
-    Interrupted,
-    Failed(String),
-    Shutdown,
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or_else(
-        |_| {
-            tracing::warn!("system clock before unix epoch");
-            0
-        },
-        |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
-    )
-}
-
-async fn restore_target(store: &Store, credentials: &CredentialStore) -> Option<ModelTarget> {
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let thread = store.latest_thread_in(cwd).await.ok().flatten()?;
-    let provider = Registry::load(credentials, &thread.account)
-        .get(&goat_provider::ProviderId::from(thread.provider.as_str()))?;
-    if !provider.authenticated() {
-        return None;
-    }
-    Some(ModelTarget {
-        provider: thread.provider,
-        model: thread.model,
-        account: thread.account,
-        effort: thread.effort.as_deref().and_then(Effort::parse),
-    })
-}
-
-fn effort_string(effort: Option<Effort>) -> Option<String> {
-    effort.map(|e| e.as_str().to_owned())
-}
-
-fn parse_content_blocks(body: &str) -> Vec<ContentBlock> {
-    serde_json::from_str::<Vec<ContentBlock>>(body).unwrap_or_else(|_| {
-        vec![ContentBlock::Text {
-            text: body.to_owned(),
-        }]
-    })
-}
-
-async fn emit_accounts_changed(
-    events: &mpsc::Sender<Event>,
-    registry: &Registry,
-    credentials: &CredentialStore,
-) {
-    let _ = events
-        .send(Event::AccountsChanged {
-            providers: build_account_entries(registry, credentials),
+    pub(crate) fn steering_pending(&self) -> bool {
+        self.steering().is_some_and(|queue| {
+            !queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
         })
-        .await;
+    }
+
+    pub(crate) fn is_top(&self) -> bool {
+        matches!(self.report, Report::Top { .. })
+    }
 }
 
-async fn handle_remove_account(
-    provider: String,
-    name: String,
-    credentials: &CredentialStore,
-    registry: &mut Registry,
-    events: &mpsc::Sender<Event>,
-) {
-    let key = CredentialKey {
-        provider: provider.clone(),
-        account: name.clone(),
-    };
-    if let Err(err) = credentials.remove(&key) {
-        tracing::warn!(%err, "failed to remove account");
-    }
-    *registry = Registry::new(credentials);
-    let entries = discover_ready(registry, credentials).await;
-    let _ = events.send(Event::ModelListChanged { entries }).await;
-    emit_accounts_changed(events, registry, credentials).await;
+pub(crate) struct LoopEnv<'a> {
+    pub(crate) provider: &'a dyn Provider,
+    pub(crate) target: &'a ModelTarget,
+    pub(crate) tool_defs: &'a [ToolDefinition],
+    pub(crate) cwd: &'a Path,
+    pub(crate) allow_delegate: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -332,19 +182,20 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
         credentials,
         mut target,
     } = agent;
-    let mut history: Vec<Message> = Vec::new();
+    let mut conversation = conversation::Conversation::new();
+    let mut tracker = compaction::ContextTracker::new();
     let mut thread_id: Option<i64> = None;
 
     if target.is_none() {
-        target = restore_target(&store, &credentials).await;
+        target = accounts::restore_target(&store, &credentials).await;
     }
-    announce_startup(&events, &registry, &credentials, target.as_ref()).await;
+    accounts::announce_startup(&events, &registry, &credentials, target.as_ref()).await;
 
     let cwd = std::env::current_dir().unwrap_or_default();
-    let skills = load_skill_infos(&cwd);
+    let skills = prompt::load_skill_infos(&cwd);
     let agents = AgentRegistry::load(&cwd);
     let project_instructions = instructions::load_project_instructions(&cwd);
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_AGENTS));
+    let semaphore = Arc::new(Semaphore::new(delegate::MAX_CONCURRENT_AGENTS));
     let child_ids = AtomicU64::new(CHILD_ID_BASE);
     let asks: Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>> = Mutex::new(HashMap::new());
     let _ = events
@@ -393,12 +244,46 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     rl_cache: &rl_cache,
                     rl_path: rl_path.as_deref(),
                 };
-                if let Flow::Shutdown = handle_turn(
+                if let Flow::Shutdown = turn::handle_turn(
                     &ctx,
                     id,
                     text,
                     &mut target,
-                    &mut history,
+                    &mut conversation,
+                    &mut tracker,
+                    &mut thread_id,
+                    &mut ops,
+                )
+                .await
+                {
+                    break;
+                }
+            }
+            Op::Interrupt { .. } | Op::Answer { .. } | Op::DequeueMessage { .. } => {}
+            Op::Compact { id, instructions } => {
+                let ctx = Ctx {
+                    registry: &registry,
+                    account_registries: &account_registries,
+                    credentials: &credentials,
+                    tools: &tools,
+                    agents: &agents,
+                    store: &store,
+                    events: &events,
+                    skills: &skills,
+                    instructions: project_instructions.as_deref(),
+                    semaphore: &semaphore,
+                    child_ids: &child_ids,
+                    asks: &asks,
+                    rl_cache: &rl_cache,
+                    rl_path: rl_path.as_deref(),
+                };
+                if let Flow::Shutdown = turn::handle_compact(
+                    &ctx,
+                    id,
+                    instructions,
+                    &mut target,
+                    &mut conversation,
+                    &mut tracker,
                     &mut thread_id,
                     &mut ops,
                 )
@@ -424,12 +309,13 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     rl_cache: &rl_cache,
                     rl_path: rl_path.as_deref(),
                 };
-                if let Flow::Shutdown = handle_shell(
+                if let Flow::Shutdown = turn::handle_shell(
                     &ctx,
                     id,
                     &command,
                     &mut target,
-                    &mut history,
+                    &mut conversation,
+                    &mut tracker,
                     &mut thread_id,
                     &mut ops,
                 )
@@ -438,1925 +324,81 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     break;
                 }
             }
-            Op::Interrupt { .. } | Op::Answer { .. } => {}
             Op::Clear => {
-                history.clear();
+                conversation.clear();
+                tracker.invalidate();
                 thread_id = None;
             }
             Op::SelectModel { .. } => {
-                handle_idle_op(op, &store, thread_id, &mut target, &events).await;
+                turn::handle_idle_op(op, &store, thread_id, &mut target, &events).await;
             }
             Op::Login {
                 provider,
                 credential,
             } => {
-                let ctx = LoginCtx {
+                let ctx = accounts::LoginCtx {
                     credentials: &credentials,
                     registry: &mut registry,
                     events: &events,
                 };
-                handle_login(ctx, provider, DEFAULT_ACCOUNT.to_owned(), credential, false).await;
-                clear_account_registries(&account_registries);
+                accounts::handle_login(
+                    ctx,
+                    provider,
+                    DEFAULT_ACCOUNT.to_owned(),
+                    credential,
+                    false,
+                )
+                .await;
+                accounts::clear_account_registries(&account_registries);
             }
             Op::AddAccount {
                 provider,
                 name,
                 credential,
             } => {
-                let ctx = LoginCtx {
+                let ctx = accounts::LoginCtx {
                     credentials: &credentials,
                     registry: &mut registry,
                     events: &events,
                 };
-                handle_login(ctx, provider, name, credential, true).await;
-                clear_account_registries(&account_registries);
+                accounts::handle_login(ctx, provider, name, credential, true).await;
+                accounts::clear_account_registries(&account_registries);
             }
             Op::RemoveAccount { provider, name } => {
-                handle_remove_account(provider, name, &credentials, &mut registry, &events).await;
-                clear_account_registries(&account_registries);
+                accounts::handle_remove_account(
+                    provider,
+                    name,
+                    &credentials,
+                    &mut registry,
+                    &events,
+                )
+                .await;
+                accounts::clear_account_registries(&account_registries);
             }
             Op::ListThreads => {
-                handle_list_threads(&store, &events).await;
+                threads::handle_list_threads(&store, &events).await;
             }
             Op::Resume { thread_id: tid } => {
-                handle_resume(
+                threads::handle_resume(
                     &store,
                     &skills,
                     &tools,
                     project_instructions.as_deref(),
                     tid,
                     &mut target,
-                    &mut history,
+                    &mut conversation,
+                    &mut tracker,
                     &mut thread_id,
                     &events,
                 )
                 .await;
             }
             Op::RenameThread { title } => {
-                handle_rename(&store, thread_id, title, &events).await;
+                threads::handle_rename(&store, thread_id, title, &events).await;
             }
             Op::Shutdown => break,
         }
     }
-}
-
-fn build_account_entries(registry: &Registry, credentials: &CredentialStore) -> Vec<AccountEntry> {
-    let stored = credentials.entries();
-    registry
-        .all()
-        .iter()
-        .map(|p| {
-            let provider_id = p.id().to_string();
-            let auth_method = p.capabilities().auth;
-            let is_local = matches!(auth_method, AuthMethod::None);
-            let accounts = stored
-                .iter()
-                .filter(|(key, _)| key.provider == provider_id)
-                .map(|(key, kind)| AccountInfo {
-                    name: key.account.clone(),
-                    method: match kind {
-                        CredentialKind::ApiKey => AuthMethod::ApiKey,
-                        CredentialKind::OAuth => AuthMethod::OAuth,
-                    },
-                })
-                .collect();
-            AccountEntry {
-                display_name: provider_id.clone(),
-                provider: provider_id,
-                accounts,
-                local: is_local,
-                login: auth_method,
-            }
-        })
-        .collect()
-}
-
-async fn announce_startup(
-    events: &mpsc::Sender<Event>,
-    registry: &Registry,
-    credentials: &CredentialStore,
-    target: Option<&ModelTarget>,
-) {
-    let _ = events
-        .send(Event::LoginProviders {
-            providers: registry
-                .all()
-                .iter()
-                .map(|p| LoginProvider {
-                    id: p.id().to_string(),
-                    method: p.capabilities().auth,
-                })
-                .collect(),
-        })
-        .await;
-    let _ = events
-        .send(Event::AccountsChanged {
-            providers: build_account_entries(registry, credentials),
-        })
-        .await;
-    let _ = events
-        .send(Event::ModelListChanged {
-            entries: catalog_only(registry, credentials),
-        })
-        .await;
-    if let Some(selected) = target {
-        let _ = events
-            .send(Event::ModelSelected {
-                target: selected.clone(),
-            })
-            .await;
-    }
-    let providers = provider_accounts(registry, credentials);
-    let bg_events = events.clone();
-    tokio::spawn(async move {
-        let entries = discover_entries(providers).await;
-        let _ = bg_events.send(Event::ModelListChanged { entries }).await;
-    });
-}
-
-struct LoginCtx<'a> {
-    credentials: &'a CredentialStore,
-    registry: &'a mut Registry,
-    events: &'a mpsc::Sender<Event>,
-}
-
-async fn login_succeeded(provider: &str, events: &mpsc::Sender<Event>) {
-    let _ = events
-        .send(Event::Notify {
-            kind: NotifyKind::Success,
-            message: format!("{provider} connected"),
-        })
-        .await;
-    let _ = events
-        .send(Event::LoginStatus {
-            provider: provider.to_owned(),
-            message: String::new(),
-            done: true,
-            ok: true,
-        })
-        .await;
-}
-
-async fn login_failed(provider: &str, events: &mpsc::Sender<Event>, message: String) {
-    let _ = events
-        .send(Event::LoginStatus {
-            provider: provider.to_owned(),
-            message,
-            done: true,
-            ok: false,
-        })
-        .await;
-}
-
-async fn run_self_oauth(
-    provider: &str,
-    events: &mpsc::Sender<Event>,
-    registry: &Registry,
-) -> Result<TokenSet, String> {
-    let (status_tx, mut status_rx) = mpsc::channel::<String>(8);
-    let status_provider = provider.to_owned();
-    let status_events = events.clone();
-    let forwarder = tokio::spawn(async move {
-        while let Some(message) = status_rx.recv().await {
-            let _ = status_events
-                .send(Event::LoginStatus {
-                    provider: status_provider.clone(),
-                    message,
-                    done: false,
-                    ok: false,
-                })
-                .await;
-        }
-    });
-    let result = registry.login(provider, status_tx).await;
-    let _ = forwarder.await;
-    result
-}
-
-async fn finalize_login(
-    ctx: LoginCtx<'_>,
-    provider: String,
-    name: String,
-    key: CredentialKey,
-    resolved: Credential,
-) {
-    if let Err(message) = ctx
-        .credentials
-        .store(&key, resolved)
-        .map_err(|err| err.to_string())
-    {
-        login_failed(&provider, ctx.events, message).await;
-        emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
-        return;
-    }
-    *ctx.registry = Registry::new(ctx.credentials);
-    if let Err(message) = validate_stored(ctx.credentials, &provider, &name).await {
-        let _ = ctx.credentials.remove(&key);
-        *ctx.registry = Registry::new(ctx.credentials);
-        login_failed(&provider, ctx.events, message).await;
-        emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
-        return;
-    }
-    let entries = discover_ready(ctx.registry, ctx.credentials).await;
-    let _ = ctx.events.send(Event::ModelListChanged { entries }).await;
-    login_succeeded(&provider, ctx.events).await;
-    emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
-}
-
-async fn validate_stored(
-    credentials: &CredentialStore,
-    provider: &str,
-    name: &str,
-) -> Result<(), String> {
-    match Registry::load(credentials, name).get(&goat_provider::ProviderId::from(provider)) {
-        Some(target) => target
-            .validate()
-            .await
-            .unwrap_or_else(|err| Err(err.to_string())),
-        None => Err("unknown provider".to_owned()),
-    }
-}
-
-async fn handle_login(
-    ctx: LoginCtx<'_>,
-    provider: String,
-    name: String,
-    credential: LoginCredential,
-    dedup: bool,
-) {
-    let key = CredentialKey {
-        provider: provider.clone(),
-        account: name.clone(),
-    };
-    if dedup
-        && ctx
-            .credentials
-            .entries()
-            .iter()
-            .any(|(stored, _)| stored == &key)
-    {
-        login_failed(
-            &provider,
-            ctx.events,
-            format!("account '{name}' already exists"),
-        )
-        .await;
-        return;
-    }
-    let resolved = match credential {
-        LoginCredential::ApiKey(secret) => Credential::ApiKey(SecretString::from(secret)),
-        LoginCredential::OAuth => match run_self_oauth(&provider, ctx.events, ctx.registry).await {
-            Ok(tokens) => Credential::OAuth(tokens),
-            Err(message) => {
-                login_failed(&provider, ctx.events, message).await;
-                emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
-                return;
-            }
-        },
-    };
-    finalize_login(ctx, provider, name, key, resolved).await;
-}
-
-fn account_names_for(credentials: &CredentialStore, provider_id: &str) -> Vec<String> {
-    credentials
-        .entries()
-        .into_iter()
-        .filter(|(key, _)| key.provider == provider_id)
-        .map(|(key, _)| key.account)
-        .collect()
-}
-
-fn accounts_for_provider(
-    credentials: &CredentialStore,
-    provider: &dyn goat_provider::Provider,
-) -> Option<Vec<String>> {
-    let is_local = matches!(provider.capabilities().auth, AuthMethod::None);
-    let stored = account_names_for(credentials, &provider.id().to_string());
-    if is_local {
-        if stored.is_empty() {
-            return Some(vec![DEFAULT_ACCOUNT.to_owned()]);
-        }
-        return Some(stored);
-    }
-    if !stored.is_empty() {
-        return Some(stored);
-    }
-    if provider.authenticated() {
-        return Some(vec![DEFAULT_ACCOUNT.to_owned()]);
-    }
-    None
-}
-
-fn model_entry(
-    provider_id: &str,
-    model: &str,
-    accounts: &[String],
-    efforts: Vec<Effort>,
-    context_window: Option<u32>,
-) -> ModelEntry {
-    ModelEntry {
-        provider: provider_id.to_owned(),
-        model: model.to_owned(),
-        context_window,
-        efforts,
-        accounts: accounts
-            .iter()
-            .map(|account| AccountChoice {
-                id: account.clone(),
-                display: account.clone(),
-                target: ModelTarget {
-                    provider: provider_id.to_owned(),
-                    model: model.to_owned(),
-                    account: account.clone(),
-                    effort: None,
-                },
-            })
-            .collect(),
-    }
-}
-
-fn catalog_only(registry: &Registry, credentials: &CredentialStore) -> Vec<ModelEntry> {
-    let mut entries = Vec::new();
-    for provider in registry.all() {
-        let Some(accounts) = accounts_for_provider(credentials, provider.as_ref()) else {
-            continue;
-        };
-        let provider_id = provider.id().to_string();
-        for &id in provider.catalog() {
-            entries.push(model_entry(
-                &provider_id,
-                id,
-                &accounts,
-                provider.efforts(id),
-                provider.context_window(id),
-            ));
-        }
-    }
-    entries
-}
-
-fn provider_accounts(
-    registry: &Registry,
-    credentials: &CredentialStore,
-) -> Vec<(Arc<dyn Provider>, Vec<String>)> {
-    registry
-        .all()
-        .iter()
-        .filter_map(|provider| {
-            accounts_for_provider(credentials, provider.as_ref())
-                .map(|accounts| (Arc::clone(provider), accounts))
-        })
-        .collect()
-}
-
-async fn discover_provider(provider: Arc<dyn Provider>, accounts: Vec<String>) -> Vec<ModelEntry> {
-    let provider_id = provider.id().to_string();
-    let (tx, mut rx) = mpsc::channel(32);
-    let handle = provider.discover(tx);
-    let mut discovered = Vec::new();
-    let collect = async {
-        while let Some(info) = rx.recv().await {
-            discovered.push(info);
-        }
-    };
-    let _ = tokio::time::timeout(Duration::from_secs(3), collect).await;
-    handle.abort();
-
-    let catalog = provider.catalog();
-    let catalog_ids: HashSet<&str> = catalog.iter().copied().collect();
-
-    let mut entries = Vec::new();
-    for &id in catalog {
-        entries.push(model_entry(
-            &provider_id,
-            id,
-            &accounts,
-            provider.efforts(id),
-            provider.context_window(id),
-        ));
-    }
-    for info in discovered {
-        if catalog_ids.contains(info.id.as_str()) {
-            continue;
-        }
-        let efforts = provider.efforts(&info.id);
-        let ctx_win = provider.context_window(&info.id);
-        entries.push(model_entry(
-            &provider_id,
-            &info.id,
-            &accounts,
-            efforts,
-            ctx_win,
-        ));
-    }
-    entries
-}
-
-async fn discover_entries(providers: Vec<(Arc<dyn Provider>, Vec<String>)>) -> Vec<ModelEntry> {
-    futures::future::join_all(
-        providers
-            .into_iter()
-            .map(|(provider, accounts)| discover_provider(provider, accounts)),
-    )
-    .await
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
-async fn discover_ready(registry: &Registry, credentials: &CredentialStore) -> Vec<ModelEntry> {
-    discover_entries(provider_accounts(registry, credentials)).await
-}
-
-async fn run_round(
-    ctx: &Ctx<'_>,
-    run: &Run<'_>,
-    provider: &dyn Provider,
-    request: Request,
-    token: &CancellationToken,
-) -> RoundResult {
-    let (mev_tx, mut mev_rx) = mpsc::channel(64);
-    let handle = provider.stream(request, mev_tx);
-    let mut raw = String::new();
-    let mut thinking = String::new();
-    let mut signature = String::new();
-    let mut redacted: Vec<String> = Vec::new();
-    let mut pending_calls: Vec<(String, String, String)> = Vec::new();
-    let mut usage: Option<goat_provider::Usage> = None;
-    let mut rate_limits: Option<goat_provider::RateLimitSnapshot> = None;
-    let end = loop {
-        tokio::select! {
-            biased;
-            () = token.cancelled() => {
-                handle.abort();
-                break RoundEnd::Cancelled;
-            }
-            maybe_event = mev_rx.recv() => match maybe_event {
-                Some(StreamEvent::TextDelta { text }) => {
-                    raw.push_str(&text);
-                    let _ = ctx
-                        .events
-                        .send(Event::TextDelta { id: run.id, chunk: text })
-                        .await;
-                }
-                Some(StreamEvent::ThinkingDelta { text }) => {
-                    thinking.push_str(&text);
-                    let _ = ctx
-                        .events
-                        .send(Event::ThinkingDelta { id: run.id, chunk: text })
-                        .await;
-                }
-                Some(StreamEvent::ThinkingSignature { signature: sig }) => {
-                    signature.push_str(&sig);
-                }
-                Some(StreamEvent::RedactedThinking { data }) => {
-                    redacted.push(data);
-                }
-                Some(StreamEvent::ToolCall { id: vendor_id, name, input }) => {
-                    pending_calls.push((vendor_id, name, input));
-                }
-                Some(StreamEvent::Usage { usage: u }) => {
-                    usage = Some(u);
-                }
-                Some(StreamEvent::RateLimits { snapshot }) => {
-                    rate_limits = Some(snapshot);
-                }
-                Some(StreamEvent::Completed) | None => break RoundEnd::Completed,
-                Some(StreamEvent::Failed { message }) => break RoundEnd::Failed(message),
-            }
-        }
-    };
-    let thinking = (!thinking.is_empty()).then_some((thinking, signature));
-    RoundResult {
-        end,
-        raw,
-        thinking,
-        redacted,
-        pending_calls,
-        usage,
-        rate_limits,
-    }
-}
-
-fn tool_outcome(result: &Result<ToolOutput, String>) -> ToolOutcome {
-    match result {
-        Ok(output) => ToolOutcome {
-            ok: true,
-            summary: output.summary.clone(),
-        },
-        Err(message) => ToolOutcome {
-            ok: false,
-            summary: Some(message.clone()),
-        },
-    }
-}
-
-fn call_display(tools: &ToolRegistry, name: &str, input: &str) -> ToolDisplay {
-    match name {
-        AGENT_TOOL_NAME => agent_call_display(input),
-        ASK_TOOL_NAME => ask_call_display(input),
-        _ => tools.get(name).map_or_else(
-            || goat_tool::display::generic(input),
-            |tool| tool.display_input(input),
-        ),
-    }
-}
-
-fn agent_call_display(input: &str) -> ToolDisplay {
-    #[derive(serde::Deserialize)]
-    struct Input {
-        agent_type: String,
-        prompt: String,
-    }
-    match serde_json::from_str::<Input>(input) {
-        Ok(args) => {
-            ToolDisplay::with_detail(args.agent_type, goat_tool::display::flatten(&args.prompt))
-        }
-        Err(_) => goat_tool::display::generic(input),
-    }
-}
-
-fn ask_call_display(input: &str) -> ToolDisplay {
-    #[derive(serde::Deserialize)]
-    struct Input {
-        questions: Vec<AskQuestion>,
-    }
-    let Ok(args) = serde_json::from_str::<Input>(input) else {
-        return goat_tool::display::generic(input);
-    };
-    let Some(first) = args.questions.first() else {
-        return goat_tool::display::generic(input);
-    };
-    let primary = goat_tool::display::flatten(&first.question);
-    if args.questions.len() > 1 {
-        ToolDisplay::with_detail(primary, format!("+{} more", args.questions.len() - 1))
-    } else {
-        ToolDisplay::primary(primary)
-    }
-}
-
-fn summarize_line(text: &str) -> Option<String> {
-    let line = text.lines().find(|line| !line.trim().is_empty())?;
-    let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > 80 {
-        let head: String = flat.chars().take(80).collect();
-        Some(format!("{head}…"))
-    } else {
-        Some(flat)
-    }
-}
-
-async fn create_tool_call_record(
-    ctx: &Ctx<'_>,
-    ids: &TurnIds,
-    vendor_id: &str,
-    name: &str,
-    input_json: &str,
-) -> Option<i64> {
-    let (Some(tid), Some(turn)) = (ids.stored_thread, ids.turn_db_id) else {
-        return None;
-    };
-    match ctx
-        .store
-        .create_tool_call(NewToolCall {
-            thread_id: tid,
-            turn_id: turn,
-            call_id: vendor_id.to_owned(),
-            name: name.to_owned(),
-            input: input_json.to_owned(),
-            status: "running".to_owned(),
-            started_at: now_ms(),
-        })
-        .await
-    {
-        Ok(id) => Some(id),
-        Err(err) => {
-            tracing::warn!(%err, "failed to create tool call record");
-            None
-        }
-    }
-}
-
-async fn finish_tool_db(ctx: &Ctx<'_>, db_id: Option<i64>, outcome: &ToolOutcome) {
-    let Some(db) = db_id else {
-        return;
-    };
-    let status = if outcome.ok { "done" } else { "error" }.to_owned();
-    if let Err(err) = ctx
-        .store
-        .finish_tool_call(db, status, outcome.summary.clone(), now_ms())
-        .await
-    {
-        tracing::warn!(%err, "failed to finish tool call");
-    }
-}
-
-async fn run_regular_tool(
-    ctx: &Ctx<'_>,
-    name: &str,
-    input_json: &str,
-    tool_ctx: &ToolContext,
-    token: &CancellationToken,
-) -> Option<Result<ToolOutput, String>> {
-    let fut = async {
-        match ctx.tools.get(name) {
-            Some(tool) => tool
-                .run(input_json, tool_ctx)
-                .await
-                .map_err(|err| err.to_string()),
-            None => Err(format!("unknown tool: {name}")),
-        }
-    };
-    let mut fut = std::pin::pin!(fut);
-    tokio::select! {
-        biased;
-        () = token.cancelled() => None,
-        result = &mut fut => Some(result),
-    }
-}
-
-const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
-
-fn cap_tool_result(mut content: String) -> String {
-    if content.len() > MAX_TOOL_RESULT_BYTES {
-        let boundary = content.floor_char_boundary(MAX_TOOL_RESULT_BYTES);
-        content.truncate(boundary);
-        content.push_str("\n[output truncated]\n");
-    }
-    content
-}
-
-async fn execute_tool(
-    ctx: &Ctx<'_>,
-    run: &Run<'_>,
-    env: &LoopEnv<'_>,
-    prep: &Prepared<'_>,
-    tool_ctx: &ToolContext,
-    token: &CancellationToken,
-) -> ToolExecResult {
-    let step: Option<Result<ToolOutput, String>> =
-        if prep.name == ASK_TOOL_NAME && env.allow_delegate {
-            Some(
-                run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token)
-                    .await
-                    .map(ToolOutput::text),
-            )
-        } else if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
-            match ctx.semaphore.acquire().await {
-                Ok(_permit) if !token.is_cancelled() => Some(
-                    run_delegation(ctx, env, prep.input_json, run.id, token)
-                        .await
-                        .map(ToolOutput::text),
-                ),
-                _ => None,
-            }
-        } else {
-            run_regular_tool(ctx, prep.name, prep.input_json, tool_ctx, token).await
-        };
-    let Some(result) = step else {
-        let outcome = ToolOutcome {
-            ok: false,
-            summary: Some("interrupted".to_owned()),
-        };
-        finish_tool_db(ctx, prep.db_id, &outcome).await;
-        let _ = ctx
-            .events
-            .send(Event::ToolDone {
-                id: run.id,
-                call: ToolCallId(prep.tui_id),
-                outcome,
-            })
-            .await;
-        return ToolExecResult {
-            result_content: ContentBlock::text_result(prep.vendor_id, "interrupted", true),
-            cancelled: true,
-        };
-    };
-    let outcome = tool_outcome(&result);
-    let is_error = !outcome.ok;
-    finish_tool_db(ctx, prep.db_id, &outcome).await;
-    let _ = ctx
-        .events
-        .send(Event::ToolDone {
-            id: run.id,
-            call: ToolCallId(prep.tui_id),
-            outcome,
-        })
-        .await;
-    let content = match result {
-        Ok(output) => match output.content {
-            ToolContent::Text(text) => {
-                vec![ContentBlock::Text {
-                    text: cap_tool_result(text),
-                }]
-            }
-            ToolContent::Image(img) => {
-                vec![ContentBlock::Image {
-                    media_type: img.media_type,
-                    data: img.data,
-                }]
-            }
-        },
-        Err(msg) => vec![ContentBlock::Text { text: msg }],
-    };
-    ToolExecResult {
-        result_content: ContentBlock::ToolResult {
-            tool_use_id: prep.vendor_id.to_owned(),
-            content,
-            is_error,
-        },
-        cancelled: false,
-    }
-}
-
-async fn run_tool_batch(
-    ctx: &Ctx<'_>,
-    run: &Run<'_>,
-    env: &LoopEnv<'_>,
-    pending_calls: &[(String, String, String)],
-    call_seq: &mut u64,
-    tool_ctx: &ToolContext,
-    token: &CancellationToken,
-) -> ToolBatchResult {
-    let mut prepared: Vec<Prepared> = Vec::with_capacity(pending_calls.len());
-    for (vendor_id, name, input_json) in pending_calls {
-        *call_seq += 1;
-        let tui_id = *call_seq;
-        let _ = ctx
-            .events
-            .send(Event::ToolStarted {
-                id: run.id,
-                call: ToolCall {
-                    id: ToolCallId(tui_id),
-                    name: name.clone(),
-                    display: call_display(ctx.tools, name, input_json),
-                },
-            })
-            .await;
-        let db_id = match run.ids() {
-            Some(ids) => create_tool_call_record(ctx, ids, vendor_id, name, input_json).await,
-            None => None,
-        };
-        prepared.push(Prepared {
-            vendor_id: vendor_id.as_str(),
-            name: name.as_str(),
-            input_json: input_json.as_str(),
-            tui_id,
-            db_id,
-        });
-    }
-    let results = futures::future::join_all(
-        prepared
-            .iter()
-            .map(|prep| execute_tool(ctx, run, env, prep, tool_ctx, token)),
-    )
-    .await;
-    let mut tool_results = Vec::with_capacity(results.len());
-    let mut cancelled = false;
-    for result in results {
-        if result.cancelled {
-            cancelled = true;
-        }
-        tool_results.push(result.result_content);
-    }
-    ToolBatchResult {
-        tool_results,
-        cancelled,
-    }
-}
-
-fn thread_title(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let title: String = trimmed.chars().take(60).collect();
-    Some(title)
-}
-
-async fn ensure_thread(
-    store: &Store,
-    thread_id: &mut Option<i64>,
-    target: &ModelTarget,
-    title: Option<String>,
-) -> Option<i64> {
-    if let Some(tid) = thread_id {
-        return Some(*tid);
-    }
-    let timestamp = now_ms();
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    match store
-        .create_thread(NewThread {
-            cwd,
-            title,
-            provider: target.provider.clone(),
-            model: target.model.clone(),
-            account: target.account.clone(),
-            effort: effort_string(target.effort),
-            created_at: timestamp,
-            updated_at: timestamp,
-        })
-        .await
-    {
-        Ok(id) => {
-            *thread_id = Some(id);
-            Some(id)
-        }
-        Err(err) => {
-            tracing::warn!(%err, "failed to create thread");
-            None
-        }
-    }
-}
-
-async fn init_db_turn(
-    ctx: &Ctx<'_>,
-    id: TaskId,
-    text: &str,
-    target: &ModelTarget,
-    thread_id: &mut Option<i64>,
-) -> TurnIds {
-    let stored_thread = ensure_thread(ctx.store, thread_id, target, thread_title(text)).await;
-    let turn_db_id = if let Some(tid) = stored_thread {
-        let body = serde_json::to_string(&vec![ContentBlock::Text {
-            text: text.to_owned(),
-        }])
-        .unwrap_or_else(|_| text.to_owned());
-        if let Err(err) = ctx
-            .store
-            .create_message(NewMessage {
-                thread_id: tid,
-                turn_id: None,
-                role: "user".to_owned(),
-                body,
-                created_at: now_ms(),
-            })
-            .await
-        {
-            tracing::warn!(%err, "failed to persist user message");
-        }
-        ctx.store
-            .create_turn(NewTurn {
-                thread_id: tid,
-                task_id: i64::try_from(id.0).unwrap_or(i64::MAX),
-                provider: target.provider.clone(),
-                model: target.model.clone(),
-                account: target.account.clone(),
-                effort: effort_string(target.effort),
-                status: "running".to_owned(),
-                started_at: now_ms(),
-            })
-            .await
-            .ok()
-    } else {
-        None
-    };
-    TurnIds {
-        stored_thread,
-        turn_db_id,
-    }
-}
-
-async fn persist_message(ctx: &Ctx<'_>, ids: &TurnIds, message: &Message) {
-    let role = match message.role {
-        MessageRole::System => return,
-        MessageRole::User => "user",
-        MessageRole::Assistant => "assistant",
-    };
-    let Some(tid) = ids.stored_thread else {
-        return;
-    };
-    let Ok(body) = serde_json::to_string(&message.content) else {
-        return;
-    };
-    if let Err(err) = ctx
-        .store
-        .create_message(NewMessage {
-            thread_id: tid,
-            turn_id: ids.turn_db_id,
-            role: role.to_owned(),
-            body,
-            created_at: now_ms(),
-        })
-        .await
-    {
-        tracing::warn!(%err, "failed to persist message");
-    }
-}
-
-async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &TurnEnd, ids: &TurnIds) {
-    match outcome {
-        TurnEnd::Done => {
-            if let Some(turn) = ids.turn_db_id
-                && let Err(err) = ctx
-                    .store
-                    .finish_turn(turn, "done".to_owned(), now_ms())
-                    .await
-            {
-                tracing::warn!(%err, "failed to finish turn");
-            }
-            let _ = ctx
-                .events
-                .send(Event::TaskDone {
-                    id,
-                    interrupted: false,
-                })
-                .await;
-        }
-        TurnEnd::Interrupted => {
-            if let Some(turn) = ids.turn_db_id
-                && let Err(err) = ctx
-                    .store
-                    .finish_turn(turn, "interrupted".to_owned(), now_ms())
-                    .await
-            {
-                tracing::warn!(%err, "failed to finish turn");
-            }
-            let _ = ctx
-                .events
-                .send(Event::TaskDone {
-                    id,
-                    interrupted: true,
-                })
-                .await;
-        }
-        TurnEnd::Failed(message) => {
-            let _ = ctx
-                .events
-                .send(Event::Error {
-                    id: Some(id),
-                    message: message.clone(),
-                })
-                .await;
-            if let Some(turn) = ids.turn_db_id
-                && let Err(err) = ctx
-                    .store
-                    .finish_turn(turn, "error".to_owned(), now_ms())
-                    .await
-            {
-                tracing::warn!(%err, "failed to finish turn");
-            }
-            let _ = ctx
-                .events
-                .send(Event::TaskDone {
-                    id,
-                    interrupted: true,
-                })
-                .await;
-        }
-        TurnEnd::Shutdown => {}
-    }
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn process_round_output(
-    ctx: &Ctx<'_>,
-    run: &Run<'_>,
-    env: &LoopEnv<'_>,
-    round: RoundResult,
-    history: &mut Vec<Message>,
-    rounds: usize,
-    call_seq: &mut u64,
-    tool_ctx: &ToolContext,
-    token: &CancellationToken,
-) -> RoundOutcome {
-    if let Some(usage) = round.usage
-        && run.is_top()
-    {
-        let context_window = env.provider.context_window(&env.target.model);
-        let _ = ctx
-            .events
-            .send(Event::Usage {
-                id: run.id,
-                usage,
-                context_window,
-            })
-            .await;
-    }
-    if let Some(snapshot) = round.rate_limits
-        && run.is_top()
-    {
-        let now = now_ms() / 1000;
-        let serialized = {
-            let mut cache = ctx
-                .rl_cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            cache.upsert(
-                &env.target.provider,
-                &env.target.account,
-                snapshot.windows.clone(),
-                now,
-            );
-            cache.to_json()
-        };
-        if let (Some(path), Some(json)) = (ctx.rl_path, serialized) {
-            let path = path.to_owned();
-            tokio::task::spawn_blocking(move || rate_limit_cache::write(&path, &json));
-        }
-        let _ = ctx
-            .events
-            .send(Event::RateLimits {
-                provider: env.target.provider.clone(),
-                account: env.target.account.clone(),
-                snapshot,
-                cached_at: now,
-            })
-            .await;
-    }
-    let raw = round.raw;
-    let pending_calls = round.pending_calls;
-    let shown_text = (!raw.is_empty()).then(|| raw.clone());
-    if !raw.is_empty()
-        || !pending_calls.is_empty()
-        || round.thinking.is_some()
-        || !round.redacted.is_empty()
-    {
-        let mut content = Vec::new();
-        if let Some((text, signature)) = &round.thinking {
-            content.push(ContentBlock::Thinking {
-                text: text.clone(),
-                signature: signature.clone(),
-            });
-        }
-        for data in &round.redacted {
-            content.push(ContentBlock::RedactedThinking { data: data.clone() });
-        }
-        if !raw.is_empty() {
-            content.push(ContentBlock::Text { text: raw.clone() });
-        }
-        for (vendor_id, name, input_json) in &pending_calls {
-            let input_val = serde_json::from_str(input_json).unwrap_or(serde_json::Value::Null);
-            content.push(ContentBlock::ToolUse {
-                id: vendor_id.clone(),
-                name: name.clone(),
-                input: input_val,
-            });
-        }
-        let message = Message {
-            role: MessageRole::Assistant,
-            content,
-        };
-        if let Some(ids) = run.ids() {
-            persist_message(ctx, ids, &message).await;
-        }
-        history.push(message);
-    }
-    if pending_calls.is_empty() {
-        if let Some(shown) = shown_text {
-            let _ = ctx
-                .events
-                .send(Event::TextDone {
-                    id: run.id,
-                    text: shown,
-                })
-                .await;
-        }
-        return RoundOutcome::Done;
-    }
-    if rounds >= MAX_TOOL_ROUNDS {
-        tracing::warn!(rounds, "tool round cap reached; ending run");
-        let synthetic: Vec<ContentBlock> = pending_calls
-            .iter()
-            .map(|(vendor_id, _, _)| {
-                ContentBlock::text_result(vendor_id.clone(), "tool round limit reached", true)
-            })
-            .collect();
-        let message = Message {
-            role: MessageRole::User,
-            content: synthetic,
-        };
-        if let Some(ids) = run.ids() {
-            persist_message(ctx, ids, &message).await;
-        }
-        history.push(message);
-        if let Some(shown) = shown_text {
-            let _ = ctx
-                .events
-                .send(Event::TextDone {
-                    id: run.id,
-                    text: shown,
-                })
-                .await;
-        }
-        return RoundOutcome::Done;
-    }
-    let batch = run_tool_batch(ctx, run, env, &pending_calls, call_seq, tool_ctx, token).await;
-    let message = Message {
-        role: MessageRole::User,
-        content: batch.tool_results,
-    };
-    if let Some(ids) = run.ids() {
-        persist_message(ctx, ids, &message).await;
-    }
-    history.push(message);
-    if batch.cancelled {
-        RoundOutcome::Cancelled
-    } else {
-        RoundOutcome::Continue
-    }
-}
-
-fn build_tool_defs(
-    ctx: &Ctx<'_>,
-    provider: &dyn Provider,
-    selection: Option<&ToolSelection>,
-    allow_delegate: bool,
-) -> Vec<ToolDefinition> {
-    if !provider.capabilities().tools {
-        return Vec::new();
-    }
-    let mut defs: Vec<ToolDefinition> = ctx
-        .tools
-        .specs()
-        .into_iter()
-        .filter(|spec| selection.is_none_or(|sel| sel.allows(spec.name)))
-        .map(|spec| ToolDefinition {
-            name: spec.name.to_owned(),
-            description: spec.description.to_owned(),
-            input_schema: spec.parameters,
-        })
-        .collect();
-    if allow_delegate {
-        if !ctx.agents.is_empty() {
-            defs.push(agent_tool_def(ctx));
-        }
-        defs.push(ask_tool_def());
-    }
-    defs
-}
-
-fn ask_tool_def() -> ToolDefinition {
-    ToolDefinition {
-        name: ASK_TOOL_NAME.to_owned(),
-        description: "Pause execution and ask the user one or more questions, each with optional choice options. Returns the user's answers as a JSON array of strings in the same order as the questions. Use when you need the user's input or a decision before proceeding.".to_owned(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "questions": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "question": { "type": "string" },
-                            "options": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "label": { "type": "string" },
-                                        "description": { "type": "string" }
-                                    },
-                                    "required": ["label"]
-                                }
-                            }
-                        },
-                        "required": ["question"]
-                    }
-                }
-            },
-            "required": ["questions"]
-        }),
-    }
-}
-
-fn agent_tool_def(ctx: &Ctx<'_>) -> ToolDefinition {
-    let names: Vec<String> = ctx.agents.names();
-    let mut description = String::from(
-        "Delegate a self-contained task to a sub-agent that runs in its own context with a restricted tool set and returns only its final report. Prefer this for focused investigation or work that would otherwise flood the main context. Issue several Agent calls in one response to run them in parallel. Available agent_type values:",
-    );
-    for spec in ctx.agents.iter() {
-        let _ = write!(description, "\n- {}: {}", spec.name, spec.description);
-    }
-    ToolDefinition {
-        name: AGENT_TOOL_NAME.to_owned(),
-        description,
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "agent_type": {
-                    "type": "string",
-                    "enum": names,
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "A complete, self-contained instruction for the sub-agent. It does not see the conversation, so include all needed context.",
-                },
-            },
-            "required": ["agent_type", "prompt"],
-        }),
-    }
-}
-
-async fn core_loop(
-    ctx: &Ctx<'_>,
-    run: &Run<'_>,
-    env: &LoopEnv<'_>,
-    token: &CancellationToken,
-    history: &mut Vec<Message>,
-) -> LoopOutcome {
-    let tool_ctx = match ToolContext::new(env.cwd) {
-        Ok(tool_ctx) => tool_ctx,
-        Err(err) => return LoopOutcome::Failed(err.to_string()),
-    };
-    let mut rounds = 0usize;
-    let mut call_seq = 0u64;
-    loop {
-        rounds += 1;
-        let request = Request {
-            model: env.target.model.clone(),
-            messages: history.clone(),
-            tools: env.tool_defs.to_vec(),
-            effort: env.target.effort,
-        };
-        let round = run_round(ctx, run, env.provider, request, token).await;
-        match round.end {
-            RoundEnd::Cancelled => return LoopOutcome::Cancelled,
-            RoundEnd::Failed(message) => return LoopOutcome::Failed(message),
-            RoundEnd::Completed => {}
-        }
-        match process_round_output(
-            ctx,
-            run,
-            env,
-            round,
-            history,
-            rounds,
-            &mut call_seq,
-            &tool_ctx,
-            token,
-        )
-        .await
-        {
-            RoundOutcome::Done => return LoopOutcome::Completed,
-            RoundOutcome::Cancelled => return LoopOutcome::Cancelled,
-            RoundOutcome::Continue => {}
-        }
-    }
-}
-
-fn clear_account_registries(cache: &std::sync::Mutex<HashMap<String, Arc<Registry>>>) {
-    cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
-}
-
-fn provider_for(
-    ctx: &Ctx<'_>,
-    account: &str,
-    id: &goat_provider::ProviderId,
-) -> Option<Arc<dyn Provider>> {
-    if account == DEFAULT_ACCOUNT {
-        return ctx.registry.get(id);
-    }
-    let mut cache = ctx
-        .account_registries
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache
-        .entry(account.to_owned())
-        .or_insert_with(|| Arc::new(Registry::load(ctx.credentials, account)))
-        .get(id)
-}
-
-fn resolve_agent_model(
-    ctx: &Ctx<'_>,
-    parent: &ModelTarget,
-    spec: &AgentSpec,
-) -> Option<(Arc<dyn Provider>, String, Option<Effort>)> {
-    if let Some(model_id) = &spec.model {
-        if let Some(found) = ctx
-            .registry
-            .all()
-            .iter()
-            .find(|provider| provider.catalog().contains(&model_id.as_str()))
-        {
-            let provider_id = found.id().to_string();
-            let provider = provider_for(
-                ctx,
-                &parent.account,
-                &goat_provider::ProviderId::from(provider_id.as_str()),
-            )
-            .unwrap_or_else(|| found.clone());
-            let effort = spec
-                .effort
-                .or_else(|| provider.efforts(model_id).into_iter().next());
-            return Some((provider, model_id.clone(), effort));
-        }
-        tracing::warn!(model = %model_id, "agent model not found; inheriting parent model");
-    }
-    let provider = provider_for(
-        ctx,
-        &parent.account,
-        &goat_provider::ProviderId::from(parent.provider.as_str()),
-    )?;
-    Some((provider, parent.model.clone(), parent.effort))
-}
-
-async fn run_delegation(
-    ctx: &Ctx<'_>,
-    env: &LoopEnv<'_>,
-    input_json: &str,
-    parent: TaskId,
-    token: &CancellationToken,
-) -> Result<String, String> {
-    #[derive(serde::Deserialize)]
-    struct Input {
-        agent_type: String,
-        prompt: String,
-    }
-    let args: Input =
-        serde_json::from_str(input_json).map_err(|err| format!("invalid Agent input: {err}"))?;
-    let Some(spec) = ctx.agents.get(&args.agent_type) else {
-        return Err(format!("unknown agent_type: {}", args.agent_type));
-    };
-    let Some((provider, model, effort)) = resolve_agent_model(ctx, env.target, spec) else {
-        return Err("could not resolve a model for the agent".to_owned());
-    };
-    let child_target = ModelTarget {
-        provider: provider.id().to_string(),
-        model,
-        account: env.target.account.clone(),
-        effort,
-    };
-    let tool_defs = build_tool_defs(ctx, provider.as_ref(), Some(&spec.tools), false);
-    let mut history = vec![
-        Message::text(
-            MessageRole::System,
-            compose_child_system(&spec.prompt, ctx.instructions),
-        ),
-        Message::text(MessageRole::User, args.prompt.clone()),
-    ];
-    let child_id = TaskId(ctx.child_ids.fetch_add(1, Ordering::Relaxed));
-    let _ = ctx
-        .events
-        .send(Event::AgentStarted {
-            id: child_id,
-            parent,
-            agent_type: args.agent_type.clone(),
-            label: delegation_label(&args.prompt),
-        })
-        .await;
-    let run = Run::child(child_id);
-    let child_env = LoopEnv {
-        provider: provider.as_ref(),
-        target: &child_target,
-        tool_defs: &tool_defs,
-        cwd: env.cwd,
-        allow_delegate: false,
-    };
-    let child_token = token.child_token();
-    let outcome = Box::pin(core_loop(ctx, &run, &child_env, &child_token, &mut history)).await;
-    let result = match outcome {
-        LoopOutcome::Completed => Ok(final_text(&history)),
-        LoopOutcome::Cancelled => Ok("(agent interrupted)".to_owned()),
-        LoopOutcome::Failed(message) => Err(message),
-    };
-    let _ = ctx
-        .events
-        .send(Event::AgentDone {
-            id: child_id,
-            ok: result.is_ok(),
-        })
-        .await;
-    result
-}
-
-async fn run_ask(
-    ctx: &Ctx<'_>,
-    run: &Run<'_>,
-    input_json: &str,
-    call_id: ToolCallId,
-    token: &CancellationToken,
-) -> Result<String, String> {
-    #[derive(serde::Deserialize)]
-    struct Input {
-        questions: Vec<AskQuestion>,
-    }
-    let args: Input =
-        serde_json::from_str(input_json).map_err(|err| format!("invalid Ask input: {err}"))?;
-    if args.questions.is_empty() {
-        return Err("questions must not be empty".to_owned());
-    }
-    let (tx, rx) = oneshot::channel::<Vec<String>>();
-    ctx.asks.lock().await.insert(call_id, tx);
-    let _ = ctx
-        .events
-        .send(Event::AskStarted {
-            id: run.id,
-            call: call_id,
-            questions: args.questions,
-        })
-        .await;
-    let result = tokio::select! {
-        biased;
-        () = token.cancelled() => {
-            ctx.asks.lock().await.remove(&call_id);
-            let _ = ctx
-                .events
-                .send(Event::AskDismissed { id: run.id, call: call_id })
-                .await;
-            return Err("interrupted".to_owned());
-        }
-        res = rx => res,
-    };
-    match result {
-        Ok(answers) => {
-            serde_json::to_string(&answers).map_err(|err| format!("serialize error: {err}"))
-        }
-        Err(_) => Err("answer channel closed".to_owned()),
-    }
-}
-
-fn delegation_label(prompt: &str) -> String {
-    let line = prompt.lines().next().unwrap_or("").trim();
-    if line.chars().count() > 50 {
-        let head: String = line.chars().take(50).collect();
-        format!("{head}…")
-    } else {
-        line.to_owned()
-    }
-}
-
-fn final_text(history: &[Message]) -> String {
-    for message in history.iter().rev() {
-        if message.role == MessageRole::Assistant {
-            let mut text = String::new();
-            for block in &message.content {
-                if let ContentBlock::Text { text: chunk } = block {
-                    text.push_str(chunk);
-                }
-            }
-            if !text.trim().is_empty() {
-                return text;
-            }
-        }
-    }
-    "(agent produced no output)".to_owned()
-}
-
-async fn resolve_thread_cwd(ctx: &Ctx<'_>, stored_thread: Option<i64>) -> std::path::PathBuf {
-    match stored_thread {
-        Some(tid) => ctx
-            .store
-            .get_thread(tid)
-            .await
-            .ok()
-            .flatten()
-            .map(|thread| thread.cwd)
-            .filter(|cwd| !cwd.is_empty())
-            .map_or_else(
-                || std::env::current_dir().unwrap_or_default(),
-                std::path::PathBuf::from,
-            ),
-        None => std::env::current_dir().unwrap_or_default(),
-    }
-}
-
-async fn emit_task_error(ctx: &Ctx<'_>, id: TaskId, message: String) {
-    let _ = ctx
-        .events
-        .send(Event::Error {
-            id: Some(id),
-            message,
-        })
-        .await;
-    let _ = ctx
-        .events
-        .send(Event::TaskDone {
-            id,
-            interrupted: true,
-        })
-        .await;
-}
-
-async fn handle_idle_op(
-    op: Op,
-    store: &Store,
-    thread_id: Option<i64>,
-    target: &mut Option<ModelTarget>,
-    events: &mpsc::Sender<Event>,
-) {
-    if matches!(op, Op::AddAccount { .. } | Op::RemoveAccount { .. }) {
-        return;
-    }
-    if let Op::SelectModel { target: chosen } = op {
-        if let Some(tid) = thread_id
-            && let Err(err) = store
-                .update_thread_model(
-                    tid,
-                    chosen.provider.clone(),
-                    chosen.model.clone(),
-                    chosen.account.clone(),
-                    effort_string(chosen.effort),
-                    now_ms(),
-                )
-                .await
-        {
-            tracing::warn!(%err, "failed to update thread model");
-        }
-        *target = Some(chosen.clone());
-        let _ = events.send(Event::ModelSelected { target: chosen }).await;
-    }
-}
-
-async fn handle_list_threads(store: &Store, events: &mpsc::Sender<Event>) {
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let threads = store.list_threads_in(cwd, 50).await.unwrap_or_default();
-    let summaries = threads
-        .into_iter()
-        .map(|thread| ThreadSummary {
-            model: format!("{}/{}", thread.provider, thread.model),
-            title: thread
-                .title
-                .filter(|title| !title.is_empty())
-                .unwrap_or_else(|| format!("{}/{}", thread.provider, thread.model)),
-            id: thread.id,
-            updated_at: thread.updated_at,
-        })
-        .collect();
-    let _ = events
-        .send(Event::ThreadsListed { threads: summaries })
-        .await;
-}
-
-async fn handle_rename(
-    store: &Store,
-    thread_id: Option<i64>,
-    title: String,
-    events: &mpsc::Sender<Event>,
-) {
-    let Some(tid) = thread_id else {
-        let _ = events
-            .send(Event::Notify {
-                kind: NotifyKind::Error,
-                message: "no active conversation to rename".to_owned(),
-            })
-            .await;
-        return;
-    };
-    match store.update_thread_title(tid, title.clone()).await {
-        Ok(()) => {
-            let _ = events
-                .send(Event::Notify {
-                    kind: NotifyKind::Success,
-                    message: format!("renamed to \"{title}\""),
-                })
-                .await;
-        }
-        Err(err) => {
-            tracing::warn!(%err, "failed to rename thread");
-            let _ = events
-                .send(Event::Notify {
-                    kind: NotifyKind::Error,
-                    message: "failed to rename conversation".to_owned(),
-                })
-                .await;
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_resume(
-    store: &Store,
-    skills: &[SkillInfo],
-    tools: &ToolRegistry,
-    instructions: Option<&str>,
-    tid: i64,
-    target: &mut Option<ModelTarget>,
-    history: &mut Vec<Message>,
-    thread_id: &mut Option<i64>,
-    events: &mpsc::Sender<Event>,
-) {
-    let Some(thread) = store.get_thread(tid).await.ok().flatten() else {
-        return;
-    };
-    let new_target = ModelTarget {
-        provider: thread.provider.clone(),
-        model: thread.model.clone(),
-        account: thread.account.clone(),
-        effort: thread.effort.as_deref().and_then(Effort::parse),
-    };
-    let messages = store.get_messages(tid).await.unwrap_or_default();
-    let mut new_history = vec![Message::text(
-        MessageRole::System,
-        build_system_prompt(skills, instructions),
-    )];
-    let mut entries: Vec<TranscriptEntry> = Vec::new();
-    let mut tool_uses: std::collections::HashMap<String, (String, String)> =
-        std::collections::HashMap::new();
-    let mut tool_seq: u64 = 0;
-    for stored in messages {
-        if stored.role == "shell" {
-            let content = parse_content_blocks(&stored.body);
-            if let Some(ContentBlock::Text { text }) = content.first() {
-                match shell::decode(text) {
-                    Some((command, output)) => {
-                        entries.push(TranscriptEntry::Shell { command, output });
-                    }
-                    None => entries.push(TranscriptEntry::User(text.clone())),
-                }
-            }
-            new_history.push(Message {
-                role: MessageRole::User,
-                content,
-            });
-            continue;
-        }
-        let role = match stored.role.as_str() {
-            "user" => MessageRole::User,
-            "assistant" => MessageRole::Assistant,
-            _ => continue,
-        };
-        let content = parse_content_blocks(&stored.body);
-        for block in &content {
-            match block {
-                ContentBlock::Text { text } => match role {
-                    MessageRole::User => entries.push(TranscriptEntry::User(text.clone())),
-                    MessageRole::Assistant => {
-                        entries.push(TranscriptEntry::Assistant(text.clone()));
-                    }
-                    MessageRole::System => {}
-                },
-                ContentBlock::ToolUse { id, name, input } => {
-                    tool_uses.insert(id.clone(), (name.clone(), input.to_string()));
-                }
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } => {
-                    if let Some((name, input)) = tool_uses.remove(tool_use_id) {
-                        tool_seq += 1;
-                        let display = call_display(tools, &name, &input);
-                        let summary = if *is_error {
-                            summarize_line(&ContentBlock::tool_result_text(content))
-                        } else {
-                            None
-                        };
-                        entries.push(TranscriptEntry::Tool {
-                            call: ToolCall {
-                                id: ToolCallId(tool_seq),
-                                name,
-                                display,
-                            },
-                            outcome: ToolOutcome {
-                                ok: !is_error,
-                                summary,
-                            },
-                        });
-                    }
-                }
-                ContentBlock::Image { .. }
-                | ContentBlock::Thinking { .. }
-                | ContentBlock::RedactedThinking { .. } => {}
-            }
-        }
-        new_history.push(Message { role, content });
-    }
-    *history = new_history;
-    *thread_id = Some(tid);
-    *target = Some(new_target.clone());
-    let _ = events
-        .send(Event::ConversationRestored {
-            target: new_target,
-            entries,
-        })
-        .await;
-}
-
-async fn handle_turn(
-    ctx: &Ctx<'_>,
-    id: TaskId,
-    text: String,
-    target: &mut Option<ModelTarget>,
-    history: &mut Vec<Message>,
-    thread_id: &mut Option<i64>,
-    ops: &mut mpsc::Receiver<Op>,
-) -> Flow {
-    let Some(resolved) = target.clone() else {
-        emit_task_error(
-            ctx,
-            id,
-            "no model selected · /config to connect a provider".to_owned(),
-        )
-        .await;
-        return Flow::Continue;
-    };
-    let resolved_provider = provider_for(
-        ctx,
-        &resolved.account,
-        &goat_provider::ProviderId::from(resolved.provider.as_str()),
-    );
-    let Some(provider) = resolved_provider else {
-        emit_task_error(ctx, id, format!("unknown provider: {}", resolved.provider)).await;
-        return Flow::Continue;
-    };
-
-    if history.is_empty() {
-        history.push(Message::text(
-            MessageRole::System,
-            build_system_prompt(ctx.skills, ctx.instructions),
-        ));
-    }
-    history.push(Message::text(MessageRole::User, text.clone()));
-    let ids = init_db_turn(ctx, id, &text, &resolved, thread_id).await;
-    if ctx.events.send(Event::TaskStarted { id }).await.is_err() {
-        finalize_turn(ctx, id, &TurnEnd::Shutdown, &ids).await;
-        return Flow::Shutdown;
-    }
-
-    let cwd = resolve_thread_cwd(ctx, ids.stored_thread).await;
-    let tool_defs = build_tool_defs(ctx, provider.as_ref(), None, true);
-    let run = Run::top(id, &ids);
-    let env = LoopEnv {
-        provider: provider.as_ref(),
-        target: &resolved,
-        tool_defs: &tool_defs,
-        cwd: &cwd,
-        allow_delegate: true,
-    };
-    let token = CancellationToken::new();
-    let mut shutdown = false;
-    let mut deferred: Vec<Op> = Vec::new();
-
-    let outcome = {
-        let core = core_loop(ctx, &run, &env, &token, history);
-        tokio::pin!(core);
-        loop {
-            tokio::select! {
-                biased;
-                result = &mut core => break result,
-                maybe_op = ops.recv() => match maybe_op {
-                    Some(Op::Answer { call, answers, .. }) => {
-                        if let Some(tx) = ctx.asks.lock().await.remove(&call) {
-                            let _ = tx.send(answers);
-                        }
-                    }
-                    Some(Op::Interrupt { id: target_id }) if target_id == id => token.cancel(),
-                    Some(Op::Shutdown) | None => {
-                        shutdown = true;
-                        token.cancel();
-                    }
-                    Some(op) => deferred.push(op),
-                },
-            }
-        }
-    };
-
-    let turn_end = match outcome {
-        LoopOutcome::Completed => TurnEnd::Done,
-        LoopOutcome::Failed(message) => TurnEnd::Failed(message),
-        LoopOutcome::Cancelled => {
-            if shutdown {
-                TurnEnd::Shutdown
-            } else {
-                TurnEnd::Interrupted
-            }
-        }
-    };
-    finalize_turn(ctx, id, &turn_end, &ids).await;
-    if matches!(turn_end, TurnEnd::Shutdown) {
-        return Flow::Shutdown;
-    }
-
-    for op in deferred {
-        handle_idle_op(op, ctx.store, *thread_id, target, ctx.events).await;
-    }
-
-    Flow::Continue
-}
-
-const SHELL_TIMEOUT: Duration = Duration::from_mins(10);
-const SHELL_INTERRUPTED: &str = "[interrupted]";
-
-enum ShellEnd {
-    Done(String),
-    Interrupted,
-    Shutdown,
-}
-
-async fn run_shell_command(tools: &ToolRegistry, command: &str, cwd: &Path) -> String {
-    let mut tool_ctx = match ToolContext::new(cwd) {
-        Ok(tool_ctx) => tool_ctx,
-        Err(err) => return err.to_string(),
-    };
-    tool_ctx.bash_timeout = SHELL_TIMEOUT;
-    let Some(tool) = tools.get("Bash") else {
-        return "shell tool unavailable".to_owned();
-    };
-    let input = serde_json::json!({ "command": command }).to_string();
-    match tool.run(&input, &tool_ctx).await {
-        Ok(output) => output.as_text().unwrap_or_default().to_owned(),
-        Err(ToolError::Timeout { .. }) => {
-            format!("[timed out after {}m]", SHELL_TIMEOUT.as_secs() / 60)
-        }
-        Err(err) => err.to_string(),
-    }
-}
-
-async fn handle_shell(
-    ctx: &Ctx<'_>,
-    id: TaskId,
-    command: &str,
-    target: &mut Option<ModelTarget>,
-    history: &mut Vec<Message>,
-    thread_id: &mut Option<i64>,
-    ops: &mut mpsc::Receiver<Op>,
-) -> Flow {
-    if ctx.events.send(Event::TaskStarted { id }).await.is_err() {
-        return Flow::Shutdown;
-    }
-    let stored_thread = match target.as_ref() {
-        Some(resolved) => {
-            ensure_thread(
-                ctx.store,
-                thread_id,
-                resolved,
-                thread_title(&format!("! {command}")),
-            )
-            .await
-        }
-        None => None,
-    };
-    let cwd = resolve_thread_cwd(ctx, stored_thread).await;
-
-    let mut deferred: Vec<Op> = Vec::new();
-    let outcome = {
-        let fut = run_shell_command(ctx.tools, command, &cwd);
-        tokio::pin!(fut);
-        loop {
-            tokio::select! {
-                biased;
-                output = &mut fut => break ShellEnd::Done(output),
-                maybe_op = ops.recv() => match maybe_op {
-                    Some(Op::Interrupt { id: target_id }) if target_id == id => {
-                        break ShellEnd::Interrupted;
-                    }
-                    Some(Op::Shutdown) | None => break ShellEnd::Shutdown,
-                    Some(op) => deferred.push(op),
-                },
-            }
-        }
-    };
-
-    let output = match outcome {
-        ShellEnd::Shutdown => return Flow::Shutdown,
-        ShellEnd::Interrupted => SHELL_INTERRUPTED.to_owned(),
-        ShellEnd::Done(output) => output,
-    };
-
-    let encoded = shell::encode(command, &output);
-    if history.is_empty() {
-        history.push(Message::text(
-            MessageRole::System,
-            build_system_prompt(ctx.skills, ctx.instructions),
-        ));
-    }
-    history.push(Message::text(MessageRole::User, encoded.clone()));
-
-    if let Some(tid) = stored_thread {
-        let body = serde_json::to_string(&vec![ContentBlock::Text {
-            text: encoded.clone(),
-        }])
-        .unwrap_or(encoded);
-        if let Err(err) = ctx
-            .store
-            .create_message(NewMessage {
-                thread_id: tid,
-                turn_id: None,
-                role: "shell".to_owned(),
-                body,
-                created_at: now_ms(),
-            })
-            .await
-        {
-            tracing::warn!(%err, "failed to persist shell message");
-        }
-    }
-
-    let _ = ctx.events.send(Event::ShellDone { id, output }).await;
-    let _ = ctx
-        .events
-        .send(Event::TaskDone {
-            id,
-            interrupted: false,
-        })
-        .await;
-
-    for op in deferred {
-        handle_idle_op(op, ctx.store, *thread_id, target, ctx.events).await;
-    }
-
-    Flow::Continue
 }
 
 #[cfg(test)]
@@ -2367,7 +409,7 @@ mod tests {
     use goat_core::Session;
     use goat_protocol::{Event, ModelTarget, Op, TaskId};
     use goat_provider::{
-        AuthMethod, Capabilities, Model, Provider, ProviderId, Request, StreamEvent,
+        AuthMethod, Capabilities, Model, Provider, ProviderId, Request, StreamError, StreamEvent,
     };
     use goat_providers::Registry;
     use goat_store::Store;
@@ -2466,6 +508,568 @@ mod tests {
                 drop(out);
             })
         }
+    }
+
+    struct SeqTextProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        delay_ms: u64,
+    }
+
+    impl Provider for SeqTextProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::from("mock")
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                tools: false,
+                auth: AuthMethod::None,
+            }
+        }
+
+        fn stream(&self, _req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let delay = self.delay_ms;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                let _ = events
+                    .send(StreamEvent::TextDelta {
+                        text: format!("reply {n}"),
+                    })
+                    .await;
+                let _ = events.send(StreamEvent::Completed).await;
+            })
+        }
+
+        fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                drop(out);
+            })
+        }
+    }
+
+    fn seq_agent(delay_ms: u64) -> (GoatAgent, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = SeqTextProvider {
+            calls: calls.clone(),
+            delay_ms,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials =
+            CredentialStore::new(std::env::temp_dir().join("goat-agent-steering.json"));
+        (
+            GoatAgent::new(registry, store, credentials, Some(target("mock"))),
+            calls,
+        )
+    }
+
+    #[tokio::test]
+    async fn steering_extends_the_turn_and_injects_message() {
+        let (agent, calls) = seq_agent(150);
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "first".to_owned(),
+        })
+        .await
+        .unwrap();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(2),
+            text: "also do this".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        let mut user_messages = Vec::new();
+        let mut text_dones = Vec::new();
+        let mut task_starts = 0;
+        let mut task_dones = 0;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::TaskStarted { .. } => task_starts += 1,
+                Event::UserMessage { id, text } => user_messages.push((id, text)),
+                Event::TextDone { text, .. } => text_dones.push(text),
+                Event::TaskDone { interrupted, .. } => {
+                    assert!(!interrupted);
+                    task_dones += 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            user_messages,
+            vec![(TaskId(2), "also do this".to_owned())],
+            "steering message must be injected with its own task id"
+        );
+        assert_eq!(text_dones, vec!["reply 0".to_owned(), "reply 1".to_owned()]);
+        assert_eq!(
+            task_starts, 1,
+            "steering must extend the turn, not start a new one"
+        );
+        assert_eq!(task_dones, 1);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn dequeue_removes_pending_steering_message() {
+        let (agent, calls) = seq_agent(300);
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "first".to_owned(),
+        })
+        .await
+        .unwrap();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(2),
+            text: "typo message".to_owned(),
+        })
+        .await
+        .unwrap();
+        ops.send(Op::DequeueMessage { id: TaskId(2) })
+            .await
+            .unwrap();
+
+        let mut dequeued = Vec::new();
+        let mut user_messages = 0;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::MessageDequeued { id, text } => dequeued.push((id, text)),
+                Event::UserMessage { .. } => user_messages += 1,
+                Event::TaskDone { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(dequeued, vec![(TaskId(2), "typo message".to_owned())]);
+        assert_eq!(user_messages, 0, "dequeued message must never inject");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn followup_message_mid_turn_is_never_lost() {
+        let (agent, _calls) = seq_agent(10);
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "first".to_owned(),
+        })
+        .await
+        .unwrap();
+        let mut sent_followup = false;
+        let mut text_dones = 0;
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+                .await
+                .expect("engine stalled before processing the follow-up")
+                .expect("engine closed");
+            match event {
+                Event::TaskStarted { .. } => {
+                    if !sent_followup {
+                        sent_followup = true;
+                        ops.send(Op::SubmitMessage {
+                            id: TaskId(2),
+                            text: "follow up".to_owned(),
+                        })
+                        .await
+                        .unwrap();
+                    }
+                }
+                Event::TextDone { .. } => text_dones += 1,
+                Event::TaskDone { interrupted, .. } => {
+                    assert!(!interrupted);
+                    if text_dones >= 2 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(text_dones, 2, "follow-up must produce its own response");
+    }
+
+    struct OverflowThenRecoverProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        requests: Arc<std::sync::Mutex<Vec<Request>>>,
+    }
+
+    impl Provider for OverflowThenRecoverProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::from("mock")
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                tools: false,
+                auth: AuthMethod::None,
+            }
+        }
+
+        fn stream(&self, req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(req);
+            tokio::spawn(async move {
+                match n {
+                    0 => {
+                        let _ = events
+                            .send(StreamEvent::Failed {
+                                error: StreamError::context_overflow("prompt is too long"),
+                            })
+                            .await;
+                    }
+                    1 => {
+                        let _ = events
+                            .send(StreamEvent::TextDelta {
+                                text:
+                                    "<analysis>walk</analysis><summary>## Task\nthe work</summary>"
+                                        .to_owned(),
+                            })
+                            .await;
+                        let _ = events.send(StreamEvent::Completed).await;
+                    }
+                    _ => {
+                        let _ = events
+                            .send(StreamEvent::TextDelta {
+                                text: "recovered after compaction".to_owned(),
+                            })
+                            .await;
+                        let _ = events.send(StreamEvent::Completed).await;
+                    }
+                }
+            })
+        }
+
+        fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                drop(out);
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn context_overflow_compacts_and_retries_the_round() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = OverflowThenRecoverProvider {
+            calls: calls.clone(),
+            requests: requests.clone(),
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials =
+            CredentialStore::new(std::env::temp_dir().join("goat-agent-overflow.json"));
+        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "long running work".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        let mut compaction_started = false;
+        let mut compaction_done_ok = None;
+        let mut final_text = String::new();
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::CompactionStarted { .. } => compaction_started = true,
+                Event::CompactionDone { ok, .. } => compaction_done_ok = Some(ok),
+                Event::TextDone { text, .. } => final_text = text,
+                Event::TaskDone { interrupted, .. } => {
+                    assert!(!interrupted);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(compaction_started);
+        assert_eq!(compaction_done_ok, Some(true));
+        assert_eq!(final_text, "recovered after compaction");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        let captured = requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            captured[1].tool_choice,
+            goat_provider::ToolChoice::None,
+            "summarization call must structurally forbid tool use"
+        );
+        assert!(
+            captured[1]
+                .messages
+                .last()
+                .unwrap()
+                .text_content()
+                .contains("checkpoint summary"),
+            "summarization call must append the prompt"
+        );
+        let retried = &captured[2];
+        assert!(
+            retried
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("## Task")),
+            "retried round must see the summary"
+        );
+        assert!(
+            retried
+                .messages
+                .iter()
+                .any(|message| message.text_content() == "long running work"),
+            "the in-flight user prompt must survive verbatim"
+        );
+
+        let compactions = store.compactions_for_thread(1).await.unwrap();
+        assert_eq!(compactions.len(), 1, "compaction must be persisted");
+        assert!(compactions[0].summary.contains("## Task"));
+    }
+
+    #[tokio::test]
+    async fn resume_after_compaction_rebuilds_compacted_history() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = OverflowThenRecoverProvider {
+            calls: calls.clone(),
+            requests: requests.clone(),
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials =
+            CredentialStore::new(std::env::temp_dir().join("goat-agent-resume-compact.json"));
+        let agent = GoatAgent::new(
+            registry,
+            store.clone(),
+            credentials.clone(),
+            Some(target("mock")),
+        );
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "long running work".to_owned(),
+        })
+        .await
+        .unwrap();
+        while let Some(event) = events.recv().await {
+            if matches!(event, Event::TaskDone { .. }) {
+                break;
+            }
+        }
+        ops.send(Op::Shutdown).await.unwrap();
+
+        let provider2 = MockProvider {
+            id: "mock".to_owned(),
+            reply: "resumed".to_owned(),
+            delay_ms: 0,
+        };
+        let registry2 = Registry::from_providers(vec![Arc::new(provider2)]);
+        let agent2 = GoatAgent::new(registry2, store.clone(), credentials, Some(target("mock")));
+        let session2 = Session::spawn(agent2);
+        let (ops2, mut events2, _handle2) = session2.into_parts();
+        ops2.send(Op::Resume { thread_id: 1 }).await.unwrap();
+
+        let mut saw_marker = false;
+        while let Some(event) = events2.recv().await {
+            if let Event::ConversationRestored {
+                entries,
+                context_tokens,
+                ..
+            } = event
+            {
+                saw_marker = entries.iter().any(|entry| {
+                    matches!(entry, goat_protocol::TranscriptEntry::Compaction { .. })
+                });
+                assert!(context_tokens.is_some());
+                break;
+            }
+        }
+        assert!(
+            saw_marker,
+            "restored transcript must carry the compaction marker"
+        );
+    }
+
+    struct FailingProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        failures: usize,
+        error: StreamError,
+    }
+
+    impl Provider for FailingProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::from("mock")
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                tools: false,
+                auth: AuthMethod::None,
+            }
+        }
+
+        fn stream(&self, _req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let failures = self.failures;
+            let error = self.error.clone();
+            tokio::spawn(async move {
+                if n < failures {
+                    let _ = events.send(StreamEvent::Failed { error }).await;
+                    return;
+                }
+                let _ = events
+                    .send(StreamEvent::TextDelta {
+                        text: "recovered".to_owned(),
+                    })
+                    .await;
+                let _ = events.send(StreamEvent::Completed).await;
+            })
+        }
+
+        fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                drop(out);
+            })
+        }
+    }
+
+    fn failing_agent(
+        failures: usize,
+        error: StreamError,
+    ) -> (GoatAgent, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = FailingProvider {
+            calls: calls.clone(),
+            failures,
+            error,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-retry.json"));
+        (
+            GoatAgent::new(registry, store, credentials, Some(target("mock"))),
+            calls,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_transient_failures_until_success() {
+        let (agent, calls) = failing_agent(2, StreamError::overloaded("busy"));
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "go".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        let mut retries = Vec::new();
+        let mut final_text = String::new();
+        let mut interrupted = true;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Retrying {
+                    attempt, reason, ..
+                } => retries.push((attempt, reason)),
+                Event::TextDone { text, .. } => final_text = text,
+                Event::TaskDone {
+                    interrupted: was, ..
+                } => {
+                    interrupted = was;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(retries.len(), 2);
+        assert_eq!(retries[0], (1, "overloaded".to_owned()));
+        assert_eq!(retries[1], (2, "overloaded".to_owned()));
+        assert_eq!(final_text, "recovered");
+        assert!(!interrupted);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn auth_failure_aborts_without_retry() {
+        let (agent, calls) = failing_agent(usize::MAX, StreamError::auth("expired"));
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "go".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        let mut saw_retry = false;
+        let mut error_message = String::new();
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Retrying { .. } => saw_retry = true,
+                Event::Error { message, .. } => error_message = message,
+                Event::TaskDone { interrupted, .. } => {
+                    assert!(interrupted);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(!saw_retry, "auth failures must not retry");
+        assert!(
+            error_message.contains("/config to re-login"),
+            "{error_message}"
+        );
+        assert!(error_message.contains("progress saved"), "{error_message}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn interrupt_cancels_retry_backoff_promptly() {
+        let (agent, _calls) = failing_agent(
+            usize::MAX,
+            StreamError::rate_limited("slow", Some(std::time::Duration::from_secs(30))),
+        );
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(4),
+            text: "go".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let mut interrupted = false;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Retrying { .. } => {
+                    ops.send(Op::Interrupt { id: TaskId(4) }).await.unwrap();
+                }
+                Event::TaskDone {
+                    interrupted: was, ..
+                } => {
+                    interrupted = was;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(interrupted);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "interrupt during backoff must cancel promptly, took {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -2570,38 +1174,6 @@ mod tests {
         assert!(done);
     }
 
-    #[test]
-    fn system_prompt_without_skills_is_base() {
-        assert_eq!(super::build_system_prompt(&[], None), super::SYSTEM_PROMPT);
-    }
-
-    #[test]
-    fn system_prompt_lists_skills() {
-        let prompt = super::build_system_prompt(
-            &[goat_protocol::SkillInfo {
-                name: "demo".to_owned(),
-                description: "does the demo".to_owned(),
-            }],
-            None,
-        );
-        assert!(prompt.contains("demo"));
-        assert!(prompt.contains("does the demo"));
-        assert!(prompt.contains("Skill tool"));
-    }
-
-    #[test]
-    fn system_prompt_includes_project_instructions() {
-        let prompt = super::build_system_prompt(&[], Some("always use snake_case"));
-        assert!(prompt.contains("always use snake_case"));
-        assert!(prompt.contains("Project instructions"));
-    }
-
-    #[test]
-    fn system_prompt_no_instructions_omits_section() {
-        let prompt = super::build_system_prompt(&[], None);
-        assert!(!prompt.contains("Project instructions"));
-    }
-
     #[tokio::test]
     async fn interrupt_ends_turn() {
         let session = Session::spawn(agent_with("late", 5_000));
@@ -2654,49 +1226,6 @@ mod tests {
             }
         }
         assert!(saw_error);
-    }
-
-    async fn drain_until_task_done(events: &mut mpsc::Receiver<Event>) {
-        while let Some(event) = events.recv().await {
-            if matches!(event, Event::TaskDone { .. }) {
-                return;
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn clear_starts_new_thread() {
-        let provider = MockProvider {
-            id: "mock".to_owned(),
-            reply: "ok".to_owned(),
-            delay_ms: 0,
-        };
-        let registry = Registry::from_providers(vec![Arc::new(provider)]);
-        let store = Store::open_in_memory().unwrap();
-        let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-clear.json"));
-        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
-        let session = Session::spawn(agent);
-        let (ops, mut events, _handle) = session.into_parts();
-
-        ops.send(Op::SubmitMessage {
-            id: TaskId(1),
-            text: "first".to_owned(),
-        })
-        .await
-        .unwrap();
-        drain_until_task_done(&mut events).await;
-
-        ops.send(Op::Clear).await.unwrap();
-
-        ops.send(Op::SubmitMessage {
-            id: TaskId(2),
-            text: "second".to_owned(),
-        })
-        .await
-        .unwrap();
-        drain_until_task_done(&mut events).await;
-
-        assert!(store.get_thread(2).await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -2754,7 +1283,7 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(output.as_deref(), Some(super::SHELL_INTERRUPTED));
+        assert_eq!(output.as_deref(), Some(crate::turn::SHELL_INTERRUPTED));
     }
 
     #[tokio::test]
@@ -2797,5 +1326,48 @@ mod tests {
             }
         }
         panic!("expected ConversationRestored");
+    }
+
+    async fn drain_until_task_done(events: &mut mpsc::Receiver<Event>) {
+        while let Some(event) = events.recv().await {
+            if matches!(event, Event::TaskDone { .. }) {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_starts_new_thread() {
+        let provider = MockProvider {
+            id: "mock".to_owned(),
+            reply: "ok".to_owned(),
+            delay_ms: 0,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-clear.json"));
+        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "first".to_owned(),
+        })
+        .await
+        .unwrap();
+        drain_until_task_done(&mut events).await;
+
+        ops.send(Op::Clear).await.unwrap();
+
+        ops.send(Op::SubmitMessage {
+            id: TaskId(2),
+            text: "second".to_owned(),
+        })
+        .await
+        .unwrap();
+        drain_until_task_done(&mut events).await;
+
+        assert!(store.get_thread(2).await.unwrap().is_some());
     }
 }

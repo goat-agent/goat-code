@@ -17,6 +17,7 @@ goat-store = { workspace = true }
 goat-config = { workspace = true }
 goat-tool = { workspace = true }
 goat-tools = { workspace = true }
+rand = { workspace = true }
 goat-tool-computer = { workspace = true }
 goat-tool-browser = { workspace = true }
 goat-skill = { workspace = true }
@@ -29,6 +30,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

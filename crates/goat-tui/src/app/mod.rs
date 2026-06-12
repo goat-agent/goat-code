@@ -61,7 +61,6 @@ pub(crate) enum Overlay {
 const TICK: Duration = Duration::from_millis(120);
 const QUIT_ARM_TICKS: u16 = 25;
 const CLEAR_ARM_TICKS: u16 = 25;
-const DENY_ARM_TICKS: u16 = 25;
 
 pub(crate) enum AppEvent {
     Input(CtEvent),
@@ -83,7 +82,7 @@ pub struct App {
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
     pub(crate) clear_arm: Option<u16>,
-    pub(crate) deny_arm: Option<u16>,
+    pub(crate) queued: Vec<(TaskId, String)>,
     pub(crate) thinking: bool,
     pub(crate) should_quit: bool,
     pub(crate) dirty: bool,
@@ -108,6 +107,19 @@ pub struct App {
     pub(crate) usage_total: HashMap<(String, String), (u64, u64)>,
     pub(crate) rate_limits: HashMap<(String, String), (RateLimitSnapshot, i64)>,
     pub(crate) context_window: Option<u32>,
+    pub(crate) compaction_threshold: Option<u32>,
+    pub(crate) retry: Option<RetryState>,
+    pub(crate) compacting: bool,
+    pub(crate) turn_tokens: u64,
+    pub(crate) focused: bool,
+    pub(crate) bell_pending: bool,
+}
+
+pub(crate) struct RetryState {
+    pub(crate) attempt: u32,
+    pub(crate) max_attempts: u32,
+    pub(crate) reason: String,
+    pub(crate) until: std::time::Instant,
 }
 
 impl App {
@@ -129,7 +141,7 @@ impl App {
             spinner: 0,
             quit_arm: None,
             clear_arm: None,
-            deny_arm: None,
+            queued: Vec::new(),
             thinking: false,
             should_quit: false,
             dirty: true,
@@ -154,6 +166,12 @@ impl App {
             usage_total: HashMap::new(),
             rate_limits: HashMap::new(),
             context_window: None,
+            compaction_threshold: None,
+            retry: None,
+            compacting: false,
+            turn_tokens: 0,
+            focused: true,
+            bell_pending: false,
         }
     }
 
@@ -175,13 +193,6 @@ impl App {
                     *ticks = ticks.saturating_sub(1);
                     if *ticks == 0 {
                         self.clear_arm = None;
-                        self.dirty = true;
-                    }
-                }
-                if let Some(ticks) = &mut self.deny_arm {
-                    *ticks = ticks.saturating_sub(1);
-                    if *ticks == 0 {
-                        self.deny_arm = None;
                         self.dirty = true;
                     }
                 }
@@ -235,6 +246,14 @@ impl App {
                         _ => {}
                     }
                 }
+                Vec::new()
+            }
+            AppEvent::Input(CtEvent::FocusGained) => {
+                self.focused = true;
+                Vec::new()
+            }
+            AppEvent::Input(CtEvent::FocusLost) => {
+                self.focused = false;
                 Vec::new()
             }
             AppEvent::Input(_) => Vec::new(),
@@ -339,6 +358,10 @@ impl App {
             CommandEffect::RenameConversation(title) => vec![Op::RenameThread { title }],
             CommandEffect::ClearConversation => {
                 if self.active.is_some() {
+                    self.push_toast(
+                        NotifyKind::Info,
+                        "finish the current task before clearing".to_owned(),
+                    );
                     return Vec::new();
                 }
                 self.transcript.clear();
@@ -347,6 +370,17 @@ impl App {
                 self.scroll = 0;
                 self.follow = true;
                 vec![Op::Clear]
+            }
+            CommandEffect::CompactConversation(instructions) => {
+                let id = TaskId(self.next_task);
+                self.next_task += 1;
+                if self.active.is_some() {
+                    self.push_toast(
+                        NotifyKind::Info,
+                        "will compact after the current task".to_owned(),
+                    );
+                }
+                vec![Op::Compact { id, instructions }]
             }
             CommandEffect::Submit(text) => self.submit_text(text),
             CommandEffect::Notice(message) => {
@@ -431,18 +465,18 @@ impl App {
     }
 
     pub(crate) fn submit(&mut self) -> Vec<Op> {
-        if self.active.is_some() {
-            if !self.composer.is_empty() {
-                self.deny_arm = Some(DENY_ARM_TICKS);
-                self.dirty = true;
-            }
-            return Vec::new();
-        }
         if self.composer.is_empty() {
             return Vec::new();
         }
         if self.composer.shell() {
             if self.composer.text().trim().is_empty() {
+                return Vec::new();
+            }
+            if self.active.is_some() {
+                self.push_toast(
+                    NotifyKind::Info,
+                    "finish or interrupt the task before running a shell command".to_owned(),
+                );
                 return Vec::new();
             }
             let command = self.composer.take();
@@ -471,16 +505,48 @@ impl App {
     }
 
     pub(crate) fn submit_text(&mut self, text: String) -> Vec<Op> {
-        if self.active.is_some() {
-            return Vec::new();
-        }
         let id = TaskId(self.next_task);
         self.next_task += 1;
+        self.follow = true;
+        self.dirty = true;
+        if self.active.is_some() {
+            self.queued.push((id, text.clone()));
+            return vec![Op::SubmitMessage { id, text }];
+        }
         self.active = Some(id);
         self.reset_agents();
         self.transcript.push_user(text.clone());
-        self.follow = true;
         vec![Op::SubmitMessage { id, text }]
+    }
+
+    pub(crate) fn queued_labels(&self) -> Vec<String> {
+        if !matches!(self.main_view, MainView::Live) {
+            return Vec::new();
+        }
+        self.queued
+            .iter()
+            .map(|(_, text)| {
+                text.lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    pub(crate) fn restore_queued_to_composer(&mut self) {
+        if self.queued.is_empty() {
+            return;
+        }
+        let restored: Vec<String> = self.queued.drain(..).map(|(_, text)| text).collect();
+        let draft = self.composer.text();
+        self.composer.clear();
+        self.composer.insert_str(&restored.join("\n"));
+        if !draft.trim().is_empty() {
+            self.composer.insert_str("\n");
+            self.composer.insert_str(&draft);
+        }
+        self.dirty = true;
     }
 
     pub(crate) fn current_efforts(&self) -> Vec<Effort> {
@@ -608,9 +674,6 @@ impl App {
     pub(crate) fn clear_armed(&self) -> bool {
         self.clear_arm.is_some()
     }
-    pub(crate) fn deny_armed(&self) -> bool {
-        self.deny_arm.is_some()
-    }
 
     pub(crate) fn push_toast(&mut self, kind: NotifyKind, message: String) {
         self.toasts.push(crate::toast::Toast::new(kind, message));
@@ -633,9 +696,38 @@ impl App {
         }
         self.is_busy().then(|| crate::transcript::Working {
             elapsed: self.elapsed_secs(),
-            label: self.agent_status(),
+            label: self
+                .retry_status()
+                .or_else(|| self.compacting_status())
+                .or_else(|| self.agent_status()),
             thinking: self.thinking,
+            tokens: (self.turn_tokens > 0).then_some(self.turn_tokens),
         })
+    }
+
+    pub(crate) fn take_bell(&mut self) -> bool {
+        std::mem::take(&mut self.bell_pending)
+    }
+
+    pub(crate) fn compacting_status(&self) -> Option<String> {
+        self.compacting
+            .then(|| format!("compacting context{}", symbols::ui::ELLIPSIS))
+    }
+
+    pub(crate) fn retry_status(&self) -> Option<String> {
+        let retry = self.retry.as_ref()?;
+        let remaining = retry
+            .until
+            .saturating_duration_since(std::time::Instant::now())
+            .as_millis()
+            .div_ceil(1000);
+        Some(format!(
+            "retrying in {remaining}s{sep}attempt {attempt}/{max}{sep}{reason}{sep}response will restart",
+            sep = symbols::ui::SEPARATOR,
+            attempt = retry.attempt,
+            max = retry.max_attempts,
+            reason = retry.reason,
+        ))
     }
 
     pub(crate) fn content_height(&self, width: u16) -> usize {
@@ -644,6 +736,7 @@ impl App {
             self.theme,
             &self.highlighter,
             self.working_state().as_ref(),
+            &self.queued_labels(),
         )
     }
     pub(crate) fn scroll(&self) -> usize {
@@ -816,6 +909,12 @@ async fn event_loop(
             }
         }
 
+        if app.take_bell() {
+            use std::io::Write as _;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x07");
+            let _ = out.flush();
+        }
         if app.take_dirty() {
             terminal.draw(|frame| view::render(frame, &mut app))?;
         }
@@ -1042,8 +1141,12 @@ mod tests {
         app.composer.insert_str("echo hi");
         let ops = app.submit();
         assert!(ops.is_empty());
-        assert!(app.deny_arm.is_some());
+        assert!(
+            !app.toasts.is_empty(),
+            "denied shell submit must explain itself"
+        );
         assert!(app.composer.shell());
+        assert_eq!(app.composer.text(), "echo hi");
     }
 
     #[test]
@@ -1450,6 +1553,8 @@ mod tests {
                 account: "default".to_owned(),
                 effort: Some(goat_protocol::Effort::High),
             },
+            context_tokens: None,
+            compaction_threshold: None,
             entries: vec![
                 TranscriptEntry::User("hello".to_owned()),
                 TranscriptEntry::Assistant("hi there".to_owned()),

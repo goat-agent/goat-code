@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use eventsource_stream::Eventsource;
+mod error;
 use futures::StreamExt;
 use goat_auth::{
     Credential, CredentialKey, CredentialStore, Pkce, TokenSet, ensure_valid, random_state,
@@ -40,7 +41,19 @@ pub enum AnthropicAuthError {
     Auth(#[from] goat_auth::AuthError),
 }
 
-const ANTHROPIC_CONTEXT_WINDOW: u32 = 200_000;
+fn anthropic_context_window(model: &str) -> u32 {
+    let id = model.to_ascii_lowercase();
+    if id.contains("fable")
+        || id.contains("opus-4-8")
+        || id.contains("opus-4-7")
+        || id.contains("opus-4-6")
+        || id.contains("sonnet-4-6")
+    {
+        1_000_000
+    } else {
+        200_000
+    }
+}
 
 const CATALOG: &[&str] = &[
     "claude-opus-4-8",
@@ -223,7 +236,64 @@ fn build_system(system: &str, oauth: bool) -> Option<serde_json::Value> {
     } else if system.is_empty() {
         None
     } else {
-        Some(serde_json::Value::String(system.to_owned()))
+        Some(serde_json::Value::Array(vec![json!({
+            "type": "text",
+            "text": system,
+        })]))
+    }
+}
+
+fn cache_marker() -> serde_json::Value {
+    json!({ "type": "ephemeral" })
+}
+
+fn mark_last_cacheable_block(message: &mut serde_json::Value) -> bool {
+    let Some(blocks) = message
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    for block in blocks.iter_mut().rev() {
+        let kind = block
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if kind == "thinking" || kind == "redacted_thinking" {
+            continue;
+        }
+        if let Some(object) = block.as_object_mut() {
+            object.insert("cache_control".to_owned(), cache_marker());
+            return true;
+        }
+    }
+    false
+}
+
+fn apply_cache_control(
+    system: &mut Option<serde_json::Value>,
+    messages: &mut [serde_json::Value],
+    tools: &mut [serde_json::Value],
+) {
+    if let Some(tool) = tools.last_mut()
+        && let Some(object) = tool.as_object_mut()
+    {
+        object.insert("cache_control".to_owned(), cache_marker());
+    }
+    if let Some(serde_json::Value::Array(blocks)) = system
+        && let Some(last) = blocks.last_mut()
+        && let Some(object) = last.as_object_mut()
+    {
+        object.insert("cache_control".to_owned(), cache_marker());
+    }
+    let mut marked = 0;
+    for message in messages.iter_mut().rev() {
+        if marked == 2 {
+            break;
+        }
+        if mark_last_cacheable_block(message) {
+            marked += 1;
+        }
     }
 }
 
@@ -237,6 +307,8 @@ struct MessagesRequest<'a> {
     messages: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -492,6 +564,12 @@ struct MessageDeltaUsage {
 #[derive(Deserialize)]
 struct MessageDelta {
     usage: Option<MessageDeltaUsage>,
+    delta: Option<MessageDeltaBody>,
+}
+
+#[derive(Deserialize)]
+struct MessageDeltaBody {
+    stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -593,6 +671,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
     let mut stream = response.bytes_stream().eventsource();
     let mut tool_calls: HashMap<u32, (String, String, String)> = HashMap::new();
     let mut usage = Usage::default();
+    let mut window_exceeded = false;
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => match event.event.as_str() {
@@ -607,10 +686,17 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
                     }
                 }
                 "message_delta" => {
-                    if let Ok(delta) = serde_json::from_str::<MessageDelta>(&event.data)
-                        && let Some(u) = delta.usage
-                    {
-                        usage.output_tokens = u.output_tokens;
+                    if let Ok(delta) = serde_json::from_str::<MessageDelta>(&event.data) {
+                        if let Some(u) = delta.usage {
+                            usage.output_tokens = u.output_tokens;
+                        }
+                        if delta
+                            .delta
+                            .and_then(|body| body.stop_reason)
+                            .is_some_and(|reason| reason == "model_context_window_exceeded")
+                        {
+                            window_exceeded = true;
+                        }
                     }
                 }
                 "content_block_start" => {
@@ -678,12 +764,22 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
                 }
                 "message_stop" => {
                     let _ = events.send(StreamEvent::Usage { usage }).await;
+                    if window_exceeded {
+                        let _ = events
+                            .send(StreamEvent::Failed {
+                                error: goat_provider::StreamError::context_overflow(
+                                    "model context window exceeded mid-stream",
+                                ),
+                            })
+                            .await;
+                        return;
+                    }
                     break;
                 }
                 "error" => {
                     let _ = events
                         .send(StreamEvent::Failed {
-                            message: event.data,
+                            error: error::classify_sse_error(&event.data),
                         })
                         .await;
                     return;
@@ -693,7 +789,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
             Err(err) => {
                 let _ = events
                     .send(StreamEvent::Failed {
-                        message: err.to_string(),
+                        error: goat_provider::StreamError::transport(err.to_string()),
                     })
                     .await;
                 return;
@@ -724,21 +820,25 @@ impl Provider for AnthropicProvider {
             let Some(auth) = current_auth(&store, &key).await else {
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: "not logged in to anthropic".to_owned(),
+                        error: goat_provider::StreamError::auth("not logged in to anthropic"),
                     })
                     .await;
                 return;
             };
-            let (system, messages, tools) = split_request(&req);
+            let (system, mut messages, mut tools) = split_request(&req);
             let cfg = thinking_config(&req.model, req.effort);
             let oauth = matches!(auth, Auth::OAuth(_));
+            let mut system_value = build_system(&system, oauth);
+            apply_cache_control(&mut system_value, &mut messages, &mut tools);
             let body = MessagesRequest {
                 model: &req.model,
                 max_tokens: cfg.max_tokens,
                 stream: true,
-                system: build_system(&system, oauth),
+                system: system_value,
                 messages,
                 tools,
+                tool_choice: matches!(req.tool_choice, goat_provider::ToolChoice::None)
+                    .then(|| json!({ "type": "none" })),
                 thinking: cfg.thinking,
                 output_config: cfg.output_config,
             };
@@ -759,7 +859,7 @@ impl Provider for AnthropicProvider {
                 Err(err) => {
                     let _ = tx
                         .send(StreamEvent::Failed {
-                            message: err.to_string(),
+                            error: error::transport(&err),
                         })
                         .await;
                     return;
@@ -767,10 +867,11 @@ impl Provider for AnthropicProvider {
             };
             if !resp.status().is_success() {
                 let status = resp.status();
+                let headers = resp.headers().clone();
                 let detail = resp.text().await.unwrap_or_default();
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: format!("{status}: {detail}"),
+                        error: error::classify_http(status, &headers, &detail),
                     })
                     .await;
                 return;
@@ -821,8 +922,8 @@ impl Provider for AnthropicProvider {
         })
     }
 
-    fn context_window(&self, _model: &str) -> Option<u32> {
-        Some(ANTHROPIC_CONTEXT_WINDOW)
+    fn context_window(&self, model: &str) -> Option<u32> {
+        Some(anthropic_context_window(model))
     }
 
     fn catalog(&self) -> &'static [&'static str] {
@@ -910,8 +1011,40 @@ mod tests {
         assert_eq!(blocks[0]["text"], super::CLAUDE_CODE_SYSTEM);
         assert_eq!(blocks[1]["text"], "be helpful");
         let plain = super::build_system("be helpful", false).unwrap();
-        assert_eq!(plain, serde_json::Value::String("be helpful".to_owned()));
+        assert_eq!(plain[0]["text"], "be helpful");
         assert!(super::build_system("", false).is_none());
+    }
+
+    #[test]
+    fn cache_control_marks_tools_system_and_last_two_messages() {
+        let mut system = super::build_system("be helpful", false);
+        let mut tools = vec![
+            serde_json::json!({ "name": "Read" }),
+            serde_json::json!({ "name": "Bash" }),
+        ];
+        let mut messages = vec![
+            serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "one" }] }),
+            serde_json::json!({ "role": "assistant", "content": [
+                { "type": "text", "text": "two" },
+                { "type": "thinking", "thinking": "t", "signature": "s" },
+            ] }),
+            serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "three" }] }),
+        ];
+        super::apply_cache_control(&mut system, &mut messages, &mut tools);
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+        let system = system.unwrap();
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        assert_eq!(
+            messages[1]["content"][0]["cache_control"]["type"], "ephemeral",
+            "thinking blocks must be skipped when marking"
+        );
+        assert!(messages[1]["content"][1].get("cache_control").is_none());
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
