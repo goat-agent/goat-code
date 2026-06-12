@@ -1,7 +1,9 @@
-use goat_protocol::{Event, ModelTarget, Op, TaskId};
-use goat_provider::{Message, MessageRole};
+use std::path::PathBuf;
+
+use goat_protocol::{Event, Mode, ModelTarget, Op, TaskId};
+use goat_provider::{Message, MessageRole, Provider, ToolDefinition};
 use goat_store::Store;
-use goat_tool::{ToolContext, ToolError};
+use goat_tool::{SandboxPolicy, ToolContext, ToolError};
 use goat_tools::ToolRegistry;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -15,12 +17,67 @@ use crate::{
         effort_string, ensure_thread, finalize_turn, init_db_turn, now_ms, persist_shell_message,
         thread_title,
     },
+    plan,
     prompt::build_system_prompt,
     rounds::{LoopOutcome, core_loop},
     shell,
     threads::resolve_thread_cwd,
-    tools_exec::build_tool_defs,
+    tools_exec::{TransitionTool, build_tool_defs},
 };
+
+fn top_regime(
+    ctx: &Ctx<'_>,
+    provider: &dyn Provider,
+    mode: Mode,
+) -> (Vec<ToolDefinition>, SandboxPolicy) {
+    match mode {
+        Mode::Normal => (
+            build_tool_defs(ctx, provider, None, true, TransitionTool::Enter),
+            SandboxPolicy::Full,
+        ),
+        Mode::Plan => {
+            let selection = plan::plan_selection(ctx.plan_shell);
+            (
+                build_tool_defs(
+                    ctx,
+                    provider,
+                    Some(&selection),
+                    true,
+                    TransitionTool::Propose,
+                ),
+                SandboxPolicy::ReadOnly { network: false },
+            )
+        }
+    }
+}
+
+async fn apply_set_mode(
+    ctx: &Ctx<'_>,
+    requested: Mode,
+    thread_id: Option<i64>,
+    mode: &mut Mode,
+    plan_path: &mut Option<PathBuf>,
+) {
+    *mode = requested;
+    if requested == Mode::Normal {
+        *plan_path = None;
+    }
+    if let Some(tid) = thread_id
+        && let Err(err) = ctx
+            .store
+            .update_thread_mode(tid, crate::mode_string(requested), now_ms())
+            .await
+    {
+        tracing::warn!(%err, "failed to persist thread mode");
+    }
+    let _ = ctx
+        .events
+        .send(Event::ModeChanged {
+            mode: requested,
+            plan_path: plan_path.as_ref().map(|path| path.display().to_string()),
+        })
+        .await;
+}
 
 const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
 pub(crate) const SHELL_INTERRUPTED: &str = "[interrupted]";
@@ -125,6 +182,8 @@ pub(crate) async fn handle_turn(
     conversation: &mut Conversation,
     tracker: &mut ContextTracker,
     thread_id: &mut Option<i64>,
+    mode: &mut Mode,
+    plan_path: &mut Option<PathBuf>,
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
     run_turn_chain(
@@ -136,6 +195,8 @@ pub(crate) async fn handle_turn(
         conversation,
         tracker,
         thread_id,
+        mode,
+        plan_path,
         ops,
     )
     .await
@@ -151,6 +212,8 @@ async fn run_turn_chain(
     conversation: &mut Conversation,
     tracker: &mut ContextTracker,
     thread_id: &mut Option<i64>,
+    mode: &mut Mode,
+    plan_path: &mut Option<PathBuf>,
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
     let mut next = Some((id, text, seed));
@@ -165,6 +228,8 @@ async fn run_turn_chain(
             conversation,
             tracker,
             thread_id,
+            mode,
+            plan_path,
             ops,
         )
         .await;
@@ -179,7 +244,18 @@ async fn run_turn_chain(
             }
         }
     }
-    drain_deferred(ctx, pending, target, conversation, tracker, thread_id, ops).await
+    drain_deferred(
+        ctx,
+        pending,
+        target,
+        conversation,
+        tracker,
+        thread_id,
+        mode,
+        plan_path,
+        ops,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -190,6 +266,8 @@ async fn drain_deferred(
     conversation: &mut Conversation,
     tracker: &mut ContextTracker,
     thread_id: &mut Option<i64>,
+    mode: &mut Mode,
+    plan_path: &mut Option<PathBuf>,
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
     for op in deferred {
@@ -203,6 +281,8 @@ async fn drain_deferred(
                     conversation,
                     tracker,
                     thread_id,
+                    mode,
+                    plan_path,
                     ops,
                 ))
                 .await
@@ -219,12 +299,17 @@ async fn drain_deferred(
                     conversation,
                     tracker,
                     thread_id,
+                    mode,
+                    plan_path,
                     ops,
                 ))
                 .await
                 {
                     return Flow::Shutdown;
                 }
+            }
+            Op::SetMode { mode: requested } => {
+                apply_set_mode(ctx, requested, *thread_id, mode, plan_path).await;
             }
             other => handle_idle_op(other, ctx.store, *thread_id, target, ctx.events).await,
         }
@@ -241,6 +326,8 @@ pub(crate) async fn handle_shell(
     conversation: &mut Conversation,
     tracker: &mut ContextTracker,
     thread_id: &mut Option<i64>,
+    mode: &mut Mode,
+    plan_path: &mut Option<PathBuf>,
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
     if ctx.events.send(Event::TaskStarted { id }).await.is_err() {
@@ -336,8 +423,18 @@ pub(crate) async fn handle_shell(
         })
         .await;
 
-    if let Flow::Shutdown =
-        drain_deferred(ctx, deferred, target, conversation, tracker, thread_id, ops).await
+    if let Flow::Shutdown = drain_deferred(
+        ctx,
+        deferred,
+        target,
+        conversation,
+        tracker,
+        thread_id,
+        mode,
+        plan_path,
+        ops,
+    )
+    .await
     {
         return Flow::Shutdown;
     }
@@ -357,6 +454,8 @@ pub(crate) async fn handle_shell(
             conversation,
             tracker,
             thread_id,
+            mode,
+            plan_path,
             ops,
         ))
         .await;
@@ -373,6 +472,8 @@ pub(crate) async fn handle_compact(
     conversation: &mut Conversation,
     tracker: &mut ContextTracker,
     thread_id: &mut Option<i64>,
+    mode: &mut Mode,
+    plan_path: &mut Option<PathBuf>,
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
     if conversation.is_empty() {
@@ -414,7 +515,7 @@ pub(crate) async fn handle_compact(
         return Flow::Shutdown;
     }
     let cwd = resolve_thread_cwd(ctx, *thread_id).await;
-    let tool_defs = build_tool_defs(ctx, provider.as_ref(), None, true);
+    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref(), *mode);
     let ids = crate::TurnIds {
         stored_thread: *thread_id,
         turn_db_id: None,
@@ -428,6 +529,10 @@ pub(crate) async fn handle_compact(
         tool_defs: &tool_defs,
         cwd: &cwd,
         allow_delegate: true,
+        mode: *mode,
+        plan_path: plan_path.clone(),
+        exec_policy,
+        transition: None,
     };
     let token = CancellationToken::new();
     let mut shutdown = false;
@@ -512,8 +617,18 @@ pub(crate) async fn handle_compact(
     if shutdown {
         return Flow::Shutdown;
     }
-    if let Flow::Shutdown =
-        drain_deferred(ctx, deferred, target, conversation, tracker, thread_id, ops).await
+    if let Flow::Shutdown = drain_deferred(
+        ctx,
+        deferred,
+        target,
+        conversation,
+        tracker,
+        thread_id,
+        mode,
+        plan_path,
+        ops,
+    )
+    .await
     {
         return Flow::Shutdown;
     }
@@ -533,6 +648,8 @@ pub(crate) async fn handle_compact(
             conversation,
             tracker,
             thread_id,
+            mode,
+            plan_path,
             ops,
         ))
         .await;
@@ -540,7 +657,7 @@ pub(crate) async fn handle_compact(
     Flow::Continue
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_one_turn(
     ctx: &Ctx<'_>,
     id: TaskId,
@@ -550,6 +667,8 @@ async fn run_one_turn(
     conversation: &mut Conversation,
     tracker: &mut ContextTracker,
     thread_id: &mut Option<i64>,
+    mode: &mut Mode,
+    plan_path: &mut Option<PathBuf>,
     ops: &mut mpsc::Receiver<Op>,
 ) -> (TurnFlow, Vec<Op>) {
     let Some(resolved) = target.clone() else {
@@ -571,16 +690,44 @@ async fn run_one_turn(
         return (TurnFlow::Idle, Vec::new());
     };
 
-    if conversation.is_empty() {
-        conversation.push(
-            Message::text(
-                MessageRole::System,
-                build_system_prompt(ctx.skills, ctx.instructions),
-            ),
-            None,
-        );
-    }
     let ids = init_db_turn(ctx, id, &text, &resolved, thread_id).await;
+    if mode.is_plan() && plan_path.is_none() {
+        *plan_path = plan::resolve_plan_path(ids.stored_thread, &text);
+        if let Some(tid) = ids.stored_thread
+            && let Err(err) = ctx
+                .store
+                .update_thread_mode(tid, crate::mode_string(Mode::Plan), now_ms())
+                .await
+        {
+            tracing::warn!(%err, "failed to persist thread mode");
+        }
+        if let Some(path) = plan_path.as_ref() {
+            let _ = ctx
+                .events
+                .send(Event::ModeChanged {
+                    mode: Mode::Plan,
+                    plan_path: Some(path.display().to_string()),
+                })
+                .await;
+        }
+    }
+    let system = {
+        let mut text = build_system_prompt(ctx.skills, ctx.instructions);
+        if mode.is_plan()
+            && let Some(path) = plan_path.as_ref()
+        {
+            text.push_str(&plan::plan_segment(
+                &path.display().to_string(),
+                ctx.plan_shell,
+            ));
+        }
+        text
+    };
+    if conversation.is_empty() {
+        conversation.push(Message::text(MessageRole::System, system), None);
+    } else if conversation.set_system(system) {
+        tracker.invalidate();
+    }
     conversation.push(
         Message::text(MessageRole::User, text.clone()),
         ids.user_message_db_id,
@@ -591,7 +738,8 @@ async fn run_one_turn(
     }
 
     let cwd = resolve_thread_cwd(ctx, ids.stored_thread).await;
-    let tool_defs = build_tool_defs(ctx, provider.as_ref(), None, true);
+    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref(), *mode);
+    let transition_cell: plan::TransitionCell = std::sync::Mutex::new(None);
     let steering: crate::SteeringQueue = std::sync::Mutex::new(seed);
     let run = Run::top(id, &ids, &steering);
     let env = crate::LoopEnv {
@@ -600,6 +748,10 @@ async fn run_one_turn(
         tool_defs: &tool_defs,
         cwd: &cwd,
         allow_delegate: true,
+        mode: *mode,
+        plan_path: plan_path.clone(),
+        exec_policy,
+        transition: Some(&transition_cell),
     };
     let token = CancellationToken::new();
     let mut shutdown = false;
@@ -616,6 +768,11 @@ async fn run_one_turn(
                     Some(Op::Answer { call, answers, .. }) => {
                         if let Some(tx) = ctx.asks.lock().await.remove(&call) {
                             let _ = tx.send(answers);
+                        }
+                    }
+                    Some(Op::ResolvePlan { call, decision, .. }) => {
+                        if let Some(tx) = ctx.plans.lock().await.remove(&call) {
+                            let _ = tx.send(decision);
                         }
                     }
                     Some(Op::SubmitMessage { id: msg_id, text: msg_text }) => {
@@ -656,7 +813,7 @@ async fn run_one_turn(
     };
 
     let turn_end = match outcome {
-        LoopOutcome::Completed => TurnEnd::Done,
+        LoopOutcome::Completed | LoopOutcome::Transitioned => TurnEnd::Done,
         LoopOutcome::Failed(message) => TurnEnd::Failed(message),
         LoopOutcome::Cancelled => {
             if shutdown {
@@ -672,11 +829,44 @@ async fn run_one_turn(
     }
 
     if matches!(turn_end, TurnEnd::Done) {
-        let leftover = std::mem::take(
+        let pending_transition = transition_cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let mut leftover = std::mem::take(
             &mut *steering
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
+        if let Some(transition) = pending_transition {
+            *mode = transition.mode;
+            if transition.mode == Mode::Normal {
+                // keep plan_path so the approved plan stays readable in normal mode
+            }
+            if let Some(tid) = ids.stored_thread
+                && let Err(err) = ctx
+                    .store
+                    .update_thread_mode(tid, crate::mode_string(transition.mode), now_ms())
+                    .await
+            {
+                tracing::warn!(%err, "failed to persist thread mode");
+            }
+            let _ = ctx
+                .events
+                .send(Event::ModeChanged {
+                    mode: transition.mode,
+                    plan_path: plan_path.as_ref().map(|path| path.display().to_string()),
+                })
+                .await;
+            let engine_id = TaskId(
+                ctx.engine_ids
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            );
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back((engine_id, transition.inject));
+            queue.append(&mut leftover);
+            return (TurnFlow::Done(queue), deferred);
+        }
         if !leftover.is_empty() {
             return (TurnFlow::Done(leftover), deferred);
         }

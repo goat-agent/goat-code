@@ -114,10 +114,19 @@ pub(crate) async fn handle_resume(
     conversation: &mut Conversation,
     tracker: &mut ContextTracker,
     thread_id: &mut Option<i64>,
+    mode: &mut goat_protocol::Mode,
+    plan_path: &mut Option<std::path::PathBuf>,
     events: &mpsc::Sender<Event>,
 ) {
     let Some(thread) = store.get_thread(tid).await.ok().flatten() else {
         return;
+    };
+    let restored_mode = crate::mode_from_string(thread.mode.as_deref());
+    *mode = restored_mode;
+    *plan_path = if restored_mode.is_plan() {
+        crate::plan::resolve_plan_path(Some(tid), "")
+    } else {
+        None
     };
     let new_target = ModelTarget {
         provider: thread.provider.clone(),
@@ -251,6 +260,7 @@ pub(crate) async fn handle_resume(
             entries,
             context_tokens,
             compaction_threshold: None,
+            mode: restored_mode,
         })
         .await;
 }

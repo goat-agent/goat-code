@@ -4,10 +4,18 @@ use std::{
 };
 
 use goat_protocol::Effort;
+use goat_tool::SandboxPolicy;
 
 pub enum ToolSelection {
     All,
     Only(Vec<String>),
+}
+
+pub(crate) fn tighter(session: &SandboxPolicy, spec: &SandboxPolicy) -> SandboxPolicy {
+    match (session, spec) {
+        (SandboxPolicy::Full, SandboxPolicy::Full) => SandboxPolicy::Full,
+        _ => SandboxPolicy::ReadOnly { network: false },
+    }
 }
 
 impl ToolSelection {
@@ -19,6 +27,18 @@ impl ToolSelection {
     }
 }
 
+pub(crate) fn intersect(spec: &ToolSelection, whitelist: &ToolSelection) -> ToolSelection {
+    match whitelist {
+        ToolSelection::All => ToolSelection::All,
+        ToolSelection::Only(list) => ToolSelection::Only(
+            list.iter()
+                .filter(|name| spec.allows(name))
+                .cloned()
+                .collect(),
+        ),
+    }
+}
+
 pub struct AgentSpec {
     pub name: String,
     pub description: String,
@@ -26,6 +46,7 @@ pub struct AgentSpec {
     pub model: Option<String>,
     pub effort: Option<Effort>,
     pub prompt: String,
+    pub exec_policy: SandboxPolicy,
 }
 
 pub struct AgentRegistry {
@@ -66,7 +87,9 @@ impl AgentRegistry {
     }
 }
 
-const EXPLORE_PROMPT: &str = "You are an exploration agent investigating a codebase to answer one specific question. You have read-only tools (Read, Grep, Glob) and cannot modify anything. Search broadly, read the relevant files, and trace how the pieces connect. Return a concise, well-structured report: the concrete answer, the key files and line references that support it, and any important caveats. Do not speculate beyond what you verified.";
+const EXPLORE_PROMPT: &str = "You are a fast, read-only exploration agent locating code and answering one specific question about a codebase. Search broadly with Grep and Glob, read the relevant excerpts, and trace how the pieces connect. Work quickly and prefer many parallel searches. Return a concise answer with the key files and line references (path:line) that support it, plus any important caveats. Do not review code quality or audit for issues — just find and report. Do not speculate beyond what you verified.";
+
+const ARCHITECT_PROMPT: &str = "You are a software architect designing an implementation approach. You are given a task, the findings from prior exploration, and optionally a perspective to weigh (for example simplicity, performance, or maintainability). You have read-only tools — you design, you do not modify. Study the relevant code, weigh the trade-offs, and produce a step-by-step implementation plan that follows existing patterns. End your response with a section listing the 3-5 files most critical to implementing the plan, each with a one-line reason.";
 
 const GENERAL_PROMPT: &str = "You are a general-purpose agent handling a delegated task end to end. Use the available tools to complete the task, verify the result, and return a concise summary of what you did and the outcome.";
 
@@ -74,23 +97,42 @@ fn builtin_agents() -> Vec<AgentSpec> {
     vec![
         AgentSpec {
             name: "explore".to_owned(),
-            description: "Read-only codebase exploration: searches and reads files to investigate a question and report findings without making changes. Launch several in parallel for independent areas.".to_owned(),
+            description: "Fast read-only agent for locating code and answering \"where/how\" questions: greps and reads files, runs read-only shell, and reports findings without making changes. Launch several in parallel for independent areas. Do not use it for code review or open-ended analysis.".to_owned(),
             tools: ToolSelection::Only(vec![
                 "Read".to_owned(),
                 "Grep".to_owned(),
                 "Glob".to_owned(),
+                "WebFetch".to_owned(),
+                "Bash".to_owned(),
             ]),
             model: None,
-            effort: None,
+            effort: Some(Effort::Low),
             prompt: EXPLORE_PROMPT.to_owned(),
+            exec_policy: SandboxPolicy::ReadOnly { network: false },
+        },
+        AgentSpec {
+            name: "architect".to_owned(),
+            description: "Read-only agent that designs an implementation approach from requirements and exploration findings, weighing trade-offs and returning a step-by-step plan plus the critical files. Give it the context it needs; pass a perspective to run several in parallel.".to_owned(),
+            tools: ToolSelection::Only(vec![
+                "Read".to_owned(),
+                "Grep".to_owned(),
+                "Glob".to_owned(),
+                "WebFetch".to_owned(),
+                "Bash".to_owned(),
+            ]),
+            model: None,
+            effort: Some(Effort::High),
+            prompt: ARCHITECT_PROMPT.to_owned(),
+            exec_policy: SandboxPolicy::ReadOnly { network: false },
         },
         AgentSpec {
             name: "general".to_owned(),
-            description: "General-purpose agent with full tools for a multi-step delegated task.".to_owned(),
+            description: "General-purpose agent with full tools for a multi-step task that needs both exploration and changes, or a search you are not confident will land in a few tries.".to_owned(),
             tools: ToolSelection::All,
             model: None,
             effort: None,
             prompt: GENERAL_PROMPT.to_owned(),
+            exec_policy: SandboxPolicy::Full,
         },
     ]
 }
@@ -187,6 +229,7 @@ fn parse(content: &str, stem: &str) -> Result<AgentSpec, &'static str> {
         model,
         effort,
         prompt,
+        exec_policy: SandboxPolicy::Full,
     })
 }
 
