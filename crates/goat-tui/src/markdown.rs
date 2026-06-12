@@ -1,268 +1,311 @@
-use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
-    style::Modifier,
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
 use crate::{highlight::Highlighter, symbols, theme::Theme};
 
-#[allow(clippy::too_many_lines)]
 pub fn render(md: &str, theme: Theme, hl: &dyn Highlighter) -> Vec<Line<'static>> {
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut current_spans: Vec<Span<'static>> = Vec::new();
-    let mut bold = false;
-    let mut italic = false;
-    let mut strikethrough = false;
-    let mut in_code_block = false;
-    let mut blockquote_depth: usize = 0;
-    let mut code_lang = String::new();
-    let mut code_buf = String::new();
-    let mut list_stack: Vec<Option<u64>> = Vec::new();
-    let mut list_item_index: Vec<u64> = Vec::new();
-    let mut link_url: Option<String> = None;
-    let mut link_text_start: usize = 0;
-    let mut col_alignments: Vec<Alignment> = Vec::new();
-    let mut table_headers: Vec<Vec<Span<'static>>> = Vec::new();
-    let mut table_rows: Vec<Vec<Vec<Span<'static>>>> = Vec::new();
-    let mut current_row: Vec<Vec<Span<'static>>> = Vec::new();
-    let mut current_cell: Vec<Span<'static>> = Vec::new();
-    let mut in_table = false;
-    let mut in_thead = false;
-    let mut col_idx: usize = 0;
-
+    let mut state = RenderState::new(theme, hl);
     for event in Parser::new_ext(md, opts) {
+        state.handle_event(event);
+    }
+    state.finish()
+}
+
+#[derive(Default, Clone, Copy)]
+struct Emphasis {
+    bold: bool,
+    italic: bool,
+    strikethrough: bool,
+}
+
+impl Emphasis {
+    fn style(self, theme: Theme) -> Style {
+        let mut style = theme.base();
+        if self.bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if self.italic {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if self.strikethrough {
+            style = style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        style
+    }
+}
+
+struct RenderState<'a> {
+    theme: Theme,
+    hl: &'a dyn Highlighter,
+    lines: Vec<Line<'static>>,
+    current_spans: Vec<Span<'static>>,
+    emphasis: Emphasis,
+    in_code_block: bool,
+    blockquote_depth: usize,
+    code_lang: String,
+    code_buf: String,
+    list_stack: Vec<Option<u64>>,
+    list_item_index: Vec<u64>,
+    link_url: Option<String>,
+    link_text_start: usize,
+    table_headers: Vec<Vec<Span<'static>>>,
+    table_rows: Vec<Vec<Vec<Span<'static>>>>,
+    current_row: Vec<Vec<Span<'static>>>,
+    current_cell: Vec<Span<'static>>,
+    in_table: bool,
+    in_thead: bool,
+    col_idx: usize,
+}
+
+impl<'a> RenderState<'a> {
+    fn new(theme: Theme, hl: &'a dyn Highlighter) -> Self {
+        Self {
+            theme,
+            hl,
+            lines: Vec::new(),
+            current_spans: Vec::new(),
+            emphasis: Emphasis::default(),
+            in_code_block: false,
+            blockquote_depth: 0,
+            code_lang: String::new(),
+            code_buf: String::new(),
+            list_stack: Vec::new(),
+            list_item_index: Vec::new(),
+            link_url: None,
+            link_text_start: 0,
+            table_headers: Vec::new(),
+            table_rows: Vec::new(),
+            current_row: Vec::new(),
+            current_cell: Vec::new(),
+            in_table: false,
+            in_thead: false,
+            col_idx: 0,
+        }
+    }
+
+    fn handle_event(&mut self, event: Event<'_>) {
         match event {
-            Event::Start(Tag::Strong) => bold = true,
-            Event::End(TagEnd::Strong) => bold = false,
-
-            Event::Start(Tag::Emphasis) => italic = true,
-            Event::End(TagEnd::Emphasis) => italic = false,
-
-            Event::Start(Tag::Strikethrough) => strikethrough = true,
-            Event::End(TagEnd::Strikethrough) => strikethrough = false,
-
-            Event::Start(Tag::Heading { .. }) => {
-                flush_line(&mut current_spans, &mut lines);
-            }
-            Event::End(TagEnd::Heading(level)) => {
-                flush_line(&mut current_spans, &mut lines);
-                let heading_style = heading_style(level, theme);
-                if let Some(last) = lines.last_mut() {
-                    let mut new_spans = Vec::new();
-                    for span in last.spans.drain(..) {
-                        new_spans.push(Span::styled(span.content, heading_style));
-                    }
-                    *last = Line::from(new_spans);
-                }
-                lines.push(Line::default());
-            }
-
-            Event::End(TagEnd::Paragraph) => {
-                if blockquote_depth > 0 {
-                    flush_line_blockquote(&mut current_spans, &mut lines, theme, blockquote_depth);
-                } else {
-                    flush_line(&mut current_spans, &mut lines);
-                    ensure_blank_gap(&mut lines);
-                }
-            }
-
+            Event::Start(Tag::Strong) => self.emphasis.bold = true,
+            Event::End(TagEnd::Strong) => self.emphasis.bold = false,
+            Event::Start(Tag::Emphasis) => self.emphasis.italic = true,
+            Event::End(TagEnd::Emphasis) => self.emphasis.italic = false,
+            Event::Start(Tag::Strikethrough) => self.emphasis.strikethrough = true,
+            Event::End(TagEnd::Strikethrough) => self.emphasis.strikethrough = false,
+            Event::Start(Tag::Heading { .. }) => self.flush(),
+            Event::End(TagEnd::Heading(level)) => self.handle_heading_end(level),
+            Event::End(TagEnd::Paragraph) => self.handle_paragraph_end(),
             Event::Start(Tag::BlockQuote(_)) => {
-                flush_line(&mut current_spans, &mut lines);
-                blockquote_depth += 1;
+                self.flush();
+                self.blockquote_depth += 1;
             }
-            Event::End(TagEnd::BlockQuote(_)) => {
-                blockquote_depth = blockquote_depth.saturating_sub(1);
-                if blockquote_depth == 0 {
-                    ensure_blank_gap(&mut lines);
-                }
-            }
-
+            Event::End(TagEnd::BlockQuote(_)) => self.handle_blockquote_end(),
             Event::Start(Tag::List(start)) => {
-                list_stack.push(start);
-                list_item_index.push(start.unwrap_or(1));
+                self.list_stack.push(start);
+                self.list_item_index.push(start.unwrap_or(1));
             }
-            Event::End(TagEnd::List(_)) => {
-                list_stack.pop();
-                list_item_index.pop();
-                if list_stack.is_empty() {
-                    ensure_blank_gap(&mut lines);
-                }
-            }
-            Event::Start(Tag::Item) => {
-                if blockquote_depth > 0 {
-                    flush_line_blockquote(&mut current_spans, &mut lines, theme, blockquote_depth);
-                } else {
-                    flush_line(&mut current_spans, &mut lines);
-                }
-                let bullet = next_bullet(&list_stack, &mut list_item_index);
-                current_spans.push(Span::styled(bullet, theme.base()));
-            }
-
-            Event::Start(Tag::CodeBlock(kind)) => {
-                in_code_block = true;
-                code_lang = match kind {
-                    pulldown_cmark::CodeBlockKind::Fenced(lang) => lang.to_string(),
-                    pulldown_cmark::CodeBlockKind::Indented => String::new(),
-                };
-                code_buf.clear();
-                flush_line(&mut current_spans, &mut lines);
-                ensure_blank_gap(&mut lines);
-            }
-            Event::End(TagEnd::CodeBlock) => {
-                in_code_block = false;
-                lines.extend(hl.highlight(&code_lang, code_buf.trim_end_matches('\n'), theme));
-                ensure_blank_gap(&mut lines);
-                code_lang.clear();
-            }
-
+            Event::End(TagEnd::List(_)) => self.handle_list_end(),
+            Event::Start(Tag::Item) => self.handle_item_start(),
+            Event::Start(Tag::CodeBlock(kind)) => self.handle_code_block_start(&kind),
+            Event::End(TagEnd::CodeBlock) => self.handle_code_block_end(),
             Event::Start(Tag::Link { dest_url, .. }) => {
-                link_url = Some(dest_url.to_string());
-                link_text_start = current_spans.len();
+                self.link_url = Some(dest_url.to_string());
+                self.link_text_start = self.current_spans.len();
             }
-            Event::End(TagEnd::Link) => {
-                if link_url.take().is_some() {
-                    for span in &mut current_spans[link_text_start..] {
-                        span.style = span.style.fg(theme.accent_color());
-                    }
-                }
-                link_text_start = 0;
-            }
-
-            Event::Start(Tag::Table(alignments)) => {
-                in_table = true;
-                col_alignments.clone_from(&alignments);
-                table_headers = vec![Vec::new(); col_alignments.len()];
-                table_rows.clear();
-                flush_line(&mut current_spans, &mut lines);
-            }
-            Event::End(TagEnd::Table) => {
-                in_table = false;
-                render_table(&table_headers, &table_rows, theme, &mut lines);
-                ensure_blank_gap(&mut lines);
-                table_headers.clear();
-                table_rows.clear();
-                col_alignments.clear();
-            }
-            Event::Start(Tag::TableHead) => {
-                in_thead = true;
-            }
-            Event::End(TagEnd::TableHead) => {
-                in_thead = false;
-            }
+            Event::End(TagEnd::Link) => self.handle_link_end(),
+            Event::Start(Tag::Table(alignments)) => self.handle_table_start(alignments.len()),
+            Event::End(TagEnd::Table) => self.handle_table_end(),
+            Event::Start(Tag::TableHead) => self.in_thead = true,
+            Event::End(TagEnd::TableHead) => self.in_thead = false,
             Event::Start(Tag::TableRow) => {
-                if !in_thead {
-                    current_row = Vec::new();
+                if !self.in_thead {
+                    self.current_row = Vec::new();
                 }
-                col_idx = 0;
+                self.col_idx = 0;
             }
-            Event::End(TagEnd::TableRow) if !in_thead => {
-                table_rows.push(current_row.clone());
-                current_row.clear();
+            Event::End(TagEnd::TableRow) if !self.in_thead => {
+                self.table_rows.push(std::mem::take(&mut self.current_row));
             }
-            Event::Start(Tag::TableCell) => {
-                current_cell = Vec::new();
-            }
-            Event::End(TagEnd::TableCell) => {
-                if in_thead {
-                    if col_idx < table_headers.len() {
-                        table_headers[col_idx].clone_from(&current_cell);
-                    }
-                } else {
-                    current_row.push(current_cell.clone());
-                }
-                current_cell.clear();
-                col_idx += 1;
-            }
-
+            Event::Start(Tag::TableCell) => self.current_cell = Vec::new(),
+            Event::End(TagEnd::TableCell) => self.handle_table_cell_end(),
             Event::Code(text) => {
-                let span = Span::styled(text.to_string(), theme.inline_code());
-                if in_table {
-                    current_cell.push(span);
-                } else {
-                    current_spans.push(span);
-                }
+                let span = Span::styled(text.to_string(), self.theme.inline_code());
+                self.push_span(span);
             }
-
-            Event::Text(text) => {
-                if in_code_block {
-                    code_buf.push_str(&text);
-                } else {
-                    let style = text_style(bold, italic, strikethrough, theme);
-                    let segments: Vec<&str> = text.split('\n').collect();
-                    for (i, segment) in segments.iter().enumerate() {
-                        if i > 0 {
-                            if blockquote_depth > 0 {
-                                flush_line_blockquote(
-                                    &mut current_spans,
-                                    &mut lines,
-                                    theme,
-                                    blockquote_depth,
-                                );
-                            } else {
-                                flush_line(&mut current_spans, &mut lines);
-                            }
-                        }
-                        if !segment.is_empty() {
-                            let span = Span::styled(segment.to_string(), style);
-                            if in_table {
-                                current_cell.push(span);
-                            } else {
-                                current_spans.push(span);
-                            }
-                        }
-                    }
-                }
-            }
-
-            Event::SoftBreak if !in_table => {
-                current_spans.push(Span::raw(" "));
-            }
-
-            Event::End(TagEnd::Item) | Event::HardBreak => {
-                if blockquote_depth > 0 {
-                    flush_line_blockquote(&mut current_spans, &mut lines, theme, blockquote_depth);
-                } else {
-                    flush_line(&mut current_spans, &mut lines);
-                }
-            }
-
-            Event::Rule => {
-                flush_line(&mut current_spans, &mut lines);
-                lines.push(Line::from(Span::styled(symbols::ui::RULE, theme.muted())));
-                lines.push(Line::default());
-            }
-
+            Event::Text(text) => self.handle_text(&text),
+            Event::SoftBreak if !self.in_table => self.current_spans.push(Span::raw(" ")),
+            Event::End(TagEnd::Item) | Event::HardBreak => self.flush_quote_or_line(),
+            Event::Rule => self.handle_rule(),
             _ => {}
         }
     }
 
-    flush_line(&mut current_spans, &mut lines);
-
-    while lines.last().is_some_and(|l: &Line| l.spans.is_empty()) {
-        lines.pop();
+    fn flush(&mut self) {
+        flush_line(&mut self.current_spans, &mut self.lines);
     }
 
-    lines
-}
+    fn flush_quote_or_line(&mut self) {
+        if self.blockquote_depth > 0 {
+            flush_line_blockquote(
+                &mut self.current_spans,
+                &mut self.lines,
+                self.theme,
+                self.blockquote_depth,
+            );
+        } else {
+            flush_line(&mut self.current_spans, &mut self.lines);
+        }
+    }
 
-fn text_style(
-    bold: bool,
-    italic: bool,
-    strikethrough: bool,
-    theme: Theme,
-) -> ratatui::style::Style {
-    let mut style = theme.base();
-    if bold {
-        style = style.add_modifier(Modifier::BOLD);
+    fn push_span(&mut self, span: Span<'static>) {
+        if self.in_table {
+            self.current_cell.push(span);
+        } else {
+            self.current_spans.push(span);
+        }
     }
-    if italic {
-        style = style.add_modifier(Modifier::ITALIC);
+
+    fn handle_heading_end(&mut self, level: HeadingLevel) {
+        self.flush();
+        let style = heading_style(level, self.theme);
+        if let Some(last) = self.lines.last_mut() {
+            let mut new_spans = Vec::new();
+            for span in last.spans.drain(..) {
+                new_spans.push(Span::styled(span.content, style));
+            }
+            *last = Line::from(new_spans);
+        }
+        self.lines.push(Line::default());
     }
-    if strikethrough {
-        style = style.add_modifier(Modifier::CROSSED_OUT);
+
+    fn handle_paragraph_end(&mut self) {
+        self.flush_quote_or_line();
+        if self.blockquote_depth == 0 {
+            ensure_blank_gap(&mut self.lines);
+        }
     }
-    style
+
+    fn handle_blockquote_end(&mut self) {
+        self.blockquote_depth = self.blockquote_depth.saturating_sub(1);
+        if self.blockquote_depth == 0 {
+            ensure_blank_gap(&mut self.lines);
+        }
+    }
+
+    fn handle_list_end(&mut self) {
+        self.list_stack.pop();
+        self.list_item_index.pop();
+        if self.list_stack.is_empty() {
+            ensure_blank_gap(&mut self.lines);
+        }
+    }
+
+    fn handle_item_start(&mut self) {
+        self.flush_quote_or_line();
+        let bullet = next_bullet(&self.list_stack, &mut self.list_item_index);
+        self.current_spans
+            .push(Span::styled(bullet, self.theme.base()));
+    }
+
+    fn handle_code_block_start(&mut self, kind: &CodeBlockKind<'_>) {
+        self.in_code_block = true;
+        self.code_lang = match kind {
+            CodeBlockKind::Fenced(lang) => lang.to_string(),
+            CodeBlockKind::Indented => String::new(),
+        };
+        self.code_buf.clear();
+        self.flush();
+        ensure_blank_gap(&mut self.lines);
+    }
+
+    fn handle_code_block_end(&mut self) {
+        self.in_code_block = false;
+        let highlighted = self.hl.highlight(
+            &self.code_lang,
+            self.code_buf.trim_end_matches('\n'),
+            self.theme,
+        );
+        self.lines.extend(highlighted);
+        ensure_blank_gap(&mut self.lines);
+        self.code_lang.clear();
+    }
+
+    fn handle_link_end(&mut self) {
+        if self.link_url.take().is_some() {
+            for span in &mut self.current_spans[self.link_text_start..] {
+                span.style = span.style.fg(self.theme.accent_color());
+            }
+        }
+        self.link_text_start = 0;
+    }
+
+    fn handle_table_start(&mut self, cols: usize) {
+        self.in_table = true;
+        self.table_headers = vec![Vec::new(); cols];
+        self.table_rows.clear();
+        self.flush();
+    }
+
+    fn handle_table_end(&mut self) {
+        self.in_table = false;
+        render_table(
+            &self.table_headers,
+            &self.table_rows,
+            self.theme,
+            &mut self.lines,
+        );
+        ensure_blank_gap(&mut self.lines);
+        self.table_headers.clear();
+        self.table_rows.clear();
+    }
+
+    fn handle_table_cell_end(&mut self) {
+        if self.in_thead {
+            if self.col_idx < self.table_headers.len() {
+                self.table_headers[self.col_idx].clone_from(&self.current_cell);
+            }
+        } else {
+            self.current_row.push(self.current_cell.clone());
+        }
+        self.current_cell.clear();
+        self.col_idx += 1;
+    }
+
+    fn handle_text(&mut self, text: &str) {
+        if self.in_code_block {
+            self.code_buf.push_str(text);
+            return;
+        }
+        let style = self.emphasis.style(self.theme);
+        for (i, segment) in text.split('\n').enumerate() {
+            if i > 0 {
+                self.flush_quote_or_line();
+            }
+            if !segment.is_empty() {
+                self.push_span(Span::styled(segment.to_string(), style));
+            }
+        }
+    }
+
+    fn handle_rule(&mut self) {
+        self.flush();
+        self.lines.push(Line::from(Span::styled(
+            symbols::ui::RULE,
+            self.theme.muted(),
+        )));
+        self.lines.push(Line::default());
+    }
+
+    fn finish(mut self) -> Vec<Line<'static>> {
+        self.flush();
+        while self.lines.last().is_some_and(|l| l.spans.is_empty()) {
+            self.lines.pop();
+        }
+        self.lines
+    }
 }
 
 fn heading_style(level: HeadingLevel, theme: Theme) -> ratatui::style::Style {
@@ -279,12 +322,6 @@ fn flush_line(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
     }
 }
 
-fn ensure_blank_gap(lines: &mut Vec<Line<'static>>) {
-    if lines.last().is_some_and(|l| !l.spans.is_empty()) {
-        lines.push(Line::default());
-    }
-}
-
 fn flush_line_blockquote(
     spans: &mut Vec<Span<'static>>,
     lines: &mut Vec<Line<'static>>,
@@ -298,6 +335,12 @@ fn flush_line_blockquote(
     let mut row_spans = vec![Span::styled(gutter, theme.muted())];
     row_spans.extend(std::mem::take(spans));
     lines.push(Line::from(row_spans));
+}
+
+fn ensure_blank_gap(lines: &mut Vec<Line<'static>>) {
+    if lines.last().is_some_and(|l| !l.spans.is_empty()) {
+        lines.push(Line::default());
+    }
 }
 
 fn render_table(
@@ -414,17 +457,6 @@ mod tests {
     }
 
     #[test]
-    fn italic_text_has_italic_modifier() {
-        let lines = render_plain("*hello*");
-        let spans: Vec<_> = lines.iter().flat_map(|l| &l.spans).collect();
-        assert!(
-            spans
-                .iter()
-                .any(|s| s.style.add_modifier.contains(Modifier::ITALIC))
-        );
-    }
-
-    #[test]
     fn strikethrough_has_crossed_out() {
         let lines = render_plain("~~old~~");
         let spans: Vec<_> = lines.iter().flat_map(|l| &l.spans).collect();
@@ -449,28 +481,6 @@ mod tests {
     }
 
     #[test]
-    fn code_block_preceded_by_blank_line() {
-        let lines = render_plain("before\n```rust\nfn x() {}\n```");
-        let code_idx = lines
-            .iter()
-            .position(|l| l.spans.iter().any(|s| s.content.contains("fn x")))
-            .expect("code line");
-        assert!(lines[code_idx - 1].spans.is_empty());
-        assert!(!lines[code_idx - 2].spans.is_empty());
-    }
-
-    #[test]
-    fn list_followed_by_paragraph_has_gap() {
-        let lines = render_plain("- one\n- two\n\nafter");
-        let after_idx = lines
-            .iter()
-            .position(|l| l.spans.iter().any(|s| s.content.contains("after")))
-            .expect("after line");
-        assert!(lines[after_idx - 1].spans.is_empty());
-        assert!(!lines[after_idx - 2].spans.is_empty());
-    }
-
-    #[test]
     fn code_block_renders_content() {
         let lines = render_plain("```rust\nfn main() {}\n```");
         let text: String = lines
@@ -481,6 +491,17 @@ mod tests {
         assert!(text.contains("fn main() {}"));
         assert!(!text.contains('│'));
         assert!(!text.contains("rust"));
+    }
+
+    #[test]
+    fn code_block_preceded_by_blank_line() {
+        let lines = render_plain("before\n```rust\nfn x() {}\n```");
+        let code_idx = lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.contains("fn x")))
+            .expect("code line");
+        assert!(lines[code_idx - 1].spans.is_empty());
+        assert!(!lines[code_idx - 2].spans.is_empty());
     }
 
     #[test]
@@ -500,6 +521,17 @@ mod tests {
             .find(|s| s.content.as_ref() == "- ")
             .expect("bullet span");
         assert_eq!(bullet.style.fg, Some(theme.fg_color()));
+    }
+
+    #[test]
+    fn list_followed_by_paragraph_has_gap() {
+        let lines = render_plain("- one\n- two\n\nafter");
+        let after_idx = lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.contains("after")))
+            .expect("after line");
+        assert!(lines[after_idx - 1].spans.is_empty());
+        assert!(!lines[after_idx - 2].spans.is_empty());
     }
 
     #[test]
@@ -601,6 +633,17 @@ mod tests {
             .expect("link span");
         assert_eq!(link.style.fg, Some(theme.accent_color()));
         assert!(!link.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn italic_text_has_italic_modifier() {
+        let lines = render_plain("*hello*");
+        let spans: Vec<_> = lines.iter().flat_map(|l| &l.spans).collect();
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::ITALIC))
+        );
     }
 
     #[test]
