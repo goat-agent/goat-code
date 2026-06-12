@@ -584,20 +584,11 @@ fn shell_rows(command: &str, status: &ShellStatus, theme: Theme, width: u16) -> 
         ShellStatus::Running => (symbols::SPINNER[0], theme.accent()),
         ShellStatus::Done(_) => (symbols::ui::BANG, theme.shell()),
     };
-    let mut out: Vec<Line<'static>> = Vec::new();
-    let mut first = Some(Span::styled(marker, marker_style));
-    for line in &plain_lines(command, theme) {
-        for mut row in wrap::wrap_line(line, inner) {
-            match first.take() {
-                Some(span) => {
-                    row.spans.insert(0, Span::raw(" "));
-                    row.spans.insert(0, span);
-                }
-                None => row.spans.insert(0, Span::raw("  ")),
-            }
-            out.push(row);
-        }
-    }
+    let mut out = hang(
+        &plain_lines(command, theme),
+        Span::styled(format!("{marker} "), marker_style),
+        width,
+    );
 
     let ShellStatus::Done(output) = status else {
         return out;
