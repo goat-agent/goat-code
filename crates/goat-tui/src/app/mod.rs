@@ -72,7 +72,6 @@ pub(crate) struct PlanOverlay {
     pub(crate) path: String,
     pub(crate) scroll: u16,
     pub(crate) focus: PlanFocus,
-    pub(crate) esc_armed: bool,
     pub(crate) feedback: Option<String>,
 }
 
@@ -481,8 +480,7 @@ impl App {
             plan,
             path,
             scroll: 0,
-            focus: PlanFocus::Reject,
-            esc_armed: false,
+            focus: PlanFocus::Approve,
             feedback: None,
         });
         self.dirty = true;
@@ -1025,7 +1023,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use goat_protocol::{AccountChoice, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId};
 
-    use super::{App, Overlay};
+    use super::{App, Overlay, PlanFocus, PlanOverlay};
     use crate::theme::Theme;
 
     fn single_entry(provider: &str, model: &str) -> ModelEntry {
@@ -1090,7 +1088,13 @@ mod tests {
             plan: "do the thing".to_owned(),
             path: "/p.md".to_owned(),
         });
-        assert!(matches!(app.overlay, Overlay::Plan(_)));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                focus: PlanFocus::Approve,
+                ..
+            })
+        ));
         let ops = app.on_key(press(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(matches!(
             ops.as_slice(),
@@ -1122,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_overlay_esc_arms_then_dismisses() {
+    fn plan_overlay_esc_dismisses() {
         use goat_protocol::ToolCallId;
         let mut app = App::new(Theme::dark());
         app.active = Some(TaskId(7));
@@ -1133,11 +1137,117 @@ mod tests {
             path: "/p.md".to_owned(),
         });
         let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(ops.is_empty(), "first Esc only arms");
-        assert!(matches!(app.overlay, Overlay::Plan(_)));
-        let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(ops.as_slice(), [Op::Interrupt { .. }]));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn plan_feedback_esc_returns_to_choices() {
+        use goat_protocol::ToolCallId;
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::PlanProposed {
+            id: TaskId(7),
+            call: ToolCallId(3),
+            plan: "do the thing".to_owned(),
+            path: "/p.md".to_owned(),
+        });
+        app.on_key(press(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                feedback: Some(_),
+                ..
+            })
+        ));
+        let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(ops.is_empty());
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay { feedback: None, .. })
+        ));
+    }
+
+    #[test]
+    fn plan_choice_navigation_matches_picker() {
+        use goat_protocol::{PlanDecision, ToolCallId};
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::PlanProposed {
+            id: TaskId(7),
+            call: ToolCallId(3),
+            plan: "do the thing".to_owned(),
+            path: "/p.md".to_owned(),
+        });
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                focus: PlanFocus::Approve,
+                ..
+            })
+        ));
+        app.on_key(press(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                focus: PlanFocus::Reject,
+                ..
+            })
+        ));
+        app.on_key(press(KeyCode::Up, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                focus: PlanFocus::Approve,
+                ..
+            })
+        ));
+        app.on_key(press(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                focus: PlanFocus::Reject,
+                ..
+            })
+        ));
+        app.on_key(press(KeyCode::Up, KeyModifiers::NONE));
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            ops.as_slice(),
+            [Op::ResolvePlan {
+                decision: PlanDecision::Approve,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn plan_preview_scroll_uses_page_keys() {
+        use goat_protocol::ToolCallId;
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::PlanProposed {
+            id: TaskId(7),
+            call: ToolCallId(3),
+            plan: "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten".to_owned(),
+            path: "/p.md".to_owned(),
+        });
+        app.on_key(press(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                scroll: 0,
+                focus: PlanFocus::Reject,
+                ..
+            })
+        ));
+        app.on_key(press(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay { scroll: 10, .. })
+        ));
+        app.on_key(press(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay { scroll: 0, .. })
+        ));
     }
 
     #[test]

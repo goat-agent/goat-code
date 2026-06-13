@@ -46,11 +46,19 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    if let Overlay::Plan(plan) = app.overlay() {
-        let [header, body] =
-            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+    if let Overlay::Plan(_) = app.overlay() {
+        let panel_h = plan_desired_height(area.height);
+        let [header, transcript_area, _panel] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(panel_h),
+        ])
+        .areas(area);
         render_header(frame, header, app, theme);
-        render_plan_overlay(frame, body, plan, theme);
+        render_transcript(frame, transcript_area, app, theme);
+        if let Overlay::Plan(plan) = app.overlay() {
+            render_plan_overlay(frame, area, plan, theme);
+        }
         render_toasts(frame, area, app, theme);
         return;
     }
@@ -400,45 +408,119 @@ fn plan_badge(app: &App) -> Option<Span<'static>> {
     Some(Span::styled(label, theme.accent()))
 }
 
+fn plan_desired_height(area_height: u16) -> u16 {
+    let max = area_height.saturating_sub(3).max(9);
+    let preferred = area_height.div_ceil(2).max(9);
+    preferred.min(max)
+}
+
 fn render_plan_overlay(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme: Theme) {
-    let block = Block::bordered()
-        .title(format!(" Plan · {} ", plan.path))
-        .border_style(theme.accent())
-        .style(theme.base());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let [body, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let panel_h = plan_desired_height(area.height);
+    let [_, outer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(panel_h)]).areas(area);
+    let Some(inner) = overlay::overlay_frame(frame, outer, theme) else {
+        return;
+    };
+    let [title, _, preview, _, actions, hint] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    render_plan_title(frame, title, plan, theme);
+    render_plan_preview(frame, preview, plan, theme);
+    if let Some(feedback) = &plan.feedback {
+        render_plan_feedback(frame, actions, feedback, theme);
+        render_plan_feedback_hint(frame, hint, theme);
+    } else {
+        render_plan_choices(frame, actions, plan.focus, theme);
+        render_plan_choice_hint(frame, hint, theme);
+    }
+}
+
+fn render_plan_title(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme: Theme) {
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" Plan ready", theme.base()),
+            Span::styled(format!("  {}", plan.path), theme.muted()),
+        ])),
+        area,
+    );
+}
+
+fn render_plan_preview(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme: Theme) {
     let para = Paragraph::new(plan.plan.as_str())
         .wrap(Wrap { trim: false })
         .scroll((plan.scroll, 0))
         .style(theme.base());
-    frame.render_widget(para, body);
-
-    let footer_line = if let Some(feedback) = &plan.feedback {
-        Line::from(vec![
-            Span::styled("changes: ", theme.muted()),
-            Span::styled(feedback.clone(), theme.base()),
-            Span::styled("▌", theme.accent()),
-            Span::styled("   enter send · esc cancel", theme.muted()),
-        ])
-    } else {
-        Line::from(vec![
-            plan_button("approve", plan.focus == PlanFocus::Approve, theme),
-            Span::raw("  "),
-            plan_button("request changes", plan.focus == PlanFocus::Reject, theme),
-            Span::styled("   ↑↓ scroll · a/r · esc dismiss", theme.muted()),
-        ])
-    };
-    frame.render_widget(Paragraph::new(footer_line), footer);
+    frame.render_widget(para, area);
 }
 
-fn plan_button(label: &str, focused: bool, theme: Theme) -> Span<'static> {
-    let text = format!(" {label} ");
-    if focused {
-        Span::styled(text, theme.key())
-    } else {
-        Span::styled(text, theme.muted())
-    }
+fn render_plan_choices(frame: &mut Frame, area: Rect, focus: PlanFocus, theme: Theme) {
+    let width = usize::from(area.width);
+    let lines = vec![
+        overlay::selection_row(
+            theme,
+            focus == PlanFocus::Approve,
+            width,
+            vec![Span::styled("Approve plan", theme.base())],
+            Some(Span::styled("implement this plan", theme.muted())),
+        ),
+        overlay::selection_row(
+            theme,
+            focus == PlanFocus::Reject,
+            width,
+            vec![Span::styled("Request changes", theme.base())],
+            Some(Span::styled("send feedback", theme.muted())),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_plan_feedback(frame: &mut Frame, area: Rect, feedback: &str, theme: Theme) {
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" feedback: ", theme.muted()),
+            Span::styled(feedback.to_owned(), theme.base()),
+            Span::styled(symbols::ui::STREAM_CURSOR, theme.accent()),
+        ])),
+        area,
+    );
+    let col = 11 + UnicodeWidthStr::width(feedback);
+    let x = area.x + u16::try_from(col).unwrap_or(u16::MAX);
+    frame.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));
+}
+
+fn render_plan_choice_hint(frame: &mut Frame, area: Rect, theme: Theme) {
+    frame.render_widget(
+        Paragraph::new(overlay::hint_line(
+            &[
+                (symbols::key::ARROWS_UPDOWN, "choose"),
+                ("pgup/pgdn", "scroll"),
+                (symbols::key::ENTER, "select"),
+                (symbols::key::ESC, "dismiss"),
+            ],
+            theme,
+        )),
+        area,
+    );
+}
+
+fn render_plan_feedback_hint(frame: &mut Frame, area: Rect, theme: Theme) {
+    frame.render_widget(
+        Paragraph::new(overlay::hint_line(
+            &[
+                (symbols::key::ENTER, "send"),
+                (symbols::key::ESC, "back"),
+                ("pgup/pgdn", "scroll"),
+            ],
+            theme,
+        )),
+        area,
+    );
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
