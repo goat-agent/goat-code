@@ -19,6 +19,13 @@ impl CommandRegistry {
         self.skills = skills.to_vec();
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        self.builtins
+            .iter()
+            .any(|command| command.name() == name || command.aliases().contains(&name))
+            || self.skills.iter().any(|skill| skill.name == name)
+    }
+
     pub fn resolve(&self, name: &str, args: &str) -> CommandEffect {
         if let Some(command) = self
             .builtins
