@@ -1,4 +1,6 @@
-use goat_command::{Command, CommandEffect};
+use goat_command::{
+    Command, CommandEffect, CommandInvocation, CommandShape, ParameterSpec, ParameterValue,
+};
 
 pub struct Resume;
 
@@ -8,17 +10,26 @@ impl Command for Resume {
     }
 
     fn description(&self) -> &'static str {
-        "resume a past conversation (optional: /resume <n>)"
+        "resume a past conversation"
     }
 
-    fn run(&self, args: &str) -> CommandEffect {
-        let args = args.trim();
-        if args.is_empty() {
-            return CommandEffect::OpenThreadPicker;
-        }
-        match args.parse::<usize>() {
-            Ok(n) if n >= 1 => CommandEffect::ResumeIndex(n - 1),
-            _ => CommandEffect::Error("usage: /resume <n>".to_owned()),
+    fn shape(&self) -> CommandShape {
+        CommandShape::Parameters(vec![ParameterSpec {
+            name: "n".to_owned(),
+            description: "conversation number".to_owned(),
+            required: false,
+            value: ParameterValue::Integer,
+        }])
+    }
+
+    fn run(&self, invocation: CommandInvocation) -> CommandEffect {
+        if let Some(n) = invocation.integer("n") {
+            match usize::try_from(n) {
+                Ok(n) if n >= 1 => CommandEffect::ResumeIndex(n - 1),
+                _ => CommandEffect::Error("resume index must be at least 1".to_owned()),
+            }
+        } else {
+            CommandEffect::OpenThreadPicker
         }
     }
 }

@@ -1,4 +1,6 @@
-use goat_command::{Command, CommandEffect};
+use goat_command::{
+    Command, CommandEffect, CommandInvocation, CommandShape, ParameterSpec, ParameterValue,
+};
 
 pub struct Compact;
 
@@ -11,9 +13,16 @@ impl Command for Compact {
         "summarize the conversation to free context"
     }
 
-    fn run(&self, args: &str) -> CommandEffect {
-        let trimmed = args.trim();
-        let instructions = (!trimmed.is_empty()).then(|| trimmed.to_owned());
-        CommandEffect::CompactConversation(instructions)
+    fn shape(&self) -> CommandShape {
+        CommandShape::Parameters(vec![ParameterSpec {
+            name: "focus".to_owned(),
+            description: "optional summarization focus".to_owned(),
+            required: false,
+            value: ParameterValue::TextTail,
+        }])
+    }
+
+    fn run(&self, invocation: CommandInvocation) -> CommandEffect {
+        CommandEffect::CompactConversation(invocation.text("focus").map(str::to_owned))
     }
 }
