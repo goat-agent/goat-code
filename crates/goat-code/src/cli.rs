@@ -6,6 +6,9 @@ pub struct Cli {
     #[arg(long)]
     pub print_log_path: bool,
 
+    #[arg(long, short = 'w', value_name = "NAME")]
+    pub worktree: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -15,6 +18,8 @@ pub enum Command {
     Update,
     #[command(subcommand)]
     Auth(AuthCommand),
+    #[command(subcommand)]
+    Worktree(WorktreeCommand),
 }
 
 #[derive(Subcommand)]
@@ -35,4 +40,51 @@ pub enum AuthCommand {
         #[arg(long, short)]
         account: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum WorktreeCommand {
+    #[command(visible_alias = "ls")]
+    List,
+    #[command(visible_alias = "rm")]
+    Remove { label: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command, WorktreeCommand};
+
+    #[test]
+    fn parses_short_worktree_flag() {
+        let cli = Cli::try_parse_from(["goat", "-w", "plan"]).unwrap();
+        assert_eq!(cli.worktree.as_deref(), Some("plan"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parses_long_worktree_flag() {
+        let cli = Cli::try_parse_from(["goat", "--worktree", "plan"]).unwrap();
+        assert_eq!(cli.worktree.as_deref(), Some("plan"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parses_worktree_list() {
+        let cli = Cli::try_parse_from(["goat", "worktree", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Worktree(WorktreeCommand::List))
+        ));
+    }
+
+    #[test]
+    fn parses_worktree_remove() {
+        let cli = Cli::try_parse_from(["goat", "worktree", "remove", "plan"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Worktree(WorktreeCommand::Remove { label })) if label == "plan"
+        ));
+    }
 }

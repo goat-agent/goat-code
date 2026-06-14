@@ -2,8 +2,10 @@ mod auth;
 mod cli;
 mod logging;
 mod update;
+mod worktree;
 
 use clap::Parser;
+use color_eyre::eyre::eyre;
 
 use crate::cli::{Cli, Command};
 
@@ -12,6 +14,7 @@ async fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
 
     if cli.print_log_path {
+        reject_worktree(cli.worktree.as_ref())?;
         if let Some(dir) = goat_config::log_dir() {
             println!("{}", dir.display());
         }
@@ -19,13 +22,34 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     match cli.command {
-        Some(Command::Update) => update::run().await,
-        Some(Command::Auth(command)) => auth::run(command).await,
-        None => run_tui().await,
+        Some(Command::Update) => {
+            reject_worktree(cli.worktree.as_ref())?;
+            update::run().await
+        }
+        Some(Command::Auth(command)) => {
+            reject_worktree(cli.worktree.as_ref())?;
+            auth::run(command).await
+        }
+        Some(Command::Worktree(command)) => {
+            reject_worktree(cli.worktree.as_ref())?;
+            worktree::run(command).map_err(color_eyre::Report::from)
+        }
+        None => run_tui(cli.worktree).await,
     }
 }
 
-async fn run_tui() -> color_eyre::Result<()> {
+fn reject_worktree(worktree: Option<&String>) -> color_eyre::Result<()> {
+    if worktree.is_some() {
+        return Err(eyre!("--worktree can only be used when launching the TUI"));
+    }
+    Ok(())
+}
+
+async fn run_tui(worktree_label: Option<String>) -> color_eyre::Result<()> {
+    if let Some(label) = worktree_label.as_deref() {
+        worktree::enter(label)?;
+    }
+
     goat_tui::install_hooks()?;
     let _guard = logging::init();
 

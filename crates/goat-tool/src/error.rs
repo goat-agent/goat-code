@@ -11,6 +11,8 @@ pub enum ToolError {
     },
     #[error("path escapes the session directory: {path}")]
     PathEscape { path: String },
+    #[error("path is outside the active workspace: {path}")]
+    PathBlocked { path: String },
     #[error("writes are restricted to the plan file while planning: {path}")]
     WriteBlocked { path: String },
     #[error("file not found: {path}")]
