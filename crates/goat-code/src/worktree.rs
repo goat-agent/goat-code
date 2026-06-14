@@ -1031,10 +1031,8 @@ mod tests {
         let launch = prepare_from_cwd("plan", &repo).unwrap();
         assert!(launch.path.join(".env").exists());
         assert!(launch.path.join("config/app.local.json").exists());
-        assert_eq!(
-            fs::read_to_string(launch.path.join("README.md")).unwrap(),
-            "hello\n"
-        );
+        let readme = fs::read_to_string(launch.path.join("README.md")).unwrap();
+        assert_eq!(readme.replace("\r\n", "\n"), "hello\n");
     }
 
     #[test]
