@@ -9,7 +9,7 @@ use goat_auth::{
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
     ProviderId, RateLimitSnapshot, RateWindow, Request, SearchResult, StreamError, StreamEvent,
-    Usage,
+    Usage, WebSearchOutput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -860,7 +860,7 @@ impl Provider for AnthropicProvider {
         true
     }
 
-    fn web_search(&self, query: String) -> JoinHandle<Result<Vec<SearchResult>, StreamError>> {
+    fn web_search(&self, query: String) -> JoinHandle<Result<WebSearchOutput, StreamError>> {
         let client = self.client.clone();
         let url = format!("{}/messages", self.base_url);
         let store = self.store.clone();
@@ -898,7 +898,9 @@ impl Provider for AnthropicProvider {
                 .json()
                 .await
                 .map_err(|err| StreamError::other(format!("invalid search response: {err}")))?;
-            Ok(parse_web_search_results(&value))
+            Ok(WebSearchOutput::from_results(parse_web_search_results(
+                &value,
+            )))
         })
     }
 

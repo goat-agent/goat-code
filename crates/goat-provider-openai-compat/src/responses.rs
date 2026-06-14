@@ -5,7 +5,7 @@ use futures::StreamExt;
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
     ProviderId, RateLimitSnapshot, Request, SearchResult, StreamError, StreamEvent, ToolChoice,
-    ToolDefinition, Usage,
+    ToolDefinition, Usage, WebSearchOutput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -479,6 +479,23 @@ impl ResponsesProvider {
     }
 }
 
+fn build_web_search_body(
+    model: &str,
+    instructions: Option<&str>,
+    query: &str,
+) -> serde_json::Value {
+    let mut body = json!({
+        "model": model,
+        "input": [text_item("user", "input_text", query)],
+        "tools": [{ "type": "web_search" }],
+        "tool_choice": "auto",
+    });
+    if let Some(instructions) = instructions {
+        body["instructions"] = json!(instructions);
+    }
+    body
+}
+
 pub async fn run_web_search(
     client: &reqwest::Client,
     url: &str,
@@ -487,16 +504,8 @@ pub async fn run_web_search(
     model: &str,
     instructions: Option<&str>,
     query: &str,
-) -> Result<Vec<SearchResult>, StreamError> {
-    let mut body = json!({
-        "model": model,
-        "input": query,
-        "tools": [{ "type": "web_search" }],
-        "tool_choice": "auto",
-    });
-    if let Some(instructions) = instructions {
-        body["instructions"] = json!(instructions);
-    }
+) -> Result<WebSearchOutput, StreamError> {
+    let body = build_web_search_body(model, instructions, query);
     let mut builder = client.post(url).json(&body);
     if let Some(token) = bearer {
         builder = builder.bearer_auth(token);
@@ -518,7 +527,9 @@ pub async fn run_web_search(
         .json()
         .await
         .map_err(|err| StreamError::other(format!("invalid search response: {err}")))?;
-    Ok(parse_responses_citations(&value))
+    Ok(WebSearchOutput::from_results(parse_responses_citations(
+        &value,
+    )))
 }
 
 fn parse_responses_citations(value: &serde_json::Value) -> Vec<SearchResult> {
@@ -593,7 +604,7 @@ impl Provider for ResponsesProvider {
         self.search_model.is_some()
     }
 
-    fn web_search(&self, query: String) -> JoinHandle<Result<Vec<SearchResult>, StreamError>> {
+    fn web_search(&self, query: String) -> JoinHandle<Result<WebSearchOutput, StreamError>> {
         let client = self.client.clone();
         let url = format!("{}/responses", self.base_url);
         let bearer = self.bearer.clone();
@@ -663,10 +674,30 @@ impl Provider for ResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_body, parse_arguments_delta, parse_function_call_item, parse_item_id,
-        parse_output_delta, parse_responses_citations,
+        build_body, build_web_search_body, parse_arguments_delta, parse_function_call_item,
+        parse_item_id, parse_output_delta, parse_responses_citations,
     };
     use goat_provider::{ContentBlock, Message, MessageRole, ToolDefinition};
+
+    #[test]
+    fn web_search_body_uses_list_input() {
+        let body = build_web_search_body("gpt-search", Some("base"), "find this");
+        assert_eq!(body["model"], "gpt-search");
+        assert_eq!(body["instructions"], "base");
+        assert!(body["input"].is_array());
+        assert_eq!(body["input"][0]["type"], "message");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(body["input"][0]["content"][0]["text"], "find this");
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn web_search_body_omits_empty_instructions() {
+        let body = build_web_search_body("gpt-search", None, "find this");
+        assert!(body.get("instructions").is_none());
+    }
 
     #[test]
     fn extracts_url_citations() {

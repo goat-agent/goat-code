@@ -5,6 +5,7 @@ pub use goat_auth::{TokenSet, now_secs};
 pub use goat_protocol::{AuthMethod, Effort, RateLimitSnapshot, RateWindow, Usage};
 
 use std::fmt;
+use std::fmt::Write as _;
 
 fn deser_tool_result_content<'de, D>(d: D) -> Result<Vec<ContentBlock>, D::Error>
 where
@@ -173,6 +174,43 @@ pub struct SearchResult {
     pub snippet: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSearchOutput {
+    pub content: String,
+    pub results: Vec<SearchResult>,
+}
+
+impl WebSearchOutput {
+    #[must_use]
+    pub fn from_results(results: Vec<SearchResult>) -> Self {
+        Self {
+            content: format_search_results(&results),
+            results,
+        }
+    }
+}
+
+#[must_use]
+pub fn format_search_results(results: &[SearchResult]) -> String {
+    if results.is_empty() {
+        return "No results found.".to_owned();
+    }
+    let mut out = String::new();
+    for (index, result) in results.iter().enumerate() {
+        let title = if result.title.is_empty() {
+            &result.url
+        } else {
+            &result.title
+        };
+        let _ = write!(out, "{}. {title}\n   {}", index + 1, result.url);
+        if !result.snippet.is_empty() {
+            let _ = write!(out, " · {}", result.snippet);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StreamEvent {
     TextDelta {
@@ -298,7 +336,7 @@ pub trait Provider: Send + Sync + 'static {
         false
     }
 
-    fn web_search(&self, query: String) -> JoinHandle<Result<Vec<SearchResult>, StreamError>> {
+    fn web_search(&self, query: String) -> JoinHandle<Result<WebSearchOutput, StreamError>> {
         let _ = query;
         tokio::spawn(async { Err(StreamError::other("web search is not supported")) })
     }
