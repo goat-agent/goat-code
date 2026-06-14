@@ -748,6 +748,10 @@ impl App {
         self.composer.desired_height(available_width)
     }
 
+    pub(crate) fn plan_prompt_active(&self) -> bool {
+        self.mode == goat_protocol::Mode::Plan && !self.composer.shell()
+    }
+
     pub(crate) fn elapsed_secs(&self) -> Option<u64> {
         self.task_start.map(|t| t.elapsed().as_secs())
     }
