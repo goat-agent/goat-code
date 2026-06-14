@@ -89,7 +89,7 @@ fn remove_from_cwd(label: &str, cwd: &Path) -> Result<(), WorktreeError> {
     }
     git_output(
         &repo.owner_root,
-        &[os("worktree"), os("remove"), path.clone().into_os_string()],
+        &[os("worktree"), os("remove"), git_path(&path)],
     )?;
     if branch_exists(&repo.owner_root, &branch)? {
         git_output(&repo.owner_root, &[os("branch"), os("-D"), os(&branch)])?;
@@ -157,12 +157,7 @@ fn prepare_from_cwd(label: &str, cwd: &Path) -> Result<Launch, WorktreeError> {
         ExistingBase::Branch(existing) => {
             git_output(
                 &repo.owner_root,
-                &[
-                    os("worktree"),
-                    os("add"),
-                    path.clone().into_os_string(),
-                    os(existing),
-                ],
+                &[os("worktree"), os("add"), git_path(&path), os(existing)],
             )?;
         }
         ExistingBase::Ref(base_ref) => {
@@ -173,7 +168,7 @@ fn prepare_from_cwd(label: &str, cwd: &Path) -> Result<Launch, WorktreeError> {
                     os("add"),
                     os("-b"),
                     os(&branch),
-                    path.clone().into_os_string(),
+                    git_path(&path),
                     os(&base_ref.name),
                 ],
             )?;
@@ -773,6 +768,24 @@ fn format_command(args: &[OsString]) -> String {
 
 fn os(value: &str) -> OsString {
     OsString::from(value)
+}
+
+#[cfg(windows)]
+fn git_path(path: &Path) -> OsString {
+    let value = path.to_string_lossy();
+    let value = if let Some(stripped) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{stripped}")
+    } else if let Some(stripped) = value.strip_prefix(r"\\?\") {
+        stripped.to_owned()
+    } else {
+        value.into_owned()
+    };
+    value.replace('\\', "/").into()
+}
+
+#[cfg(not(windows))]
+fn git_path(path: &Path) -> OsString {
+    path.as_os_str().to_os_string()
 }
 
 #[derive(Debug, thiserror::Error)]
