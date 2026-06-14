@@ -98,6 +98,7 @@ mod tests {
             &[goat_protocol::SkillInfo {
                 name: "demo".to_owned(),
                 description: "does the demo".to_owned(),
+                command: None,
             }],
             Some("# Project instructions (repo/AGENTS.md)\n\nrule"),
         );
