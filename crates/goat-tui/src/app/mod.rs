@@ -578,7 +578,9 @@ impl App {
         }
         if trimmed.starts_with('/') {
             let cmd = trimmed.to_owned();
-            return self.dispatch_slash_command(&cmd);
+            if slash_command_name(&cmd).is_some_and(|name| self.commands.contains(name)) {
+                return self.dispatch_slash_command(&cmd);
+            }
         }
         self.submit_text(text)
     }
@@ -693,7 +695,10 @@ impl App {
         }
         let text = self.composer.text();
         let trimmed = text.trim_start();
-        if trimmed.starts_with('/') && !trimmed.contains(' ') {
+        if trimmed.starts_with('/')
+            && !trimmed.contains(' ')
+            && slash_command_name(trimmed).is_none_or(|name| !name.contains('/'))
+        {
             match &mut self.overlay {
                 Overlay::Commands(menu) => menu.update(&self.commands, trimmed),
                 _ => {
@@ -947,6 +952,12 @@ pub(crate) fn mode_label(mode: goat_protocol::Mode) -> &'static str {
         goat_protocol::Mode::Normal => "normal",
         goat_protocol::Mode::Plan => "plan",
     }
+}
+
+fn slash_command_name(raw: &str) -> Option<&str> {
+    let rest = raw.trim().strip_prefix('/')?;
+    let name = rest.split_whitespace().next().unwrap_or(rest);
+    (!name.is_empty()).then_some(name)
 }
 
 fn shorten_home(path: &Path) -> String {
@@ -1644,15 +1655,25 @@ mod tests {
     }
 
     #[test]
-    fn unknown_slash_command_shows_toast() {
+    fn unknown_slash_command_submits_as_message() {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("/bogus");
         let ops = app.submit();
-        assert!(ops.is_empty());
-        assert!(matches!(app.overlay, Overlay::None));
-        assert!(app.active.is_none());
-        assert!(app.transcript.items.is_empty());
-        assert_eq!(app.toasts.len(), 1);
+        assert!(matches!(ops.as_slice(), [Op::SubmitMessage { text, .. }] if text == "/bogus"));
+        assert!(app.active.is_some());
+        assert!(app.toasts.is_empty());
+    }
+
+    #[test]
+    fn absolute_path_starting_with_slash_submits_as_message() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("/var/folders/image.png");
+        let ops = app.submit();
+        assert!(
+            matches!(ops.as_slice(), [Op::SubmitMessage { text, .. }] if text == "/var/folders/image.png")
+        );
+        assert!(app.active.is_some());
+        assert!(app.toasts.is_empty());
     }
 
     #[test]
@@ -1682,13 +1703,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_skill_command_shows_toast() {
+    fn unknown_skill_command_submits_as_message() {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("/demo");
         let ops = app.submit();
-        assert!(ops.is_empty());
-        assert!(app.transcript.items.is_empty());
-        assert_eq!(app.toasts.len(), 1);
+        assert!(matches!(ops.as_slice(), [Op::SubmitMessage { text, .. }] if text == "/demo"));
+        assert!(app.active.is_some());
+        assert!(app.toasts.is_empty());
     }
 
     fn entry_with_efforts(
