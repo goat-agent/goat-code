@@ -7,9 +7,6 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[package.metadata.dist]
-dist = true
-
 [[bin]]
 name = "goat"
 path = "src/main.rs"
