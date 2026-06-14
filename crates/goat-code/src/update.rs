@@ -1,31 +1,319 @@
-use axoupdater::{AxoUpdater, AxoupdateError};
+use std::{
+    collections::HashMap,
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-pub async fn run() -> color_eyre::Result<()> {
-    let mut updater = AxoUpdater::new_for("goat");
+use color_eyre::eyre::{Context, eyre};
+use flate2::read::GzDecoder;
+use semver::Version;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
-    match updater.load_receipt() {
-        Ok(_) => {}
-        Err(AxoupdateError::NoReceipt { .. } | AxoupdateError::ReceiptLoadFailed { .. }) => {
-            println!(
-                "No install receipt found. To use self-update, install goat via the official installer:"
-            );
-            println!(
-                "  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/goat-agent/goat-code/releases/latest/download/goat-code-installer.sh | sh"
-            );
-            return Ok(());
-        }
-        Err(e) => return Err(color_eyre::eyre::eyre!("{e}")),
+const REPOSITORY: &str = "goat-agent/goat-code";
+const INSTALL_DIR: &str = "/usr/local/bin";
+const INSTALL_URL: &str = "https://raw.githubusercontent.com/goat-agent/goat-code/main/install.sh";
+
+#[derive(Debug, Deserialize)]
+struct Release {
+    tag_name: String,
+    assets: Vec<Asset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Asset {
+    name: String,
+    browser_download_url: String,
+}
+
+struct InstallPaths {
+    install_dir: PathBuf,
+    bin_path: PathBuf,
+    helper_path: PathBuf,
+}
+
+pub async fn run(force: bool) -> color_eyre::Result<()> {
+    let target = target_triple()?;
+    let current = Version::parse(env!("CARGO_PKG_VERSION"))?;
+    let client = reqwest::Client::builder()
+        .user_agent(format!("goat-code/{current}"))
+        .build()?;
+    let release = fetch_latest_release(&client).await?;
+    let latest = parse_tag(&release.tag_name)?;
+
+    if latest <= current && !force {
+        println!("Already up to date.");
+        return Ok(());
     }
 
-    match updater.run().await {
-        Ok(Some(result)) => {
-            println!("Updated to {}.", result.new_version);
-        }
-        Ok(None) => {
-            println!("Already up to date.");
-        }
-        Err(e) => return Err(color_eyre::eyre::eyre!("{e}")),
-    }
+    let archive_name = format!("goat-code-{target}.tar.gz");
+    let archive_url = asset_url(&release, &archive_name)?;
+    let checksums_url = asset_url(&release, "SHA256SUMS")?;
+    println!("Downloading goat {latest}...");
+    let archive = download(&client, archive_url).await?;
+    let checksums = String::from_utf8(download(&client, checksums_url).await?)?;
+    verify_checksum(&archive_name, &archive, &checksums)?;
 
+    let staged_dir = stage_dir(&latest, target)?;
+    reset_dir(&staged_dir)?;
+    extract_archive(&archive, &staged_dir)?;
+    require_file(&staged_dir.join(exe_name("goat")))?;
+    require_file(&staged_dir.join(exe_name("goat-update")))?;
+
+    let paths = install_paths()?;
+    println!("Installing goat {latest}...");
+    run_helper(&staged_dir, &paths, &latest)?;
     Ok(())
+}
+
+async fn fetch_latest_release(client: &reqwest::Client) -> color_eyre::Result<Release> {
+    let response = client
+        .get(format!(
+            "https://api.github.com/repos/{REPOSITORY}/releases/latest"
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(response.json().await?)
+}
+
+async fn download(client: &reqwest::Client, url: &str) -> color_eyre::Result<Vec<u8>> {
+    let response = client.get(url).send().await?.error_for_status()?;
+    Ok(response.bytes().await?.to_vec())
+}
+
+fn asset_url<'a>(release: &'a Release, name: &str) -> color_eyre::Result<&'a str> {
+    release
+        .assets
+        .iter()
+        .find(|asset| asset.name == name)
+        .map(|asset| asset.browser_download_url.as_str())
+        .ok_or_else(|| eyre!("release asset not found: {name}"))
+}
+
+fn parse_tag(tag: &str) -> color_eyre::Result<Version> {
+    Ok(Version::parse(tag.strip_prefix('v').unwrap_or(tag))?)
+}
+
+fn target_triple() -> color_eyre::Result<&'static str> {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Ok("x86_64-unknown-linux-gnu")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Ok("aarch64-unknown-linux-gnu")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Ok("x86_64-apple-darwin")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Ok("aarch64-apple-darwin")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Ok("x86_64-pc-windows-msvc")
+    } else {
+        Err(eyre!("unsupported update target"))
+    }
+}
+
+fn verify_checksum(name: &str, bytes: &[u8], checksums: &str) -> color_eyre::Result<()> {
+    let expected = parse_checksums(checksums)
+        .remove(name)
+        .ok_or_else(|| eyre!("checksum not found for {name}"))?;
+    let actual = hex_digest(bytes);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(eyre!("checksum mismatch for {name}"))
+    }
+}
+
+fn parse_checksums(raw: &str) -> HashMap<String, String> {
+    raw.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let hash = parts.next()?;
+            let name = parts.next()?.trim_start_matches('*');
+            Some((name.to_string(), hash.to_ascii_lowercase()))
+        })
+        .collect()
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn stage_dir(version: &Version, target: &str) -> color_eyre::Result<PathBuf> {
+    let base = goat_config::update_dir().ok_or_else(|| eyre!(goat_config::HOME_NOT_FOUND))?;
+    Ok(base.join(format!("{version}-{target}")))
+}
+
+fn reset_dir(path: &Path) -> color_eyre::Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path)?;
+    }
+    fs::create_dir_all(path)?;
+    Ok(())
+}
+
+fn extract_archive(bytes: &[u8], dest: &Path) -> color_eyre::Result<()> {
+    let decoder = GzDecoder::new(bytes);
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| eyre!("archive entry has no file name"))?;
+        let out = dest.join(file_name);
+        entry.unpack(out)?;
+    }
+    Ok(())
+}
+
+fn install_paths() -> color_eyre::Result<InstallPaths> {
+    if cfg!(windows) {
+        let current = std::env::current_exe()?;
+        let install_dir = current
+            .parent()
+            .ok_or_else(|| eyre!("could not resolve current executable directory"))?
+            .to_path_buf();
+        Ok(InstallPaths {
+            bin_path: install_dir.join(exe_name("goat")),
+            helper_path: install_dir.join(exe_name("goat-update")),
+            install_dir,
+        })
+    } else {
+        let current = std::env::current_exe()?;
+        if current.parent() != Some(Path::new(INSTALL_DIR)) {
+            println!("Reinstall goat with:");
+            println!("  curl -fsSL {INSTALL_URL} | sh");
+            return Err(eyre!("goat is not installed in {INSTALL_DIR}"));
+        }
+        let install_dir = PathBuf::from(INSTALL_DIR);
+        Ok(InstallPaths {
+            bin_path: install_dir.join("goat"),
+            helper_path: install_dir.join("goat-update"),
+            install_dir,
+        })
+    }
+}
+
+fn run_helper(
+    staged_dir: &Path,
+    paths: &InstallPaths,
+    version: &Version,
+) -> color_eyre::Result<()> {
+    let helper = staged_dir.join(exe_name("goat-update"));
+    let args = [
+        "apply".to_string(),
+        "--staged-dir".to_string(),
+        staged_dir.display().to_string(),
+        "--install-dir".to_string(),
+        paths.install_dir.display().to_string(),
+        "--bin-path".to_string(),
+        paths.bin_path.display().to_string(),
+        "--helper-path".to_string(),
+        paths.helper_path.display().to_string(),
+        "--version".to_string(),
+        version.to_string(),
+    ];
+
+    let mut command = if needs_sudo(&paths.install_dir) {
+        let mut command = Command::new("sudo");
+        command.arg(helper);
+        command
+    } else {
+        Command::new(helper)
+    };
+    command.args(args);
+
+    if cfg!(windows) {
+        command
+            .spawn()
+            .context("failed to start goat-update helper")?;
+        println!("Update helper started. goat will be replaced after this process exits.");
+        Ok(())
+    } else {
+        let status = command
+            .status()
+            .context("failed to run goat-update helper")?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(eyre!("goat-update failed"))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn needs_sudo(path: &Path) -> bool {
+    path == Path::new(INSTALL_DIR) && unsafe_not_root()
+}
+
+#[cfg(unix)]
+fn unsafe_not_root() -> bool {
+    match fs::File::open("/proc/self/status") {
+        Ok(mut file) => {
+            let mut raw = String::new();
+            if file.read_to_string(&mut raw).is_ok() {
+                raw.lines()
+                    .find_map(|line| line.strip_prefix("Uid:"))
+                    .and_then(|line| line.split_whitespace().next())
+                    .is_none_or(|uid| uid != "0")
+            } else {
+                true
+            }
+        }
+        Err(_) => std::env::var_os("USER").is_none_or(|user| user != "root"),
+    }
+}
+
+#[cfg(not(unix))]
+fn needs_sudo(_path: &Path) -> bool {
+    false
+}
+
+fn require_file(path: &Path) -> color_eyre::Result<()> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(eyre!("required file is missing: {}", path.display()))
+    }
+}
+
+fn exe_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hex_digest, parse_checksums, parse_tag};
+
+    #[test]
+    fn parses_v_tag() {
+        assert_eq!(parse_tag("v1.2.3").unwrap().to_string(), "1.2.3");
+    }
+
+    #[test]
+    fn parses_checksums() {
+        let parsed = parse_checksums("abc  goat-code.tar.gz\ndef *other.tar.gz\n");
+        assert_eq!(parsed["goat-code.tar.gz"], "abc");
+        assert_eq!(parsed["other.tar.gz"], "def");
+    }
+
+    #[test]
+    fn hashes_bytes() {
+        assert_eq!(
+            hex_digest(b"goat"),
+            "5480f08f35968440ebe8135a8bf9e58c8c944bf4e3ba0f45acb141e474bd0c9c"
+        );
+    }
 }

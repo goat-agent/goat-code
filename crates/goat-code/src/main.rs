@@ -22,9 +22,9 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     match cli.command {
-        Some(Command::Update) => {
+        Some(Command::Update { force }) => {
             reject_worktree(cli.worktree.as_ref())?;
-            update::run().await
+            update::run(force).await
         }
         Some(Command::Auth(command)) => {
             reject_worktree(cli.worktree.as_ref())?;
