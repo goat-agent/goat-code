@@ -325,6 +325,11 @@ impl Composer {
             .join("\n")
     }
 
+    pub(crate) fn set_plain_text(&mut self, text: &str) {
+        self.set_text(text);
+        self.hist_cursor = None;
+    }
+
     fn set_text(&mut self, text: &str) {
         self.lines = if text.is_empty() {
             vec![Vec::new()]

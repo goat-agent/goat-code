@@ -293,12 +293,7 @@ impl App {
     }
 
     pub(crate) fn dispatch_slash_command(&mut self, raw: &str) -> Vec<Op> {
-        let rest = raw.trim().trim_start_matches('/');
-        let (name, args) = match rest.split_once(char::is_whitespace) {
-            Some((name, args)) => (name, args.trim()),
-            None => (rest, ""),
-        };
-        let effect = self.commands.resolve(name, args);
+        let effect = self.commands.resolve_line(raw);
         self.apply_command_effect(effect)
     }
 
@@ -693,7 +688,7 @@ impl App {
         }
         let text = self.composer.text();
         let trimmed = text.trim_start();
-        if trimmed.starts_with('/') && !trimmed.contains(' ') {
+        if trimmed.starts_with('/') {
             match &mut self.overlay {
                 Overlay::Commands(menu) => menu.update(&self.commands, trimmed),
                 _ => {
@@ -1669,6 +1664,7 @@ mod tests {
             skills: vec![goat_protocol::SkillInfo {
                 name: "demo".to_owned(),
                 description: "a demo".to_owned(),
+                command: None,
             }],
         });
         app.composer.insert_str("/demo");
