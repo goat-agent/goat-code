@@ -232,6 +232,48 @@ pub enum LoginCredential {
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub command: Option<SkillCommandShape>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillCommandShape {
+    Arguments(Vec<SkillParameterInfo>),
+    Subcommands(Vec<SkillBranchInfo>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillBranchInfo {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub arguments: Vec<SkillParameterInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillParameterInfo {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+    pub value: SkillParameterValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillParameterValue {
+    Word,
+    Integer,
+    Choice(Vec<SkillChoiceInfo>),
+    TextTail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillChoiceInfo {
+    pub value: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -33,13 +33,7 @@ pub(crate) fn compose_child_system(base_prompt: &str, instructions: Option<&str>
 }
 
 pub(crate) fn load_skill_infos(cwd: &std::path::Path) -> Vec<SkillInfo> {
-    goat_skill::load(cwd)
-        .iter()
-        .map(|skill| SkillInfo {
-            name: skill.name.clone(),
-            description: skill.description.clone(),
-        })
-        .collect()
+    goat_skill::load(cwd).iter().map(SkillInfo::from).collect()
 }
 
 #[cfg(test)]
@@ -55,6 +49,7 @@ mod tests {
             &[goat_protocol::SkillInfo {
                 name: "demo".to_owned(),
                 description: "does the demo".to_owned(),
+                command: None,
             }],
             None,
         );
@@ -103,6 +98,7 @@ mod tests {
             &[goat_protocol::SkillInfo {
                 name: "demo".to_owned(),
                 description: "does the demo".to_owned(),
+                command: None,
             }],
             Some("# Project instructions (repo/AGENTS.md)\n\nrule"),
         );

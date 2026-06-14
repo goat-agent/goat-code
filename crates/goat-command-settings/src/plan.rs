@@ -1,4 +1,6 @@
-use goat_command::{Command, CommandEffect};
+use goat_command::{
+    Command, CommandEffect, CommandInvocation, CommandShape, ParameterSpec, ParameterValue,
+};
 
 pub struct Plan;
 
@@ -8,11 +10,19 @@ impl Command for Plan {
     }
 
     fn description(&self) -> &'static str {
-        "toggle plan mode (optional: /plan <request>)"
+        "toggle plan mode"
     }
 
-    fn run(&self, args: &str) -> CommandEffect {
-        let args = args.trim();
-        CommandEffect::PlanMode((!args.is_empty()).then(|| args.to_owned()))
+    fn shape(&self) -> CommandShape {
+        CommandShape::Parameters(vec![ParameterSpec {
+            name: "request".to_owned(),
+            description: "optional planning request".to_owned(),
+            required: false,
+            value: ParameterValue::TextTail,
+        }])
+    }
+
+    fn run(&self, invocation: CommandInvocation) -> CommandEffect {
+        CommandEffect::PlanMode(invocation.text("request").map(str::to_owned))
     }
 }

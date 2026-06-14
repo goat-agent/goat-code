@@ -1,4 +1,4 @@
-use goat_command::{Command, CommandEffect};
+use goat_command::{Command, CommandEffect, CommandInvocation};
 
 pub struct Config;
 
@@ -11,7 +11,7 @@ impl Command for Config {
         "configure providers and settings"
     }
 
-    fn run(&self, _args: &str) -> CommandEffect {
+    fn run(&self, _invocation: CommandInvocation) -> CommandEffect {
         CommandEffect::OpenConfig
     }
 }
