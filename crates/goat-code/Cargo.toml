@@ -7,9 +7,6 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[package.metadata.dist]
-dist = true
-
 [[bin]]
 name = "goat"
 path = "src/main.rs"
@@ -30,9 +27,13 @@ serde_json = { workspace = true }
 ignore = { workspace = true }
 color-eyre = { workspace = true }
 thiserror = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+semver = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
-axoupdater = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

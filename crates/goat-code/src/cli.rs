@@ -15,7 +15,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    Update,
+    Update {
+        #[arg(long)]
+        force: bool,
+    },
     #[command(subcommand)]
     Auth(AuthCommand),
     #[command(subcommand)]
@@ -86,5 +89,20 @@ mod tests {
             cli.command,
             Some(Command::Worktree(WorktreeCommand::Remove { label })) if label == "plan"
         ));
+    }
+
+    #[test]
+    fn parses_update() {
+        let cli = Cli::try_parse_from(["goat", "update"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Update { force: false })
+        ));
+    }
+
+    #[test]
+    fn parses_update_force() {
+        let cli = Cli::try_parse_from(["goat", "update", "--force"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Update { force: true })));
     }
 }

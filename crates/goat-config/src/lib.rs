@@ -103,6 +103,10 @@ pub fn browser_profile_dir() -> Option<PathBuf> {
     browser_dir().map(|dir| dir.join("profile"))
 }
 
+pub fn update_dir() -> Option<PathBuf> {
+    app_home().map(|home| home.join("update"))
+}
+
 pub const PROJECT_SKILLS_SUBDIR: &str = ".goat/skills";
 
 pub fn agents_dir() -> Option<PathBuf> {

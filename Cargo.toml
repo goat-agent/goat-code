@@ -43,6 +43,7 @@ goat-command-conversation = { path = "crates/goat-command-conversation" }
 goat-command-help = { path = "crates/goat-command-help" }
 goat-command-app = { path = "crates/goat-command-app" }
 goat-commands = { path = "crates/goat-commands" }
+goat-update = { path = "crates/goat-update" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -69,6 +70,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 htmd = "0.5"
 eventsource-stream = "0.2"
 sha2 = "0.11"
+semver = "1"
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 base64 = "0.22"
 enigo = "0.6"
 xcap = "0.9"
@@ -83,7 +87,6 @@ tracing-appender = "0.2"
 color-eyre = "0.6"
 thiserror = "2"
 
-axoupdater = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
