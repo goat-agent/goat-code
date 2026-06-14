@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use goat_tool::{
     Tool, ToolContext, ToolError, ToolFuture, ToolOutput,
-    path::{relative_display, resolve_in_cwd},
+    path::{blocked_path, relative_display},
 };
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
 use serde::Deserialize;
@@ -52,12 +52,15 @@ impl Tool for GlobTool {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
             let root = match &args.path {
-                Some(path) => resolve_in_cwd(&ctx.cwd, path)?,
+                Some(path) => ctx.resolve(path)?,
                 None => ctx.cwd.clone(),
             };
             let cwd = ctx.cwd.clone();
+            let blocked = ctx.blocked_paths.clone();
 
-            let join = tokio::task::spawn_blocking(move || walk(&cwd, &root, &args.pattern)).await;
+            let join =
+                tokio::task::spawn_blocking(move || walk(&cwd, &root, &blocked, &args.pattern))
+                    .await;
 
             match join {
                 Ok(result) => result.map(ToolOutput::text),
@@ -69,7 +72,12 @@ impl Tool for GlobTool {
 
 const MAX_GLOB_RESULTS: usize = 1000;
 
-fn walk(cwd: &std::path::Path, root: &std::path::Path, pattern: &str) -> Result<String, ToolError> {
+fn walk(
+    cwd: &std::path::Path,
+    root: &std::path::Path,
+    blocked: &[std::path::PathBuf],
+    pattern: &str,
+) -> Result<String, ToolError> {
     let mut overrides = OverrideBuilder::new(root);
     overrides.add(pattern).map_err(|err| ignore_error(&err))?;
     let matcher = overrides.build().map_err(|err| ignore_error(&err))?;
@@ -77,6 +85,8 @@ fn walk(cwd: &std::path::Path, root: &std::path::Path, pattern: &str) -> Result<
     let mut found = Vec::new();
     let mut builder = WalkBuilder::new(root);
     builder.require_git(false);
+    let blocked_for_walk = blocked.to_vec();
+    builder.filter_entry(move |entry| !blocked_path(&blocked_for_walk, entry.path()));
     for entry in builder.build() {
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
@@ -159,5 +169,32 @@ mod tests {
         let text = out.as_text().unwrap();
         assert!(text.contains("kept.rs"));
         assert!(!text.contains("built.rs"));
+    }
+
+    #[tokio::test]
+    async fn managed_worktrees_are_hidden_from_default_search() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".goat/worktrees/plan")).unwrap();
+        std::fs::write(dir.path().join(".goat/worktrees/plan/hidden.rs"), "").unwrap();
+        std::fs::write(dir.path().join("visible.rs"), "").unwrap();
+        let ctx = ctx(dir.path());
+        let out = GlobTool.run(r#"{"pattern":"*.rs"}"#, &ctx).await.unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.contains("visible.rs"));
+        assert!(!text.contains("hidden.rs"));
+    }
+
+    #[tokio::test]
+    async fn explicit_managed_worktree_path_is_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".goat/worktrees/plan")).unwrap();
+        let ctx = ctx(dir.path());
+        let result = GlobTool
+            .run(r#"{"pattern":"*.rs","path":".goat/worktrees"}"#, &ctx)
+            .await;
+        assert!(matches!(
+            result,
+            Err(goat_tool::ToolError::PathBlocked { .. })
+        ));
     }
 }

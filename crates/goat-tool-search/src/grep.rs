@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use goat_tool::{
     Tool, ToolContext, ToolError, ToolFuture, ToolOutput,
-    path::{relative_display, resolve_in_cwd},
+    path::{blocked_path, relative_display},
 };
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
 use regex::Regex;
@@ -67,10 +67,11 @@ impl Tool for GrepTool {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
             let root = match &args.path {
-                Some(path) => resolve_in_cwd(&ctx.cwd, path)?,
+                Some(path) => ctx.resolve(path)?,
                 None => ctx.cwd.clone(),
             };
             let cwd = ctx.cwd.clone();
+            let blocked = ctx.blocked_paths.clone();
             let max_results = args.max_results.unwrap_or(DEFAULT_MAX_RESULTS);
             let max_output_bytes = ctx.max_output_bytes;
 
@@ -78,6 +79,7 @@ impl Tool for GrepTool {
                 search(
                     &cwd,
                     &root,
+                    &blocked,
                     &args.pattern,
                     args.glob.as_deref(),
                     max_results,
@@ -97,6 +99,7 @@ impl Tool for GrepTool {
 fn search(
     cwd: &std::path::Path,
     root: &std::path::Path,
+    blocked: &[std::path::PathBuf],
     pattern: &str,
     glob: Option<&str>,
     max_results: usize,
@@ -105,6 +108,8 @@ fn search(
     let regex = Regex::new(pattern)?;
     let mut builder = WalkBuilder::new(root);
     builder.require_git(false);
+    let blocked_for_walk = blocked.to_vec();
+    builder.filter_entry(move |entry| !blocked_path(&blocked_for_walk, entry.path()));
     let matcher = match glob {
         Some(glob) => {
             let mut overrides = OverrideBuilder::new(root);
@@ -205,5 +210,36 @@ mod tests {
         let text = out.as_text().unwrap();
         assert!(text.contains("kept.txt"));
         assert!(!text.contains("skipped"));
+    }
+
+    #[tokio::test]
+    async fn managed_worktrees_are_hidden_from_default_search() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".goat/worktrees/plan")).unwrap();
+        std::fs::write(
+            dir.path().join(".goat/worktrees/plan/hidden.txt"),
+            "needle\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "needle\n").unwrap();
+        let ctx = ctx(dir.path());
+        let out = GrepTool.run(r#"{"pattern":"needle"}"#, &ctx).await.unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.contains("visible.txt"));
+        assert!(!text.contains("hidden.txt"));
+    }
+
+    #[tokio::test]
+    async fn explicit_managed_worktree_path_is_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".goat/worktrees/plan")).unwrap();
+        let ctx = ctx(dir.path());
+        let result = GrepTool
+            .run(r#"{"pattern":"needle","path":".goat/worktrees"}"#, &ctx)
+            .await;
+        assert!(matches!(
+            result,
+            Err(goat_tool::ToolError::PathBlocked { .. })
+        ));
     }
 }
