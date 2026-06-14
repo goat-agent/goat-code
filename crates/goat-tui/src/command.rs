@@ -8,6 +8,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     overlay::{hint_line, selection_row},
@@ -49,6 +50,27 @@ pub struct Completion {
     start: usize,
     end: usize,
     replacement: String,
+}
+
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if s.width() <= max_width {
+        return s.to_owned();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for c in s.chars() {
+        let char_width = c.width().unwrap_or(0);
+        if width + char_width + 1 > max_width {
+            break;
+        }
+        out.push(c);
+        width += char_width;
+    }
+    out.push_str(symbols::ui::ELLIPSIS);
+    out
 }
 
 #[derive(Clone)]
@@ -216,8 +238,14 @@ fn render_row(selected: bool, width: usize, entry: &Row, theme: Theme) -> Line<'
     } else {
         theme.muted()
     };
-    let right = (!entry.description.is_empty())
-        .then(|| Span::styled(entry.description.clone(), desc_style));
+    let left_w: usize = name_spans.iter().map(|span| span.content.width()).sum();
+    let desc_width = width.saturating_sub(left_w + 6);
+    let right = (desc_width > 3 && !entry.description.is_empty()).then(|| {
+        Span::styled(
+            truncate_to_width(&entry.description, desc_width),
+            desc_style,
+        )
+    });
     selection_row(theme, selected, width, name_spans, right)
 }
 
@@ -429,7 +457,9 @@ fn token_spans(args: &str) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::CommandMenu;
+    use unicode_width::UnicodeWidthStr;
+
+    use super::{CommandMenu, truncate_to_width};
     use goat_commands::CommandRegistry;
 
     #[test]
@@ -446,5 +476,22 @@ mod tests {
         let menu = CommandMenu::new(&registry, "/effort h");
         let completion = menu.selected_completion().unwrap();
         assert_eq!(completion.apply("/effort h"), "/effort high");
+    }
+
+    #[test]
+    fn truncate_short_text_keeps_text() {
+        assert_eq!(truncate_to_width("short", 10), "short");
+    }
+
+    #[test]
+    fn truncate_long_text_fits_width() {
+        let truncated = truncate_to_width("very long skill description", 12);
+        assert!(truncated.width() <= 12);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_zero_width_is_empty() {
+        assert_eq!(truncate_to_width("text", 0), "");
     }
 }

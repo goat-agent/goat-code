@@ -81,7 +81,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         if let Overlay::Commands(menu) = app.overlay() {
             menu.render(frame, panel, theme);
         }
-        app.composer().render(frame, composer_area, theme, true);
+        app.composer()
+            .render(frame, composer_area, theme, true, app.plan_prompt_active());
         render_toasts(frame, area, app, theme);
         return;
     }
@@ -113,7 +114,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 Overlay::Help => crate::help::render(frame, body, theme),
                 _ => {}
             }
-            app.composer().render(frame, composer, theme, false);
+            app.composer()
+                .render(frame, composer, theme, false, app.plan_prompt_active());
             render_toasts(frame, area, app, theme);
             return;
         }
@@ -136,23 +138,37 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_transcript(frame, body, app, theme);
         render_agent_panel(frame, panel, app, theme, cursor);
         render_agent_footer(frame, footer, theme);
-        app.composer().render(frame, composer, theme, false);
+        app.composer()
+            .render(frame, composer, theme, false, app.plan_prompt_active());
         render_toasts(frame, area, app, theme);
         return;
     }
 
-    let [header, body, composer, footer] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(1),
-        Constraint::Length(composer_h),
-        Constraint::Length(1),
-    ])
-    .areas(area);
-
-    render_header(frame, header, app, theme);
-    render_transcript(frame, body, app, theme);
-    app.composer().render(frame, composer, theme, true);
-    render_footer(frame, footer, app, theme);
+    if footer_visible(app) {
+        let [header, body, composer, footer] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(composer_h),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        render_header(frame, header, app, theme);
+        render_transcript(frame, body, app, theme);
+        app.composer()
+            .render(frame, composer, theme, true, app.plan_prompt_active());
+        render_footer(frame, footer, app, theme);
+    } else {
+        let [header, body, composer] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(composer_h),
+        ])
+        .areas(area);
+        render_header(frame, header, app, theme);
+        render_transcript(frame, body, app, theme);
+        app.composer()
+            .render(frame, composer, theme, true, app.plan_prompt_active());
+    }
     render_toasts(frame, area, app, theme);
 }
 
@@ -201,6 +217,10 @@ fn render_agent_footer(frame: &mut Frame, area: Rect, theme: Theme) {
 
 fn render_toasts(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     crate::toast::render(frame, area, theme, app.toasts());
+}
+
+fn footer_visible(app: &App) -> bool {
+    app.quit_armed() || app.is_busy() || app.clear_armed()
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
@@ -252,17 +272,6 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
     );
 }
 
-fn onboarding_hint(app: &App) -> String {
-    let sep = symbols::ui::SEPARATOR;
-    if app.current_model().is_some() || !app.models_loaded {
-        format!("/ for commands{sep}! for shell{sep}/help for keys")
-    } else if app.models.is_empty() {
-        format!("no provider connected{sep}/config to add one")
-    } else {
-        format!("no model selected{sep}/model to choose one")
-    }
-}
-
 fn fit_cwd(cwd: &str, max: usize) -> String {
     if cwd.width() <= max {
         return cwd.to_owned();
@@ -281,60 +290,33 @@ fn fit_cwd(cwd: &str, max: usize) -> String {
     )
 }
 
-const GAUGE_CELLS: usize = 12;
-const GAUGE_PARTIALS: [char; 7] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
-const GAUGE_TRACK: char = '╌';
-const GAUGE_TICK: char = '┆';
-
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss
-)]
-fn context_gauge(
-    theme: Theme,
-    used: u64,
-    window: u32,
-    threshold: Option<u32>,
-) -> (Vec<Span<'static>>, usize) {
-    let total_eighths = GAUGE_CELLS * 8;
-    let fill_eighths = ((used as f64 / f64::from(window)) * total_eighths as f64).round() as usize;
-    let fill_eighths = fill_eighths.min(total_eighths);
-    let tick_cell = threshold.map(|limit| {
-        (((f64::from(limit) / f64::from(window)) * GAUGE_CELLS as f64) as usize)
-            .min(GAUGE_CELLS - 1)
-    });
-    let fill_pct = threshold.map_or_else(
-        || (used as f64 / f64::from(window) * 100.0).min(100.0) as f32,
-        |limit| (used as f64 / f64::from(limit) * 100.0).min(100.0) as f32,
-    );
-    let mut fill = String::new();
-    let mut track = String::new();
-    for cell in 0..GAUGE_CELLS {
-        let cell_eighths = fill_eighths.saturating_sub(cell * 8).min(8);
-        if cell_eighths == 8 {
-            fill.push('█');
-        } else if cell_eighths > 0 {
-            fill.push(GAUGE_PARTIALS[cell_eighths - 1]);
-        } else if Some(cell) == tick_cell {
-            track.push(GAUGE_TICK);
-        } else {
-            track.push(GAUGE_TRACK);
-        }
+pub(crate) fn model_status_label(
+    model: &goat_protocol::ModelTarget,
+    multiple_accounts: bool,
+) -> String {
+    let mut label = if multiple_accounts {
+        format!("{}:{}/{}", model.provider, model.account, model.model)
+    } else {
+        format!("{}/{}", model.provider, model.model)
+    };
+    if let Some(effort) = model.effort {
+        label.push(':');
+        label.push_str(effort.as_str());
     }
-    let pct = (used as f64 / f64::from(window) * 100.0).min(100.0);
-    let label = format!(" {pct:>3.0}%");
-    let width = 2 + GAUGE_CELLS + label.width();
-    (
-        vec![
-            Span::styled("▕", theme.muted()),
-            Span::styled(fill, theme.meter(fill_pct)),
-            Span::styled(track, theme.muted()),
-            Span::styled("▏", theme.muted()),
-            Span::styled(label, theme.meter(fill_pct)),
-        ],
-        width,
-    )
+    label
+}
+
+fn model_label(app: &App) -> Option<String> {
+    let model = app.current_model()?;
+    Some(model_status_label(
+        model,
+        app.provider_has_multiple_accounts(&model.provider),
+    ))
+}
+
+fn ctx_label(app: &App) -> Option<(String, f32)> {
+    app.ctx_indicator()
+        .map(|(pct, _, _)| (format!("ctx {pct:.0}%"), pct))
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
@@ -344,68 +326,29 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     });
     let inner_w = usize::from(row.width);
 
-    let ctx = app
-        .ctx_indicator()
-        .map(|(_, used, window)| context_gauge(theme, used, window, app.compaction_threshold));
-    let ctx_w = ctx.as_ref().map_or(0, |(_, width)| *width);
+    let model = model_label(app);
+    let ctx = ctx_label(app);
+    let model_w = model.as_ref().map_or(0, |label| label.width());
+    let ctx_w = ctx.as_ref().map_or(0, |(label, _)| label.width());
+    let status_gap = usize::from(model.is_some()) * 2 + usize::from(ctx.is_some()) * 2;
+    let status_w = model_w + ctx_w + status_gap;
+    let cwd = fit_cwd(app.cwd(), inner_w.saturating_sub(status_w));
 
-    let mut model_spans: Vec<Span> = Vec::new();
-    if let Some(model) = app.current_model() {
-        model_spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
-        let model_label = if app.provider_has_multiple_accounts(&model.provider) {
-            format!("{}:{}/{}", model.provider, model.account, model.model)
-        } else {
-            format!("{}/{}", model.provider, model.model)
-        };
-        model_spans.push(Span::styled(model_label, theme.key()));
-        if let Some(effort) = model.effort {
-            model_spans.push(Span::styled(
-                format!("{}{}", symbols::ui::SEPARATOR, effort),
-                theme.accent(),
-            ));
-        }
-    }
-    let model_w: usize = model_spans.iter().map(|s| s.content.width()).sum();
-
-    let plan_badge = plan_badge(app);
-    let badge_w = plan_badge
-        .as_ref()
-        .map_or(0, |span| span.content.width() + 1);
-
-    let cwd_max = inner_w
-        .saturating_sub(model_w)
-        .saturating_sub(badge_w)
-        .saturating_sub(if ctx_w > 0 { ctx_w + 2 } else { 0 });
-    let cwd = fit_cwd(app.cwd(), cwd_max);
-
-    let mut spans: Vec<Span> = Vec::new();
-    if let Some(badge) = plan_badge {
-        spans.push(badge);
-        spans.push(Span::raw(" "));
-    }
-    spans.push(Span::styled(cwd.clone(), theme.muted()));
-    spans.extend(model_spans);
-    if let Some((ctx_spans, _)) = ctx {
-        let left_w = badge_w + cwd.width() + model_w;
-        let pad = inner_w.saturating_sub(left_w + ctx_w);
+    let mut spans: Vec<Span> = vec![Span::styled(cwd.clone(), theme.muted())];
+    let left_w = cwd.width();
+    let pad = inner_w.saturating_sub(left_w + status_w);
+    if pad > 0 {
         spans.push(Span::raw(" ".repeat(pad)));
-        spans.extend(ctx_spans);
+    }
+    if let Some(label) = model {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(label, theme.key()));
+    }
+    if let Some((label, pct)) = ctx {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(label, theme.meter(pct)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
-}
-
-fn plan_badge(app: &App) -> Option<Span<'static>> {
-    let plan = app.mode == goat_protocol::Mode::Plan;
-    if !plan && !app.mode_pending {
-        return None;
-    }
-    let theme = app.theme();
-    let label = if app.mode_pending && !plan {
-        " PLAN ▸ "
-    } else {
-        " PLAN "
-    };
-    Some(Span::styled(label, theme.accent()))
 }
 
 fn plan_desired_height(area_height: u16) -> u16 {
@@ -553,9 +496,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             spans.push(Span::styled(" agents", theme.muted()));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), inner);
-        return;
-    }
-    if app.clear_armed() {
+    } else if app.clear_armed() {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(symbols::key::ESC, theme.hint_key()),
@@ -563,15 +504,45 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             ])),
             inner,
         );
-        return;
     }
-    if app.transcript.items.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                onboarding_hint(app),
-                theme.muted(),
-            ))),
-            inner,
+}
+
+#[cfg(test)]
+mod tests {
+    use goat_protocol::{Effort, ModelTarget};
+
+    use super::model_status_label;
+
+    fn target(effort: Option<Effort>) -> ModelTarget {
+        ModelTarget {
+            provider: "anthropic".to_owned(),
+            account: "work".to_owned(),
+            model: "claude-sonnet-4".to_owned(),
+            effort,
+        }
+    }
+
+    #[test]
+    fn model_status_label_omits_single_account_profile() {
+        assert_eq!(
+            model_status_label(&target(Some(Effort::High)), false),
+            "anthropic/claude-sonnet-4:high"
+        );
+    }
+
+    #[test]
+    fn model_status_label_includes_profile_for_multiple_accounts() {
+        assert_eq!(
+            model_status_label(&target(Some(Effort::Medium)), true),
+            "anthropic:work/claude-sonnet-4:medium"
+        );
+    }
+
+    #[test]
+    fn model_status_label_omits_missing_effort() {
+        assert_eq!(
+            model_status_label(&target(None), true),
+            "anthropic:work/claude-sonnet-4"
         );
     }
 }

@@ -3,6 +3,8 @@ pub mod marker {
     pub const AGENT: &str = "● ";
     pub const NOTICE: &str = "→ ";
     pub const ERROR: &str = "✗ ";
+    pub const PROMPT: &str = "> ";
+    pub const PLAN: &str = "✦ ";
     pub const SHELL: &str = "! ";
 }
 

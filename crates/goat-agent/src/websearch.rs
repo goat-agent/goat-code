@@ -1,5 +1,3 @@
-use std::fmt::Write as _;
-
 use goat_protocol::ToolDisplay;
 use goat_provider::ToolDefinition;
 use tokio_util::sync::CancellationToken;
@@ -47,7 +45,7 @@ pub(crate) async fn run_web_search(
     }
     let handle = env.provider.web_search(args.query);
     let abort = handle.abort_handle();
-    let results = tokio::select! {
+    let output = tokio::select! {
         biased;
         () = token.cancelled() => {
             abort.abort();
@@ -57,21 +55,5 @@ pub(crate) async fn run_web_search(
             .map_err(|err| format!("web search task failed: {err}"))?
             .map_err(|err| err.to_string())?,
     };
-    if results.is_empty() {
-        return Ok("No results found.".to_owned());
-    }
-    let mut out = String::new();
-    for (index, result) in results.iter().enumerate() {
-        let title = if result.title.is_empty() {
-            &result.url
-        } else {
-            &result.title
-        };
-        let _ = write!(out, "{}. {title}\n   {}", index + 1, result.url);
-        if !result.snippet.is_empty() {
-            let _ = write!(out, " · {}", result.snippet);
-        }
-        out.push('\n');
-    }
-    Ok(out)
+    Ok(output.content)
 }

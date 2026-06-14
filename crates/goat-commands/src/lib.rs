@@ -26,6 +26,13 @@ impl CommandRegistry {
         self.skills = skills.to_vec();
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        self.builtins
+            .iter()
+            .any(|command| command.name() == name || command.aliases().contains(&name))
+            || self.skills.iter().any(|skill| skill.name == name)
+    }
+
     pub fn resolve_line(&self, raw: &str) -> CommandEffect {
         let line = match parse_line(raw) {
             Ok(line) => line,

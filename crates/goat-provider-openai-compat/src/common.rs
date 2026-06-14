@@ -73,7 +73,7 @@ fn classify_body(
     }
 }
 
-pub(crate) fn classify_http(
+pub fn classify_http(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     body: &str,
@@ -95,7 +95,7 @@ pub(crate) fn classify_stream_error(data: &str) -> StreamError {
     classify_body(parse_error_body(data), None, None, data.to_owned())
 }
 
-pub(crate) fn transport(err: &reqwest::Error) -> StreamError {
+pub fn transport(err: &reqwest::Error) -> StreamError {
     StreamError::transport(err.to_string())
 }
 

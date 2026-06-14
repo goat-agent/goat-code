@@ -10,7 +10,7 @@ use futures::StreamExt;
 use goat_auth::{CredentialKey, CredentialStore, TokenSet};
 use goat_provider::{
     AuthMethod, Capabilities, Effort, Model, Provider, ProviderId, Request, SearchResult,
-    StreamError, StreamEvent,
+    StreamError, StreamEvent, WebSearchOutput,
 };
 use serde_json::json;
 use tokio::{sync::Mutex, sync::mpsc, task::JoinHandle};
@@ -271,7 +271,7 @@ impl Provider for GeminiProvider {
         true
     }
 
-    fn web_search(&self, query: String) -> JoinHandle<Result<Vec<SearchResult>, StreamError>> {
+    fn web_search(&self, query: String) -> JoinHandle<Result<WebSearchOutput, StreamError>> {
         let client = self.client.clone();
         let store = self.store.clone();
         let key = self.key.clone();
@@ -313,7 +313,9 @@ impl Provider for GeminiProvider {
                 .json()
                 .await
                 .map_err(|err| StreamError::other(format!("invalid search response: {err}")))?;
-            Ok(parse_grounding_results(&value))
+            Ok(WebSearchOutput::from_results(parse_grounding_results(
+                &value,
+            )))
         })
     }
 
