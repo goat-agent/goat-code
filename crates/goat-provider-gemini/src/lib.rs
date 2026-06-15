@@ -103,6 +103,7 @@ async fn fetch_gl_models(client: &reqwest::Client, api_key: &str) -> Vec<Model> 
 
 async fn stream_response(resp: reqwest::Response, tx: &mpsc::Sender<StreamEvent>, oauth: bool) {
     let mut stream = resp.bytes_stream().eventsource();
+    let mut last_usage: Option<goat_provider::Usage> = None;
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => {
@@ -112,21 +113,29 @@ async fn stream_response(resp: reqwest::Response, tx: &mpsc::Sender<StreamEvent>
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.data) else {
                     continue;
                 };
-                if let Some(reason) = wire::extract_finish_reason(&value, oauth) {
-                    let finished = matches!(reason, "STOP" | "MAX_TOKENS");
-                    for ev in wire::parse_chunk(&value, oauth) {
-                        if tx.send(ev).await.is_err() {
-                            return;
-                        }
+                for ev in wire::parse_chunk(&value, oauth) {
+                    if tx.send(ev).await.is_err() {
+                        return;
                     }
-                    if finished {
-                        break;
-                    }
-                } else {
-                    for ev in wire::parse_chunk(&value, oauth) {
-                        if tx.send(ev).await.is_err() {
-                            return;
+                }
+                if let Some(usage) = wire::parse_usage(&value, oauth) {
+                    last_usage = Some(usage);
+                }
+                match wire::extract_finish_reason(&value, oauth) {
+                    None | Some("") => {}
+                    Some("STOP" | "MAX_TOKENS") => break,
+                    Some(reason) => {
+                        if let Some(usage) = last_usage.take() {
+                            let _ = tx.send(StreamEvent::Usage { usage }).await;
                         }
+                        let _ = tx
+                            .send(StreamEvent::Failed {
+                                error: goat_provider::StreamError::other(format!(
+                                    "generation stopped: {reason}"
+                                )),
+                            })
+                            .await;
+                        return;
                     }
                 }
             }
@@ -139,6 +148,9 @@ async fn stream_response(resp: reqwest::Response, tx: &mpsc::Sender<StreamEvent>
                 return;
             }
         }
+    }
+    if let Some(usage) = last_usage.take() {
+        let _ = tx.send(StreamEvent::Usage { usage }).await;
     }
     let _ = tx.send(StreamEvent::Completed).await;
 }
