@@ -48,36 +48,57 @@ impl Tool for ReadTool {
             if !resolved.exists() {
                 return Err(ToolError::NotFound { path: args.path });
             }
-            let bytes = tokio::fs::read(&resolved)
+            let file = tokio::fs::File::open(&resolved)
                 .await
                 .map_err(|source| ToolError::Io {
                     path: args.path.clone(),
                     source,
                 })?;
-            let text = String::from_utf8_lossy(&bytes);
+            let mut reader = tokio::io::BufReader::new(file);
 
             let start = args.offset.unwrap_or(1).max(1);
+            let max_bytes = ctx.max_output_bytes;
             let mut out = String::new();
             let mut lineno = 0usize;
             let mut emitted = 0usize;
-            for line in text.lines() {
-                lineno += 1;
-                if lineno < start {
-                    continue;
-                }
+            let mut truncated = false;
+            let mut buf = Vec::new();
+            loop {
                 if let Some(limit) = args.limit
                     && emitted >= limit
                 {
                     break;
                 }
+                buf.clear();
+                let read = tokio::io::AsyncBufReadExt::read_until(&mut reader, b'\n', &mut buf)
+                    .await
+                    .map_err(|source| ToolError::Io {
+                        path: args.path.clone(),
+                        source,
+                    })?;
+                if read == 0 {
+                    break;
+                }
+                lineno += 1;
+                if lineno < start {
+                    continue;
+                }
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end_matches(['\n', '\r']);
                 let _ = writeln!(out, "{lineno:>6}\t{line}");
                 emitted += 1;
+                if out.len() > max_bytes {
+                    truncated = true;
+                    break;
+                }
             }
 
-            let max_bytes = ctx.max_output_bytes;
             if out.len() > max_bytes {
                 let boundary = out.floor_char_boundary(max_bytes);
                 out.truncate(boundary);
+                truncated = true;
+            }
+            if truncated {
                 out.push_str("\n[output truncated]\n");
             }
             Ok(ToolOutput::text(out))
