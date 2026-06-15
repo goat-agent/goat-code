@@ -184,6 +184,8 @@ pub(crate) async fn process_round_output(
             .events
             .send(Event::Usage {
                 id: run.id,
+                provider: env.target.provider.clone(),
+                account: env.target.account.clone(),
                 usage,
                 context_window,
                 compaction_threshold,

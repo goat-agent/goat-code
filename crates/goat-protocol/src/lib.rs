@@ -439,6 +439,8 @@ pub enum Event {
     },
     Usage {
         id: TaskId,
+        provider: String,
+        account: String,
         usage: Usage,
         context_window: Option<u32>,
         compaction_threshold: Option<u32>,
