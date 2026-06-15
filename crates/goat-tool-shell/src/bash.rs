@@ -18,11 +18,26 @@ fn sandbox_tmp() -> &'static PathBuf {
     })
 }
 
-struct ChildGuard(tokio::process::Child);
+struct ChildGuard {
+    child: tokio::process::Child,
+    reaped: bool,
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let _ = self.0.start_kill();
+        if self.reaped {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(pid) = self.child.id() {
+            let _ = std::process::Command::new("kill")
+                .arg("-KILL")
+                .arg(format!("-{pid}"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = self.child.start_kill();
     }
 }
 
@@ -96,6 +111,8 @@ impl Tool for BashTool {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            #[cfg(unix)]
+            builder.process_group(0);
             if let Some(tmp) = &tmpdir {
                 builder.env("TMPDIR", tmp);
             }
@@ -103,9 +120,12 @@ impl Tool for BashTool {
                 .spawn()
                 .map_err(|source| ToolError::Spawn { source })?;
 
-            let mut guard = ChildGuard(child);
-            let mut stdout_pipe = guard.0.stdout.take();
-            let mut stderr_pipe = guard.0.stderr.take();
+            let mut guard = ChildGuard {
+                child,
+                reaped: false,
+            };
+            let mut stdout_pipe = guard.child.stdout.take();
+            let mut stderr_pipe = guard.child.stderr.take();
 
             let result = time::timeout(timeout_dur, async {
                 let mut stdout = Vec::new();
@@ -128,7 +148,8 @@ impl Tool for BashTool {
                 );
                 let _ = stdout_result;
                 let _ = stderr_result;
-                let status = guard.0.wait().await;
+                let status = guard.child.wait().await;
+                guard.reaped = true;
                 (stdout, stderr, status)
             })
             .await;
