@@ -14,11 +14,12 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
+    ask::AskPicker,
     command::CommandMenu,
     composer::Composer,
     config::{Config, ConfigOutcome},
     highlight::SyntectHighlighter,
-    picker::{AskPicker, EffortPicker, Picker, ThreadPicker},
+    picker::{EffortPicker, Picker, ThreadPicker},
     symbols,
     theme::Theme,
     transcript::Transcript,

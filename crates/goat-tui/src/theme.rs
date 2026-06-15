@@ -99,6 +99,10 @@ impl Theme {
         Style::new().fg(self.fg).bg(self.bg)
     }
 
+    pub fn text(self) -> Style {
+        Style::new().fg(self.fg)
+    }
+
     pub fn muted(self) -> Style {
         Style::new().fg(self.muted)
     }

@@ -1,7 +1,7 @@
 use goat_protocol::{Event as EngineEvent, NotifyKind, Op, TaskId, TranscriptEntry};
 
 use super::{App, Overlay, ResumeIntent};
-use crate::picker::{AskPicker, ThreadPicker};
+use crate::{ask::AskPicker, picker::ThreadPicker};
 
 impl App {
     #[allow(clippy::too_many_lines)]

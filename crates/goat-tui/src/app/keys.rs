@@ -3,9 +3,10 @@ use goat_protocol::{Op, PlanDecision};
 
 use super::{App, CLEAR_ARM_TICKS, Overlay, PlanFocus, QUIT_ARM_TICKS};
 use crate::{
+    ask::AskOutcome,
     config::ConfigOutcome,
     keymap,
-    picker::{AskOutcome, EffortOutcome, PickerOutcome, ThreadOutcome},
+    picker::{EffortOutcome, PickerOutcome, ThreadOutcome},
 };
 
 impl App {
