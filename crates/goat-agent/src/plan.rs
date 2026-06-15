@@ -102,6 +102,11 @@ pub(crate) async fn run_propose_plan(
                 .to_owned(),
         );
     }
+    if let Some(found) = find_placeholder(&content) {
+        return Err(format!(
+            "the plan still contains a placeholder ({found}) — fill it in before proposing the plan for approval"
+        ));
+    }
     let (tx, rx) = oneshot::channel::<PlanDecision>();
     ctx.plans.lock().await.insert(call_id, tx);
     let _ = ctx
@@ -150,6 +155,12 @@ fn approved_plan_inject(path: &std::path::Path) -> String {
         "The plan at {} was approved. Implement it now: read the approved plan first, follow its goal, scope, approach, and validation strategy, and keep safe local implementation discretion. If implementation requires material deviation such as scope expansion, user-visible behavior change, public API/protocol/schema/persistence/auth/security impact, a new dependency, changed validation, dropped verification, contradiction of explicit user preference, or a false core assumption, stop to ask, explicitly exclude it, or replan. After changes, run the planned verification when practical and report what changed, verification results, deviations, anything not done, and remaining risks.",
         path.display()
     )
+}
+
+pub(crate) fn find_placeholder(content: &str) -> Option<&'static str> {
+    const TOKENS: [&str; 5] = ["TODO", "TBD", "FIXME", "<...>", "REPLACE_ME"];
+    let upper = content.to_uppercase();
+    TOKENS.into_iter().find(|token| upper.contains(*token))
 }
 
 pub(crate) fn slugify(text: &str) -> String {
@@ -297,6 +308,15 @@ mod tests {
         ] {
             assert!(prompt.contains(expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn find_placeholder_flags_tokens_and_passes_clean() {
+        assert_eq!(super::find_placeholder("## Goal\nfix the bug"), None);
+        assert_eq!(super::find_placeholder("approach: TODO"), Some("TODO"));
+        assert_eq!(super::find_placeholder("steps: tbd later"), Some("TBD"));
+        assert_eq!(super::find_placeholder("name: <...>"), Some("<...>"));
+        assert_eq!(super::find_placeholder("see notes, etc. and so on"), None);
     }
 
     #[test]
