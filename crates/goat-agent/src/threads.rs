@@ -206,6 +206,7 @@ pub(crate) async fn handle_resume(
                             outcome: ToolOutcome {
                                 ok: !is_error,
                                 summary,
+                                image: None,
                             },
                         });
                     }

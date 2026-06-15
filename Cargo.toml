@@ -51,6 +51,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 
 ratatui = "0.30"
+ratatui-image = { version = "11.0.4", default-features = false, features = ["crossterm"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 
 clap = { version = "4", features = ["derive"] }

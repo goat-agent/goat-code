@@ -243,6 +243,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
             working: working.as_ref(),
             queued: &queued,
             hl: &app.highlighter,
+            picker: app.picker.as_ref(),
         },
     );
     if app.follow() {
