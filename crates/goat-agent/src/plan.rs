@@ -42,12 +42,12 @@ pub(crate) struct Transition {
 
 pub(crate) type TransitionCell = std::sync::Mutex<Option<Transition>>;
 
-const ENTER_INJECT: &str = "Plan mode is on. Investigate the request above, write the plan to the plan file, and call ProposePlan when it is ready for the user to approve.";
+const ENTER_INJECT: &str = "Plan mode is on. Prepare an approval contract before making project changes: investigate read-only evidence, ask only for material user judgment, update the plan file, and call ProposePlan only when the plan is mature enough for approval.";
 
 pub(crate) fn enter_plan_tool_def() -> ToolDefinition {
     ToolDefinition {
         name: ENTER_PLAN_TOOL_NAME.to_owned(),
-        description: "Switch into plan mode to design an approach before changing anything. Call this proactively before a non-trivial implementation task — a new feature, a change to existing behavior, an architectural choice, work spanning several files, or anything where the user's preference matters — so the user can approve the approach before code is written. Skip it for trivial edits, single obvious fixes, or pure research. Before calling, say in one line why you are switching to planning. Takes no input.".to_owned(),
+        description: "Switch into plan mode to prepare an approval contract before meaningful project changes. Call this proactively for work where goal, approach, validation, user preference, architecture, cross-file scope, persistence, security, public behavior, or reversibility matters. Skip it for trivial edits, single obvious fixes, and pure research. Before calling, say in one line why planning is useful here. Takes no input.".to_owned(),
         input_schema: serde_json::json!({ "type": "object", "properties": {} }),
     }
 }
@@ -55,7 +55,7 @@ pub(crate) fn enter_plan_tool_def() -> ToolDefinition {
 pub(crate) fn propose_plan_tool_def() -> ToolDefinition {
     ToolDefinition {
         name: PROPOSE_PLAN_TOOL_NAME.to_owned(),
-        description: "Present the finished plan to the user for approval and leave plan mode. Reads the plan from the plan file you wrote — takes no input. Call it only after the plan file is complete and you have done any needed investigation; do not announce a plan in prose instead. If the user requests changes, you keep planning with their feedback; if they approve, implementation begins.".to_owned(),
+        description: "Present the mature plan from the plan file as an approval contract and leave plan mode. Takes no input. Call it only after needed investigation, material questions, and plan-file updates are complete; do not treat a non-empty plan file as ready by itself, and do not announce approval plans only in prose. If the user requests changes, keep planning with their feedback; if they approve, implement within the approved scope.".to_owned(),
         input_schema: serde_json::json!({ "type": "object", "properties": {} }),
     }
 }
@@ -128,10 +128,7 @@ pub(crate) async fn run_propose_plan(
     match decision {
         Ok(PlanDecision::Approve) => {
             if let Some(cell) = env.transition {
-                let inject = format!(
-                    "The plan at {} was approved. Implement it now — read that file for the full plan, then make the changes and verify them.",
-                    path.display()
-                );
+                let inject = approved_plan_inject(&path);
                 *cell
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Transition {
@@ -146,6 +143,13 @@ pub(crate) async fn run_propose_plan(
         )),
         Err(_) => Err("the approval channel closed".to_owned()),
     }
+}
+
+fn approved_plan_inject(path: &std::path::Path) -> String {
+    format!(
+        "The plan at {} was approved. Implement it now: read the approved plan first, follow its goal, scope, approach, and validation strategy, and keep safe local implementation discretion. If implementation requires material deviation such as scope expansion, user-visible behavior change, public API/protocol/schema/persistence/auth/security impact, a new dependency, changed validation, dropped verification, contradiction of explicit user preference, or a false core assumption, stop to ask, explicitly exclude it, or replan. After changes, run the planned verification when practical and report what changed, verification results, deviations, anything not done, and remaining risks.",
+        path.display()
+    )
 }
 
 pub(crate) fn slugify(text: &str) -> String {
@@ -225,7 +229,7 @@ pub(crate) fn plan_segment(plan_path: &str, shell_available: bool) -> String {
         "Shell commands are unavailable in plan mode on this machine (no sandbox backend), so rely on Read, Grep, Glob, WebSearch, and WebFetch for investigation."
     };
     format!(
-        "\n\n# Plan mode\n\nYou are in plan mode: a no-change regime for designing an approach the user approves before any edits happen. The only file you may create or modify is the plan file:\n\n  {plan_path}\n\nUse the Write and Edit tools with that exact path to create and update the plan as you investigate — those tools are permitted to write this one file even though it sits outside the workspace. Do NOT write it with shell redirection (`>`, `>>`, `tee`): the shell is read-only here and will refuse. The plan must be self-contained — state the context (why), the concrete changes (what, by file), and how to verify them — so it stays useful after the conversation is compacted.\n\n{shell}\n\nWorkflow: investigate (delegate explore and architect sub-agents for breadth and design), use the Ask tool when the user's judgment is needed, write the plan to the file with Write/Edit, then call ProposePlan to present it for approval. Never claim a plan is ready in prose — always call ProposePlan. If the user asks you to implement immediately, tell them plan mode is on and either present the plan with ProposePlan or note they can turn plan mode off. If the plan file already has content from earlier in this session, continue or revise it rather than starting over."
+        "\n\n# Plan mode\n\nYou are in plan mode: an execution-control regime for preparing an approval contract before meaningful project changes. Planning is before commitment, not before thought: use read-only investigation, search, file inspection, and focused analysis to reduce goal error, approach error, and validation error before proposing implementation. The only file you may create or modify is the plan file:\n\n  {plan_path}\n\nUse Write and Edit with that exact path to update the plan as the planning state matures. Those tools may write this one file even though it sits outside the workspace. Do NOT write it with shell redirection (`>`, `>>`, `tee`): the shell is read-only here and will refuse. Treat the plan file as durable shared state, but keep the visible plan concise, structured, and executable rather than a raw research log.\n\n{shell}\n\nPlan adaptively. Keep trivial, obvious, reversible work very light. For ambiguous, cross-cutting, user-visible, persistence, security, public API, architecture, or hard-to-verify work, investigate more deeply and design stronger validation. For product, UX, creative, or greenfield work, first shape the problem with a few options, trade-offs, and a recommended direction before turning the chosen direction into an implementation plan.\n\nEvidence comes before speculation and before user questions when you can inspect the facts yourself. Ask only for material user judgment about intent, priority, preference, scope, or trade-offs; when asking, state what you found, why the decision matters, options if useful, and your recommended default when you have one. Delegation is optional and purpose-driven: use explore agents for focused evidence and architect or critic agents for high-consequence plan review, but do not delegate as ritual.\n\nThe plan artifact should show decisions already made during planning, not a checklist of planning-process tasks. Use only sections that matter. A normal implementation plan may include Goal, Evidence/context, Scope/non-goals, Approach, Implementation slices, Validation, Risks/assumptions/open decisions, and Material deviation triggers. A product/design plan may include Problem framing, Options, Trade-offs, Recommended direction, Decision needed, then a follow-up implementation plan after direction approval.\n\nThe plan constrains material choices, not every local implementation detail. Include material deviation triggers when relevant: scope expansion, user-visible behavior change, public API/protocol/schema/persistence/auth/security impact, new dependency, substantially touching unrelated systems, changed validation strategy, dropped planned verification, contradiction of explicit user preference, or a false core assumption. Safe local tactical choices can remain agent discretion when validation is clear.\n\nWhen the plan is mature enough for approval, write or revise the plan file and call ProposePlan. Do not treat a non-empty plan file as ready by itself. Do not claim an approval plan is ready only in prose. If the user asks you to implement while plan mode is on, either call ProposePlan with the mature plan or explain the remaining blocker to approval. If the plan file already has content from earlier in this session, continue or revise it rather than starting over."
     )
 }
 
@@ -274,5 +278,41 @@ mod tests {
     fn slugify_caps_length() {
         let long = "word ".repeat(40);
         assert!(slugify(&long).len() <= 48);
+    }
+
+    #[test]
+    fn plan_segment_contains_execution_control_guidance() {
+        let prompt = super::plan_segment("/tmp/plan.md", true);
+        for expected in [
+            "execution-control regime",
+            "goal error, approach error, and validation error",
+            "only file you may create or modify is the plan file",
+            "Plan adaptively",
+            "Evidence comes before speculation",
+            "Ask only for material user judgment",
+            "Delegation is optional",
+            "product, UX, creative, or greenfield work",
+            "Material deviation triggers",
+            "Do not treat a non-empty plan file as ready by itself",
+        ] {
+            assert!(prompt.contains(expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn approval_handoff_contains_change_control_guidance() {
+        let path = std::path::Path::new("/tmp/approved.md");
+        let inject = super::approved_plan_inject(path);
+        for expected in [
+            "read the approved plan first",
+            "safe local implementation discretion",
+            "material deviation",
+            "scope expansion",
+            "changed validation",
+            "run the planned verification",
+            "report what changed",
+        ] {
+            assert!(inject.contains(expected), "missing {expected}");
+        }
     }
 }
