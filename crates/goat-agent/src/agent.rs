@@ -93,6 +93,8 @@ const ARCHITECT_PROMPT: &str = "You are a read-only software architect designing
 
 const GENERAL_PROMPT: &str = "You are a general-purpose agent handling a delegated task end to end. Use the available tools to complete the task, verify the result, and return a concise summary of what you did and the outcome.";
 
+const CRITIC_PROMPT: &str = "You are a read-only plan reviewer. You are given a plan and a perspective to review it from (for code work: architecture, quality, or security; for a new project: product or problem framing; for design work: trade-offs or alternatives). Read the relevant code to ground your review, then critique the plan only from your assigned perspective. Flag concrete problems: wrong or risky decisions, missed edge cases, unconsidered alternatives, gaps between the plan and reality, and unstated assumptions that would bite during implementation. You only FLAG — you never edit the plan and never modify any file; the author resolves your findings with the user. Return a short list of findings, each with why it matters and how severe it is, and say plainly if you found nothing material. Do not restate the plan, do not nitpick style, and do not flag what you cannot ground in evidence.";
+
 fn builtin_agents() -> Vec<AgentSpec> {
     vec![
         AgentSpec {
@@ -133,6 +135,21 @@ fn builtin_agents() -> Vec<AgentSpec> {
             effort: None,
             prompt: GENERAL_PROMPT.to_owned(),
             exec_policy: SandboxPolicy::Full,
+        },
+        AgentSpec {
+            name: "critic".to_owned(),
+            description: "Read-only agent that reviews a plan from one perspective (architecture/quality/security for code, product/problem-framing for new projects, trade-offs/alternatives for design) and flags concrete problems without editing anything. Give it the plan plus a perspective; run several in parallel for independent perspectives.".to_owned(),
+            tools: ToolSelection::Only(vec![
+                "Read".to_owned(),
+                "Grep".to_owned(),
+                "Glob".to_owned(),
+                "WebFetch".to_owned(),
+                "Bash".to_owned(),
+            ]),
+            model: None,
+            effort: Some(Effort::High),
+            prompt: CRITIC_PROMPT.to_owned(),
+            exec_policy: SandboxPolicy::ReadOnly { network: false },
         },
     ]
 }
@@ -259,6 +276,10 @@ mod tests {
         assert!(!explore.tools.allows("Write"));
         let general = registry.get("general").expect("general builtin");
         assert!(general.tools.allows("Write"));
+        let critic = registry.get("critic").expect("critic builtin");
+        assert!(critic.tools.allows("Read"));
+        assert!(!critic.tools.allows("Write"));
+        assert!(!critic.tools.allows("Edit"));
     }
 
     #[test]

@@ -353,7 +353,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 
 fn plan_desired_height(area_height: u16) -> u16 {
     let max = area_height.saturating_sub(3).max(9);
-    let preferred = area_height.div_ceil(2).max(9);
+    let preferred = (area_height / 3).max(9);
     preferred.min(max)
 }
 
@@ -385,7 +385,7 @@ fn render_plan_overlay(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme:
 fn render_plan_title(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme: Theme) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" Plan contract", theme.base()),
+            Span::styled(" plan", theme.plan()),
             Span::styled(format!("  {}", plan.path), theme.muted()),
         ])),
         area,
