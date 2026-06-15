@@ -47,14 +47,9 @@ fn word_boundary(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-fn prompt_cols(plan: bool) -> u16 {
-    let marker = if plan {
-        symbols::marker::PLAN
-    } else {
-        symbols::marker::PROMPT
-    };
+fn prompt_cols() -> u16 {
     u16::try_from(
-        marker
+        symbols::marker::PROMPT
             .chars()
             .filter_map(UnicodeWidthChar::width)
             .sum::<usize>(),
@@ -80,9 +75,7 @@ impl Composer {
     }
 
     pub fn desired_height(&self, width: u16) -> u16 {
-        let wrap_width = width
-            .saturating_sub(prompt_cols(false) + BORDER_COLS)
-            .max(1);
+        let wrap_width = width.saturating_sub(prompt_cols() + BORDER_COLS).max(1);
         let total: usize = self
             .lines
             .iter()
@@ -377,23 +370,26 @@ impl Composer {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool, plan: bool) {
-        let border = match (self.shell, focused) {
-            (true, true) => theme.shell(),
-            (true, false) => theme.shell_dim(),
-            (false, true) => theme.border(),
-            (false, false) => theme.border_dim(),
-        };
         let plan = plan && !self.shell;
+        let border = match (self.shell, plan, focused) {
+            (true, _, true) => theme.shell(),
+            (true, _, false) => theme.shell_dim(),
+            (_, true, true) => theme.plan(),
+            (_, true, false) => theme.plan_dim(),
+            (false, false, true) => theme.border(),
+            (false, false, false) => theme.border_dim(),
+        };
         let (marker, marker_style) = if self.shell {
             (symbols::marker::SHELL, theme.shell())
-        } else if plan {
-            (symbols::marker::PLAN, theme.accent())
         } else {
             (symbols::marker::PROMPT, theme.accent())
         };
-        let block = Block::bordered()
+        let mut block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(border);
+        if plan {
+            block = block.title(Span::styled(" plan ", theme.plan()));
+        }
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -411,13 +407,13 @@ impl Composer {
                 inner,
             );
             if focused {
-                let x = inner.x + prompt_cols(plan);
+                let x = inner.x + prompt_cols();
                 frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
             }
             return;
         }
 
-        let prompt_cols = prompt_cols(plan);
+        let prompt_cols = prompt_cols();
         let wrap_width = inner.width.saturating_sub(prompt_cols).max(1);
         let mut rows: Vec<Line> = Vec::new();
         for chars in &self.lines {
