@@ -99,6 +99,14 @@ pub fn transport(err: &reqwest::Error) -> StreamError {
     StreamError::transport(err.to_string())
 }
 
+pub fn tool_arguments(input: &serde_json::Value) -> String {
+    if input.is_object() {
+        input.to_string()
+    } else {
+        "{}".to_owned()
+    }
+}
+
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_mins(5))

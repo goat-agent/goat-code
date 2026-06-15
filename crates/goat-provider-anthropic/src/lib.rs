@@ -492,7 +492,7 @@ fn content_block_json(block: &ContentBlock) -> serde_json::Value {
             "type": "tool_use",
             "id": id,
             "name": name,
-            "input": input,
+            "input": if input.is_object() { input.clone() } else { json!({}) },
         }),
         ContentBlock::ToolResult {
             tool_use_id,

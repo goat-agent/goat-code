@@ -85,6 +85,13 @@ async fn drain_steering(ctx: &Ctx<'_>, run: &Run<'_>, conversation: &mut Convers
     }
 }
 
+fn normalize_tool_input(input: String) -> String {
+    match serde_json::from_str::<serde_json::Value>(&input) {
+        Ok(value) if value.is_object() => input,
+        _ => "{}".to_owned(),
+    }
+}
+
 pub(crate) async fn run_round(
     ctx: &Ctx<'_>,
     run: &Run<'_>,
@@ -130,7 +137,7 @@ pub(crate) async fn run_round(
                     redacted.push(data);
                 }
                 Some(StreamEvent::ToolCall { id: vendor_id, name, input }) => {
-                    pending_calls.push((vendor_id, name, input));
+                    pending_calls.push((vendor_id, name, normalize_tool_input(input)));
                 }
                 Some(StreamEvent::Usage { usage: u }) => {
                     usage = Some(u);
@@ -236,7 +243,10 @@ pub(crate) async fn process_round_output(
             content.push(ContentBlock::Text { text: raw.clone() });
         }
         for (vendor_id, name, input_json) in &pending_calls {
-            let input_val = serde_json::from_str(input_json).unwrap_or(serde_json::Value::Null);
+            let input_val = serde_json::from_str(input_json)
+                .ok()
+                .filter(serde_json::Value::is_object)
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
             content.push(ContentBlock::ToolUse {
                 id: vendor_id.clone(),
                 name: name.clone(),
@@ -405,5 +415,34 @@ pub(crate) async fn core_loop(
             return LoopOutcome::Transitioned;
         }
         compacted_for_overflow = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_tool_input;
+
+    #[test]
+    fn empty_input_becomes_empty_object() {
+        assert_eq!(normalize_tool_input(String::new()), "{}");
+    }
+
+    #[test]
+    fn whitespace_input_becomes_empty_object() {
+        assert_eq!(normalize_tool_input("   ".to_owned()), "{}");
+    }
+
+    #[test]
+    fn non_object_input_becomes_empty_object() {
+        assert_eq!(normalize_tool_input("5".to_owned()), "{}");
+        assert_eq!(normalize_tool_input("\"hi\"".to_owned()), "{}");
+        assert_eq!(normalize_tool_input("[1,2]".to_owned()), "{}");
+        assert_eq!(normalize_tool_input("null".to_owned()), "{}");
+    }
+
+    #[test]
+    fn object_input_is_preserved() {
+        let input = "{\"path\":\"a.txt\"}".to_owned();
+        assert_eq!(normalize_tool_input(input.clone()), input);
     }
 }
