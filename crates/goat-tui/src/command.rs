@@ -8,10 +8,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    overlay::{hint_line, selection_row},
+    overlay::{hint_line, selection_row, truncate_to_width},
     symbols,
     theme::Theme,
 };
@@ -50,27 +50,6 @@ pub struct Completion {
     start: usize,
     end: usize,
     replacement: String,
-}
-
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if s.width() <= max_width {
-        return s.to_owned();
-    }
-    let mut out = String::new();
-    let mut width = 0usize;
-    for c in s.chars() {
-        let char_width = c.width().unwrap_or(0);
-        if width + char_width + 1 > max_width {
-            break;
-        }
-        out.push(c);
-        width += char_width;
-    }
-    out.push_str(symbols::ui::ELLIPSIS);
-    out
 }
 
 #[derive(Clone)]
@@ -233,11 +212,7 @@ fn render_row(selected: bool, width: usize, entry: &Row, theme: Theme) -> Line<'
     if !entry.aliases.is_empty() {
         name_spans.push(Span::styled(alias_label(&entry.aliases), theme.muted()));
     }
-    let desc_style = if selected {
-        theme.base()
-    } else {
-        theme.muted()
-    };
+    let desc_style = theme.muted();
     let left_w: usize = name_spans.iter().map(|span| span.content.width()).sum();
     let desc_width = width.saturating_sub(left_w + 6);
     let right = (desc_width > 3 && !entry.description.is_empty()).then(|| {
@@ -459,7 +434,8 @@ fn token_spans(args: &str) -> Vec<(usize, usize)> {
 mod tests {
     use unicode_width::UnicodeWidthStr;
 
-    use super::{CommandMenu, truncate_to_width};
+    use super::CommandMenu;
+    use crate::overlay::truncate_to_width;
     use goat_commands::CommandRegistry;
 
     #[test]

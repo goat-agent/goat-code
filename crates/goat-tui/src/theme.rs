@@ -25,10 +25,11 @@ pub struct Theme {
     muted: Color,
     accent: Color,
     border: Color,
-    selection: Color,
     panel: Color,
     shell: Color,
     shell_dim: Color,
+    plan: Color,
+    plan_dim: Color,
     pub code: CodePalette,
 }
 
@@ -51,10 +52,11 @@ impl Theme {
             muted: Color::Rgb(0x6b, 0x70, 0x7c),
             accent: Color::Rgb(0xbb, 0x9a, 0xf7),
             border: Color::Rgb(0x2a, 0x2c, 0x32),
-            selection: Color::Rgb(0x2f, 0x33, 0x3e),
             panel: Color::Rgb(0x1b, 0x1b, 0x1e),
             shell: Color::Rgb(0xdb, 0x4b, 0x4b),
             shell_dim: Color::Rgb(0x54, 0x29, 0x2e),
+            plan: Color::Rgb(0x56, 0x9c, 0xd6),
+            plan_dim: Color::Rgb(0x2b, 0x40, 0x52),
             code: CodePalette {
                 bg: Color::Reset,
                 keyword: Color::Rgb(0x56, 0x9c, 0xd6),
@@ -79,10 +81,11 @@ impl Theme {
             muted: Color::Rgb(0x8a, 0x8f, 0x98),
             accent: Color::Rgb(0x6a, 0x3d, 0xc9),
             border: Color::Rgb(0xd9, 0xdc, 0xe1),
-            selection: Color::Rgb(0xdd, 0xe3, 0xec),
             panel: Color::Rgb(0xee, 0xee, 0xf0),
             shell: Color::Rgb(0xb0, 0x35, 0x54),
             shell_dim: Color::Rgb(0xe6, 0xc2, 0xcb),
+            plan: Color::Rgb(0x26, 0x7f, 0x99),
+            plan_dim: Color::Rgb(0xc2, 0xd8, 0xe1),
             code: CodePalette {
                 bg: Color::Reset,
                 keyword: Color::Rgb(0x00, 0x00, 0xff),
@@ -131,6 +134,14 @@ impl Theme {
         Style::new().fg(self.shell_dim)
     }
 
+    pub fn plan(self) -> Style {
+        Style::new().fg(self.plan)
+    }
+
+    pub fn plan_dim(self) -> Style {
+        Style::new().fg(self.plan_dim)
+    }
+
     pub fn role_user(self) -> Style {
         Style::new().fg(self.user)
     }
@@ -141,10 +152,6 @@ impl Theme {
 
     pub fn role_tool(self) -> Style {
         Style::new().fg(self.tool)
-    }
-
-    pub fn selected_row(self) -> Style {
-        Style::new().bg(self.selection)
     }
 
     pub fn error(self) -> Style {

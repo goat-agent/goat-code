@@ -568,12 +568,6 @@ struct MessageDeltaUsage {
 #[derive(Deserialize)]
 struct MessageDelta {
     usage: Option<MessageDeltaUsage>,
-    delta: Option<MessageDeltaBody>,
-}
-
-#[derive(Deserialize)]
-struct MessageDeltaBody {
-    stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -675,7 +669,6 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
     let mut stream = response.bytes_stream().eventsource();
     let mut tool_calls: HashMap<u32, (String, String, String)> = HashMap::new();
     let mut usage = Usage::default();
-    let mut window_exceeded = false;
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => match event.event.as_str() {
@@ -690,17 +683,10 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
                     }
                 }
                 "message_delta" => {
-                    if let Ok(delta) = serde_json::from_str::<MessageDelta>(&event.data) {
-                        if let Some(u) = delta.usage {
-                            usage.output_tokens = u.output_tokens;
-                        }
-                        if delta
-                            .delta
-                            .and_then(|body| body.stop_reason)
-                            .is_some_and(|reason| reason == "model_context_window_exceeded")
-                        {
-                            window_exceeded = true;
-                        }
+                    if let Ok(delta) = serde_json::from_str::<MessageDelta>(&event.data)
+                        && let Some(u) = delta.usage
+                    {
+                        usage.output_tokens = u.output_tokens;
                     }
                 }
                 "content_block_start" => {
@@ -768,16 +754,6 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
                 }
                 "message_stop" => {
                     let _ = events.send(StreamEvent::Usage { usage }).await;
-                    if window_exceeded {
-                        let _ = events
-                            .send(StreamEvent::Failed {
-                                error: goat_provider::StreamError::context_overflow(
-                                    "model context window exceeded mid-stream",
-                                ),
-                            })
-                            .await;
-                        return;
-                    }
                     break;
                 }
                 "error" => {

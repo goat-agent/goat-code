@@ -840,9 +840,6 @@ async fn run_one_turn(
         );
         if let Some(transition) = pending_transition {
             *mode = transition.mode;
-            if transition.mode == Mode::Normal {
-                // keep plan_path so the approved plan stays readable in normal mode
-            }
             if let Some(tid) = ids.stored_thread
                 && let Err(err) = ctx
                     .store

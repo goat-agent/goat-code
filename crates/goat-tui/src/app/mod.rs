@@ -108,9 +108,9 @@ pub struct App {
     pub(crate) follow: bool,
     pub(crate) viewport_rows: u16,
     pub(crate) models: Vec<ModelEntry>,
-    pub(crate) models_loaded: bool,
     pub(crate) model: Option<ModelTarget>,
     pub(crate) overlay: Overlay,
+    pub(crate) pending_ask: Option<(AskPicker, ToolCallId)>,
     pub(crate) pending_resume: Option<ResumeIntent>,
     pub(crate) account_entries: Vec<AccountEntry>,
     pub(crate) mouse_capture: bool,
@@ -124,7 +124,7 @@ pub struct App {
     pub(crate) usage_last: HashMap<(String, String), Usage>,
     pub(crate) usage_total: HashMap<(String, String), (u64, u64)>,
     pub(crate) rate_limits: HashMap<(String, String), (RateLimitSnapshot, i64)>,
-    pub(crate) context_window: Option<u32>,
+    pub(crate) context_window: HashMap<(String, String), u32>,
     pub(crate) compaction_threshold: Option<u32>,
     pub(crate) retry: Option<RetryState>,
     pub(crate) compacting: bool,
@@ -132,8 +132,6 @@ pub struct App {
     pub(crate) focused: bool,
     pub(crate) bell_pending: bool,
     pub(crate) mode: goat_protocol::Mode,
-    pub(crate) mode_pending: bool,
-    pub(crate) plan_path: Option<String>,
     pub(crate) picker: Option<ratatui_image::picker::Picker>,
 }
 
@@ -171,9 +169,9 @@ impl App {
             follow: true,
             viewport_rows: 0,
             models: Vec::new(),
-            models_loaded: false,
             model: None,
             overlay: Overlay::None,
+            pending_ask: None,
             pending_resume: None,
             account_entries: Vec::new(),
             mouse_capture: cfg.mouse_capture_enabled,
@@ -187,7 +185,7 @@ impl App {
             usage_last: HashMap::new(),
             usage_total: HashMap::new(),
             rate_limits: HashMap::new(),
-            context_window: None,
+            context_window: HashMap::new(),
             compaction_threshold: None,
             retry: None,
             compacting: false,
@@ -195,8 +193,6 @@ impl App {
             focused: true,
             bell_pending: false,
             mode: goat_protocol::Mode::Normal,
-            mode_pending: false,
-            plan_path: None,
             picker: None,
         }
     }
@@ -228,7 +224,9 @@ impl App {
                 Vec::new()
             }
             AppEvent::Input(CtEvent::Key(key)) if key.kind == KeyEventKind::Press => {
-                self.on_key(key)
+                let ops = self.on_key(key);
+                self.promote_pending_ask();
+                ops
             }
             AppEvent::Input(CtEvent::Paste(text)) => {
                 match &mut self.overlay {
@@ -285,6 +283,7 @@ impl App {
             AppEvent::Input(_) => Vec::new(),
             AppEvent::Engine(event) => {
                 let ops = self.on_engine(event);
+                self.promote_pending_ask();
                 self.dirty = true;
                 ops
             }
@@ -434,7 +433,6 @@ impl App {
         };
         let mut ops = vec![Op::SetMode { mode: target }];
         if self.active.is_some() {
-            self.mode_pending = true;
             self.push_toast(
                 NotifyKind::Info,
                 format!("{} mode starts after this turn", mode_label(target)),
@@ -452,16 +450,12 @@ impl App {
         ops
     }
 
-    pub(crate) fn on_mode_changed(&mut self, mode: goat_protocol::Mode, plan_path: Option<String>) {
+    pub(crate) fn on_mode_changed(
+        &mut self,
+        mode: goat_protocol::Mode,
+        _plan_path: Option<String>,
+    ) {
         self.mode = mode;
-        self.mode_pending = false;
-        if mode == goat_protocol::Mode::Plan {
-            if plan_path.is_some() {
-                self.plan_path = plan_path;
-            }
-        } else {
-            self.plan_path = None;
-        }
         self.dirty = true;
     }
 
@@ -760,6 +754,22 @@ impl App {
     pub(crate) fn is_busy(&self) -> bool {
         self.active.is_some()
     }
+    pub(crate) fn reset_active_state(&mut self) {
+        self.active = None;
+        self.active_shell = false;
+        self.task_start = None;
+        self.thinking = false;
+        self.retry = None;
+        self.compacting = false;
+    }
+    pub(crate) fn promote_pending_ask(&mut self) {
+        if matches!(self.overlay, Overlay::None | Overlay::Commands(_))
+            && let Some((picker, call)) = self.pending_ask.take()
+        {
+            self.overlay = Overlay::Ask(picker, call);
+            self.dirty = true;
+        }
+    }
     pub(crate) fn cwd(&self) -> &str {
         &self.cwd
     }
@@ -921,20 +931,27 @@ impl App {
         Some(format!("{running} agents · {}", parts.join(", ")))
     }
 
+    pub(crate) fn current_context_window(&self) -> Option<u32> {
+        let model = self.model.as_ref()?;
+        self.context_window
+            .get(&(model.provider.clone(), model.account.clone()))
+            .copied()
+    }
+
     pub(crate) fn build_usage_view(&self) -> UsageView<'_> {
         UsageView::new(
             &self.account_entries,
             &self.usage_last,
             &self.usage_total,
             &self.rate_limits,
-            self.context_window,
+            self.current_context_window(),
             self.model.as_ref(),
         )
     }
 
     pub(crate) fn ctx_indicator(&self) -> Option<(f32, u64, u32)> {
         let model = self.model.as_ref()?;
-        let window = self.context_window?;
+        let window = self.current_context_window()?;
         let key = (model.provider.clone(), model.account.clone());
         let usage = self.usage_last.get(&key)?;
         let used = u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
@@ -1953,5 +1970,81 @@ mod tests {
         app.close_agent_selector();
         assert!(matches!(app.main_view, super::MainView::Live));
         assert_eq!(app.transcript().items.len(), 2);
+    }
+
+    #[test]
+    fn error_during_compaction_clears_compacting_status() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::CompactionStarted { id: TaskId(1) });
+        assert!(app.compacting_status().is_some());
+        app.on_engine(EngineEvent::Error {
+            id: Some(TaskId(1)),
+            message: "boom".to_owned(),
+        });
+        assert!(app.compacting_status().is_none());
+        assert!(!app.is_busy());
+    }
+
+    #[test]
+    fn ask_defers_while_modal_open_then_promotes_on_close() {
+        use goat_protocol::{AskQuestion, ToolCallId};
+        let mut app = App::new(Theme::dark());
+        app.overlay = Overlay::Help;
+        app.on_engine(EngineEvent::AskStarted {
+            id: TaskId(1),
+            call: ToolCallId(9),
+            questions: vec![AskQuestion {
+                question: "ok?".to_owned(),
+                options: Vec::new(),
+            }],
+        });
+        assert!(matches!(app.overlay, Overlay::Help));
+        assert!(app.pending_ask.is_some());
+
+        app.overlay = Overlay::None;
+        app.promote_pending_ask();
+        assert!(matches!(app.overlay, Overlay::Ask(..)));
+        assert!(app.pending_ask.is_none());
+    }
+
+    #[test]
+    fn usage_attributes_to_event_model_not_current() {
+        use goat_protocol::Usage;
+        let mut app = App::new(Theme::dark());
+        app.model = Some(ModelTarget {
+            provider: "anthropic".to_owned(),
+            model: "sonnet".to_owned(),
+            account: "default".to_owned(),
+            effort: None,
+        });
+        app.on_engine(EngineEvent::Usage {
+            id: TaskId(1),
+            provider: "openai".to_owned(),
+            account: "work".to_owned(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            context_window: Some(128_000),
+            compaction_threshold: None,
+        });
+        let openai = app
+            .usage_total
+            .get(&("openai".to_owned(), "work".to_owned()))
+            .copied();
+        assert_eq!(openai, Some((10, 5)));
+        assert!(
+            !app.usage_total
+                .contains_key(&("anthropic".to_owned(), "default".to_owned()))
+        );
+        assert_eq!(
+            app.context_window
+                .get(&("openai".to_owned(), "work".to_owned()))
+                .copied(),
+            Some(128_000)
+        );
+        assert!(app.current_context_window().is_none());
     }
 }

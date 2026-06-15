@@ -183,18 +183,19 @@ async fn fetch(url: &str) -> Result<ToolOutput, ToolError> {
     }
 
     let raw = String::from_utf8_lossy(&body);
-    let mut text = if is_html {
+    let text = if is_html {
         htmd::convert(&raw).unwrap_or_else(|_| raw.into_owned())
     } else {
         raw.into_owned()
     };
 
-    if text.len() > MAX_OUTPUT {
-        let boundary = text.floor_char_boundary(MAX_OUTPUT);
-        text.truncate(boundary);
-        text.push_str("\n\n[content truncated]");
-    } else if overflowed {
-        text.push_str("\n\n[content truncated]");
+    let mut text = if text.len() > MAX_OUTPUT {
+        goat_tool::truncate(text, MAX_OUTPUT)
+    } else {
+        text
+    };
+    if overflowed && text.len() <= MAX_OUTPUT {
+        text.push_str(goat_tool::TRUNCATION_NOTICE);
     }
 
     Ok(ToolOutput::text(text))

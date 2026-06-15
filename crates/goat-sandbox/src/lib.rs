@@ -52,6 +52,33 @@ mod backend {
 
     const PROFILE_NET: &str = "(allow network*)\n";
 
+    const SECRET_SUBPATHS: [&str; 6] = [
+        ".ssh",
+        ".goat-code",
+        ".aws",
+        ".gnupg",
+        ".config/gcloud",
+        ".config/goat-code",
+    ];
+
+    fn secret_read_denies() -> String {
+        use std::fmt::Write as _;
+        let Some(home) = std::env::var_os("HOME") else {
+            return String::new();
+        };
+        let home = Path::new(&home);
+        let mut out = String::new();
+        for sub in SECRET_SUBPATHS {
+            let path = home.join(sub);
+            let Some(path) = path.to_str() else {
+                continue;
+            };
+            let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+            let _ = writeln!(out, "(deny file-read* (subpath \"{escaped}\"))");
+        }
+        out
+    }
+
     pub fn available() -> bool {
         Path::new(SANDBOX_EXEC).exists()
     }
@@ -64,6 +91,7 @@ mod backend {
     ) -> SandboxedCommand {
         let mut profile = String::with_capacity(512);
         profile.push_str(PROFILE_HEAD);
+        profile.push_str(&secret_read_denies());
         if network {
             profile.push_str(PROFILE_NET);
         }
@@ -91,6 +119,15 @@ mod backend {
 mod backend {
     use super::SandboxedCommand;
     use std::{ffi::OsString, path::Path, sync::OnceLock};
+
+    const SECRET_SUBPATHS: [&str; 6] = [
+        ".ssh",
+        ".goat-code",
+        ".aws",
+        ".gnupg",
+        ".config/gcloud",
+        ".config/goat-code",
+    ];
 
     fn bwrap_path() -> Option<&'static Path> {
         static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
@@ -133,9 +170,18 @@ mod backend {
             OsString::from("--unshare-uts"),
             OsString::from("--unshare-cgroup-try"),
             OsString::from("--die-with-parent"),
-            OsString::from("--chdir"),
-            cwd.into(),
         ];
+        for sub in SECRET_SUBPATHS {
+            if let Some(home) = std::env::var_os("HOME") {
+                let path = Path::new(&home).join(sub);
+                if path.exists() {
+                    args.push(OsString::from("--tmpfs"));
+                    args.push(path.into());
+                }
+            }
+        }
+        args.push(OsString::from("--chdir"));
+        args.push(cwd.into());
         if !network {
             args.push(OsString::from("--unshare-net"));
         }
@@ -165,5 +211,30 @@ mod backend {
         _network: bool,
     ) -> SandboxedCommand {
         unreachable!("read_only is gated by backend_available()")
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn read_only_profile_denies_secret_paths_but_allows_general_reads() {
+        let home = std::env::var("HOME").expect("HOME");
+        let cmd =
+            super::backend::read_only("echo hi", Path::new("/work"), Path::new("/tmp/g"), false);
+        let profile = cmd
+            .args
+            .iter()
+            .filter_map(|a| a.to_str())
+            .find(|a| a.contains("(deny default)"))
+            .expect("profile arg");
+        assert!(profile.contains("(allow file-read*)"));
+        assert!(profile.contains(&format!("(deny file-read* (subpath \"{home}/.ssh\"))")));
+        assert!(profile.contains(&format!(
+            "(deny file-read* (subpath \"{home}/.goat-code\"))"
+        )));
+        assert!(!profile.contains("/work"));
     }
 }
