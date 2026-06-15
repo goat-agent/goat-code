@@ -71,7 +71,8 @@ impl App {
                         TranscriptEntry::Tool { call, outcome } => {
                             let id = call.id;
                             self.transcript.push_tool(call);
-                            self.transcript.finish_tool(id, outcome);
+                            self.transcript
+                                .finish_tool(id, outcome, self.picker.as_ref());
                         }
                         TranscriptEntry::Compaction {
                             tokens_before,
@@ -250,9 +251,12 @@ impl App {
             }
             EngineEvent::ToolDone { id, call, outcome } => {
                 if let Some(i) = self.agent_index(id) {
-                    self.agent_runs[i].transcript.finish_tool(call, outcome);
+                    self.agent_runs[i]
+                        .transcript
+                        .finish_tool(call, outcome, self.picker.as_ref());
                 } else {
-                    self.transcript.finish_tool(call, outcome);
+                    self.transcript
+                        .finish_tool(call, outcome, self.picker.as_ref());
                 }
             }
             EngineEvent::ShellDone { id, output } => {

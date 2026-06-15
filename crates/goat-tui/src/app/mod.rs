@@ -134,6 +134,7 @@ pub struct App {
     pub(crate) mode: goat_protocol::Mode,
     pub(crate) mode_pending: bool,
     pub(crate) plan_path: Option<String>,
+    pub(crate) picker: Option<ratatui_image::picker::Picker>,
 }
 
 pub(crate) struct RetryState {
@@ -196,6 +197,7 @@ impl App {
             mode: goat_protocol::Mode::Normal,
             mode_pending: false,
             plan_path: None,
+            picker: None,
         }
     }
 
@@ -971,8 +973,9 @@ pub async fn run(
     mut events: Receiver<EngineEvent>,
     theme: Theme,
 ) -> color_eyre::Result<()> {
-    let app = App::new(theme);
-    let mut terminal = tui::init(app.mouse_capture)?;
+    let mut app = App::new(theme);
+    let (mut terminal, picker) = tui::init(app.mouse_capture)?;
+    app.picker = picker;
     let result = event_loop(&mut terminal, &ops, &mut events, app).await;
     tui::restore();
     let _ = ops.send(Op::Shutdown).await;
@@ -1871,6 +1874,7 @@ mod tests {
                     outcome: ToolOutcome {
                         ok: true,
                         summary: Some("done".to_owned()),
+                        image: None,
                     },
                 },
             ],
@@ -1927,6 +1931,7 @@ mod tests {
             outcome: ToolOutcome {
                 ok: true,
                 summary: None,
+                image: None,
             },
         });
 

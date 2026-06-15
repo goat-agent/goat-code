@@ -26,6 +26,13 @@ pub(crate) struct RenderCtx<'a> {
     pub working: Option<&'a Working>,
     pub queued: &'a [String],
     pub hl: &'a dyn Highlighter,
+    pub picker: Option<&'a ratatui_image::picker::Picker>,
+}
+
+struct ImagePlacement {
+    item: usize,
+    start: usize,
+    rows: u16,
 }
 
 struct RenderCache {
@@ -33,6 +40,7 @@ struct RenderCache {
     version: u64,
     lines: Vec<Line<'static>>,
     spinner_lines: Vec<usize>,
+    images: Vec<ImagePlacement>,
 }
 
 struct StreamCache {
@@ -62,6 +70,7 @@ pub(crate) enum Item {
         name: String,
         display: ToolDisplay,
         status: ToolStatus,
+        image: Option<Box<crate::screenshot::TranscriptImage>>,
     },
     Shell {
         id: TaskId,
@@ -127,17 +136,30 @@ impl Transcript {
             name: call.name,
             display: call.display,
             status: ToolStatus::Running,
+            image: None,
         });
     }
 
-    pub fn finish_tool(&mut self, call_id: ToolCallId, outcome: ToolOutcome) {
+    pub fn finish_tool(
+        &mut self,
+        call_id: ToolCallId,
+        mut outcome: ToolOutcome,
+        picker: Option<&ratatui_image::picker::Picker>,
+    ) {
         self.bump_version();
+        let built = outcome
+            .image
+            .take()
+            .map(|data| Box::new(crate::screenshot::TranscriptImage::new(data, picker)));
         for item in self.items.iter_mut().rev() {
-            if let Item::Tool { id, status, .. } = item
+            if let Item::Tool {
+                id, status, image, ..
+            } = item
                 && *id == call_id
                 && matches!(status, ToolStatus::Running)
             {
                 *status = ToolStatus::Done(outcome);
+                *image = built;
                 return;
             }
         }
@@ -198,6 +220,7 @@ impl Transcript {
                     *status = ToolStatus::Done(ToolOutcome {
                         ok: false,
                         summary: None,
+                        image: None,
                     });
                 }
                 if let Item::Shell { status, .. } = item
@@ -229,12 +252,13 @@ impl Transcript {
         if valid {
             return;
         }
-        let (lines, spinner_lines) = build_static_lines(&self.items, theme, width);
+        let (lines, spinner_lines, images) = build_static_lines(&self.items, theme, width);
         *self.cache.borrow_mut() = Some(RenderCache {
             width,
             version: self.version,
             lines,
             spinner_lines,
+            images,
         });
     }
 
@@ -365,6 +389,32 @@ impl Transcript {
             visible.extend(tail.into_iter().take(to).skip(from));
         }
         frame.render_widget(Paragraph::new(visible), area);
+        let Some(picker) = ctx.picker else {
+            return;
+        };
+        for placement in &cache.images {
+            if placement.start < start {
+                continue;
+            }
+            let top = placement.start - start;
+            let bottom = top + usize::from(placement.rows);
+            if bottom > height {
+                continue;
+            }
+            let Some(Item::Tool {
+                image: Some(img), ..
+            }) = self.items.get(placement.item)
+            else {
+                continue;
+            };
+            let rect = Rect {
+                x: area.x,
+                y: area.y + u16::try_from(top).unwrap_or(u16::MAX),
+                width: area.width,
+                height: placement.rows,
+            };
+            img.render(frame, rect, picker);
+        }
     }
 }
 
@@ -463,9 +513,10 @@ fn build_static_lines(
     items: &[Item],
     theme: Theme,
     width: u16,
-) -> (Vec<Line<'static>>, Vec<usize>) {
+) -> (Vec<Line<'static>>, Vec<usize>, Vec<ImagePlacement>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut spinner_lines: Vec<usize> = Vec::new();
+    let mut images: Vec<ImagePlacement> = Vec::new();
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
             let prev_is_tool = matches!(items.get(i - 1), Some(Item::Tool { .. }));
@@ -487,8 +538,24 @@ fn build_static_lines(
             spinner_lines.push(lines.len());
         }
         lines.extend(item_rows(item, theme, width));
+        if let Item::Tool {
+            image: Some(img), ..
+        } = item
+        {
+            let rows = img.rows();
+            if rows > 0 {
+                images.push(ImagePlacement {
+                    item: i,
+                    start: lines.len(),
+                    rows,
+                });
+                for _ in 0..rows {
+                    lines.push(Line::default());
+                }
+            }
+        }
     }
-    (lines, spinner_lines)
+    (lines, spinner_lines, images)
 }
 
 fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
@@ -800,6 +867,7 @@ mod tests {
         ToolOutcome {
             ok: true,
             summary: None,
+            image: None,
         }
     }
 
@@ -807,6 +875,7 @@ mod tests {
         ToolOutcome {
             ok: false,
             summary: Some(summary.to_owned()),
+            image: None,
         }
     }
 
@@ -836,7 +905,7 @@ mod tests {
                 ..
             }
         ));
-        t.finish_tool(ToolCallId(1), ok());
+        t.finish_tool(ToolCallId(1), ok(), None);
         assert!(matches!(&t.items[0], Item::Tool { status: ToolStatus::Done(o), .. } if o.ok));
     }
 
@@ -844,7 +913,7 @@ mod tests {
     fn tool_failed_with_summary() {
         let mut t = Transcript::default();
         t.push_tool(call(2, "Bash", "cargo build"));
-        t.finish_tool(ToolCallId(2), failed("error[E0308]"));
+        t.finish_tool(ToolCallId(2), failed("error[E0308]"), None);
         if let Some(Item::Tool {
             status: ToolStatus::Done(outcome),
             ..
@@ -864,7 +933,7 @@ mod tests {
         t.push_delta("step one");
         commit(&mut t, "step one");
         t.push_tool(call(1, "Read", "src/lib.rs"));
-        t.finish_tool(ToolCallId(1), ok());
+        t.finish_tool(ToolCallId(1), ok(), None);
         t.push_delta("step two");
         commit(&mut t, "step two");
 
@@ -899,8 +968,8 @@ mod tests {
         let mut t = Transcript::default();
         t.push_tool(call(10, "Read", "a"));
         t.push_tool(call(11, "Grep", "b"));
-        t.finish_tool(ToolCallId(11), ok());
-        t.finish_tool(ToolCallId(10), failed("err"));
+        t.finish_tool(ToolCallId(11), ok(), None);
+        t.finish_tool(ToolCallId(10), failed("err"), None);
         assert!(matches!(&t.items[0], Item::Tool { status: ToolStatus::Done(o), .. } if !o.ok));
         assert!(matches!(&t.items[1], Item::Tool { status: ToolStatus::Done(o), .. } if o.ok));
     }
@@ -916,6 +985,20 @@ mod tests {
             h2 > h1,
             "content_height must grow while streaming is active"
         );
+    }
+
+    #[test]
+    fn content_height_reserves_image_rows() {
+        let mut t = Transcript::default();
+        t.push_tool(call(1, "Browser", "screenshot"));
+        t.finish_tool(ToolCallId(1), ok(), None);
+        let without = height(&t, 80);
+        if let Some(Item::Tool { image, .. }) = t.items.last_mut() {
+            *image = Some(Box::new(crate::screenshot::TranscriptImage::fixed(5)));
+        }
+        t.bump_version();
+        let with = height(&t, 80);
+        assert_eq!(with, without + 5);
     }
 
     #[test]
@@ -990,6 +1073,7 @@ mod tests {
                         working: None,
                         queued: &[],
                         hl: &PlainHighlighter,
+                        picker: None,
                     },
                 );
             })
@@ -1014,6 +1098,7 @@ mod tests {
                         working: None,
                         queued: &[],
                         hl: &PlainHighlighter,
+                        picker: None,
                     },
                 );
             })

@@ -10,6 +10,7 @@ pub(crate) mod layout;
 pub mod markdown;
 mod overlay;
 mod picker;
+mod screenshot;
 pub mod symbols;
 mod theme;
 mod toast;
