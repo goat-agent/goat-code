@@ -5,12 +5,13 @@ use goat_tool::{
     path::{blocked_path, relative_display},
 };
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
-use regex::Regex;
 use serde::Deserialize;
 
 use crate::ignore_error;
 
 const DEFAULT_MAX_RESULTS: usize = 100;
+const MAX_RESULTS_CAP: usize = 10_000;
+const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 pub struct GrepTool;
 
@@ -72,7 +73,10 @@ impl Tool for GrepTool {
             };
             let cwd = ctx.cwd.clone();
             let blocked = ctx.blocked_paths.clone();
-            let max_results = args.max_results.unwrap_or(DEFAULT_MAX_RESULTS);
+            let max_results = args
+                .max_results
+                .unwrap_or(DEFAULT_MAX_RESULTS)
+                .min(MAX_RESULTS_CAP);
             let max_output_bytes = ctx.max_output_bytes;
 
             let join = tokio::task::spawn_blocking(move || {
@@ -105,7 +109,10 @@ fn search(
     max_results: usize,
     max_output_bytes: usize,
 ) -> Result<String, ToolError> {
-    let regex = Regex::new(pattern)?;
+    let regex = regex::RegexBuilder::new(pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_SIZE_LIMIT)
+        .build()?;
     let mut builder = WalkBuilder::new(root);
     builder.require_git(false);
     let blocked_for_walk = blocked.to_vec();
