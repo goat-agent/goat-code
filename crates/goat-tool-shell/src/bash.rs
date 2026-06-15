@@ -193,11 +193,7 @@ fn build_output(
         out.push_str("\n--- stderr ---\n");
         out.push_str(&String::from_utf8_lossy(stderr));
     }
-    if out.len() > max_bytes {
-        let boundary = out.floor_char_boundary(max_bytes);
-        out.truncate(boundary);
-        out.push_str("\n[output truncated]");
-    }
+    let mut out = goat_tool::truncate(out, max_bytes);
     let summary = build_summary(&out, code);
     let denied = read_only
         && matches!(code, Some(c) if c != 0)
