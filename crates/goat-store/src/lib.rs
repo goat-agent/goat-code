@@ -219,6 +219,10 @@ pub struct Store {
 impl Store {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -240,7 +244,9 @@ impl Store {
     {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().expect("store mutex poisoned");
+            let guard = conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&guard)
         })
         .await
@@ -837,5 +843,25 @@ mod tests {
         let thread = store.get_thread(id).await.unwrap();
         assert!(thread.is_some());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn open_sets_wal_and_busy_timeout() {
+        let path = std::env::temp_dir().join("goat-store-pragma-test.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        let (mode, timeout) = store
+            .run(|conn| {
+                let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+                let timeout: i64 = conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+                Ok((mode, timeout))
+            })
+            .await
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        assert!(timeout >= 5000);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 }
