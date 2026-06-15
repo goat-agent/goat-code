@@ -387,7 +387,9 @@ pub(crate) async fn core_loop(
             RoundEnd::Failed(error) => {
                 return LoopOutcome::Failed(crate::retry::failure_message(error, env.target));
             }
-            RoundEnd::Completed => {}
+            RoundEnd::Completed => {
+                compacted_for_overflow = false;
+            }
         }
         match process_round_output(
             ctx,
@@ -414,7 +416,6 @@ pub(crate) async fn core_loop(
         }) {
             return LoopOutcome::Transitioned;
         }
-        compacted_for_overflow = false;
     }
 }
 

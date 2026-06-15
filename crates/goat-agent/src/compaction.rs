@@ -95,6 +95,7 @@ pub(crate) fn proactive_limit(window: u32) -> u32 {
 }
 
 pub(crate) const KEEP_RECENT_TOKENS: u32 = 20_000;
+const KEEP_RECENT_MIN_TOKENS: u32 = 4_096;
 const MIN_SUMMARIZATION_BUDGET: u32 = 8_192;
 
 const SUMMARIZATION_PROMPT: &str = "Your context window is nearly full. Stop working on the task. Your only job now is to write a checkpoint summary of this session so the work can continue seamlessly in a fresh context window that will contain only this summary and the most recent messages.
@@ -433,7 +434,9 @@ async fn compact_inner(
             "summarization produced no summary".to_owned(),
         ));
     }
-    let keep_budget = KEEP_RECENT_TOKENS.min(budget / 4);
+    let keep_budget = KEEP_RECENT_TOKENS
+        .min(budget / 4)
+        .max(KEEP_RECENT_MIN_TOKENS);
     let tail_start = plan_tail(&messages, &db_ids, keep_budget);
     let anchor = run.ids().and_then(|ids| ids.user_message_db_id);
     let preserved = preserved_indices(&messages, &db_ids, anchor, tail_start);
