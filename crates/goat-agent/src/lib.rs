@@ -63,17 +63,22 @@ pub struct GoatAgent {
     store: Store,
     credentials: CredentialStore,
     target: Option<ModelTarget>,
+    mcp: Arc<goat_mcp::McpManager>,
 }
 
 impl GoatAgent {
-    pub fn new(
+    pub async fn new(
         registry: Registry,
         store: Store,
         credentials: CredentialStore,
         target: Option<ModelTarget>,
     ) -> Self {
         let config = goat_config::Config::load();
-        let mut tools = ToolRegistry::builtin();
+        let mcp = goat_mcp::load_manager(goat_config::mcp_config_path().as_deref()).await;
+        let mut tools = ToolRegistry::builtin().with_many(mcp.tools());
+        if !mcp.is_empty() {
+            tracing::info!(tool_count = mcp.len(), "registered mcp tools");
+        }
         if config.computer_use_enabled {
             match goat_tool_computer::desktop_tool() {
                 Ok(ct) => tools = tools.with(Box::new(ct)),
@@ -89,6 +94,7 @@ impl GoatAgent {
             store,
             credentials,
             target,
+            mcp,
         }
     }
 }
@@ -208,6 +214,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
         store,
         credentials,
         mut target,
+        mcp,
     } = agent;
     let mut conversation = conversation::Conversation::new();
     let mut tracker = compaction::ContextTracker::new();
@@ -474,6 +481,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
             Op::Shutdown => break,
         }
     }
+    mcp.shutdown().await;
 }
 
 #[cfg(test)]
@@ -623,7 +631,7 @@ mod tests {
         }
     }
 
-    fn seq_agent(delay_ms: u64) -> (GoatAgent, Arc<std::sync::atomic::AtomicUsize>) {
+    async fn seq_agent(delay_ms: u64) -> (GoatAgent, Arc<std::sync::atomic::AtomicUsize>) {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let provider = SeqTextProvider {
             calls: calls.clone(),
@@ -634,14 +642,14 @@ mod tests {
         let credentials =
             CredentialStore::new(std::env::temp_dir().join("goat-agent-steering.json"));
         (
-            GoatAgent::new(registry, store, credentials, Some(target("mock"))),
+            GoatAgent::new(registry, store, credentials, Some(target("mock"))).await,
             calls,
         )
     }
 
     #[tokio::test]
     async fn steering_extends_the_turn_and_injects_message() {
-        let (agent, calls) = seq_agent(150);
+        let (agent, calls) = seq_agent(150).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -690,7 +698,7 @@ mod tests {
 
     #[tokio::test]
     async fn dequeue_removes_pending_steering_message() {
-        let (agent, calls) = seq_agent(300);
+        let (agent, calls) = seq_agent(300).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -726,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn followup_message_mid_turn_is_never_lost() {
-        let (agent, _calls) = seq_agent(10);
+        let (agent, _calls) = seq_agent(10).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -840,7 +848,8 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let credentials =
             CredentialStore::new(std::env::temp_dir().join("goat-agent-overflow.json"));
-        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let agent =
+            GoatAgent::new(registry, store.clone(), credentials, Some(target("mock"))).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -926,7 +935,8 @@ mod tests {
             store.clone(),
             credentials.clone(),
             Some(target("mock")),
-        );
+        )
+        .await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -948,7 +958,8 @@ mod tests {
             delay_ms: 0,
         };
         let registry2 = Registry::from_providers(vec![Arc::new(provider2)]);
-        let agent2 = GoatAgent::new(registry2, store.clone(), credentials, Some(target("mock")));
+        let agent2 =
+            GoatAgent::new(registry2, store.clone(), credentials, Some(target("mock"))).await;
         let session2 = Session::spawn(agent2);
         let (ops2, mut events2, _handle2) = session2.into_parts();
         ops2.send(Op::Resume { thread_id: 1 }).await.unwrap();
@@ -1017,7 +1028,7 @@ mod tests {
         }
     }
 
-    fn failing_agent(
+    async fn failing_agent(
         failures: usize,
         error: StreamError,
     ) -> (GoatAgent, Arc<std::sync::atomic::AtomicUsize>) {
@@ -1031,14 +1042,14 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-retry.json"));
         (
-            GoatAgent::new(registry, store, credentials, Some(target("mock"))),
+            GoatAgent::new(registry, store, credentials, Some(target("mock"))).await,
             calls,
         )
     }
 
     #[tokio::test(start_paused = true)]
     async fn retries_transient_failures_until_success() {
-        let (agent, calls) = failing_agent(2, StreamError::overloaded("busy"));
+        let (agent, calls) = failing_agent(2, StreamError::overloaded("busy")).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -1076,7 +1087,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_failure_aborts_without_retry() {
-        let (agent, calls) = failing_agent(usize::MAX, StreamError::auth("expired"));
+        let (agent, calls) = failing_agent(usize::MAX, StreamError::auth("expired")).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -1113,7 +1124,8 @@ mod tests {
         let (agent, _calls) = failing_agent(
             usize::MAX,
             StreamError::rate_limited("slow", Some(std::time::Duration::from_secs(30))),
-        );
+        )
+        .await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -1157,7 +1169,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let credentials =
             CredentialStore::new(std::env::temp_dir().join("goat-agent-delegate.json"));
-        let agent = GoatAgent::new(registry, store, credentials, Some(target("mock")));
+        let agent = GoatAgent::new(registry, store, credentials, Some(target("mock"))).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -1197,7 +1209,7 @@ mod tests {
         }
     }
 
-    fn agent_with(reply: &str, delay_ms: u64) -> GoatAgent {
+    async fn agent_with(reply: &str, delay_ms: u64) -> GoatAgent {
         let provider = MockProvider {
             id: "mock".to_owned(),
             reply: reply.to_owned(),
@@ -1206,12 +1218,12 @@ mod tests {
         let registry = Registry::from_providers(vec![Arc::new(provider)]);
         let store = Store::open_in_memory().unwrap();
         let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-test.json"));
-        GoatAgent::new(registry, store, credentials, Some(target("mock")))
+        GoatAgent::new(registry, store, credentials, Some(target("mock"))).await
     }
 
     #[tokio::test]
     async fn bridges_text_to_protocol_events() {
-        let session = Session::spawn(agent_with("hello", 0));
+        let session = Session::spawn(agent_with("hello", 0).await);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
@@ -1251,7 +1263,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrupt_ends_turn() {
-        let session = Session::spawn(agent_with("late", 5_000));
+        let session = Session::spawn(agent_with("late", 5_000).await);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
             id: TaskId(9),
@@ -1282,7 +1294,7 @@ mod tests {
         let registry = Registry::from_providers(vec![]);
         let store = Store::open_in_memory().unwrap();
         let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-ghost.json"));
-        let agent = GoatAgent::new(registry, store, credentials, Some(target("ghost")));
+        let agent = GoatAgent::new(registry, store, credentials, Some(target("ghost"))).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -1305,7 +1317,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_runs_and_reports_output() {
-        let session = Session::spawn(agent_with("unused", 0));
+        let session = Session::spawn(agent_with("unused", 0).await);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitShell {
             id: TaskId(7),
@@ -1337,7 +1349,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_interrupt_kills_command() {
-        let session = Session::spawn(agent_with("unused", 0));
+        let session = Session::spawn(agent_with("unused", 0).await);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitShell {
             id: TaskId(8),
@@ -1371,7 +1383,8 @@ mod tests {
         let registry = Registry::from_providers(vec![Arc::new(provider)]);
         let store = Store::open_in_memory().unwrap();
         let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-shell.json"));
-        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let agent =
+            GoatAgent::new(registry, store.clone(), credentials, Some(target("mock"))).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
 
@@ -1421,7 +1434,8 @@ mod tests {
         let registry = Registry::from_providers(vec![Arc::new(provider)]);
         let store = Store::open_in_memory().unwrap();
         let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-clear.json"));
-        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let agent =
+            GoatAgent::new(registry, store.clone(), credentials, Some(target("mock"))).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
 

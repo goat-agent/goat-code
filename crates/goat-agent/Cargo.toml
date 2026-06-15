@@ -15,6 +15,7 @@ goat-providers = { workspace = true }
 goat-auth = { workspace = true }
 goat-store = { workspace = true }
 goat-config = { workspace = true }
+goat-mcp = { workspace = true }
 goat-tool = { workspace = true }
 goat-sandbox = { workspace = true }
 goat-tools = { workspace = true }
