@@ -364,11 +364,9 @@ fn render_plan_overlay(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme:
     let Some(inner) = overlay::overlay_frame(frame, outer, theme) else {
         return;
     };
-    let [title, _, preview, _, actions, hint] = Layout::vertical([
-        Constraint::Length(1),
+    let [title, preview, actions, hint] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
-        Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Length(1),
     ])

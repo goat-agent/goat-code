@@ -25,7 +25,6 @@ pub struct Theme {
     muted: Color,
     accent: Color,
     border: Color,
-    selection: Color,
     panel: Color,
     shell: Color,
     shell_dim: Color,
@@ -51,7 +50,6 @@ impl Theme {
             muted: Color::Rgb(0x6b, 0x70, 0x7c),
             accent: Color::Rgb(0xbb, 0x9a, 0xf7),
             border: Color::Rgb(0x2a, 0x2c, 0x32),
-            selection: Color::Rgb(0x2f, 0x33, 0x3e),
             panel: Color::Rgb(0x1b, 0x1b, 0x1e),
             shell: Color::Rgb(0xdb, 0x4b, 0x4b),
             shell_dim: Color::Rgb(0x54, 0x29, 0x2e),
@@ -79,7 +77,6 @@ impl Theme {
             muted: Color::Rgb(0x8a, 0x8f, 0x98),
             accent: Color::Rgb(0x6a, 0x3d, 0xc9),
             border: Color::Rgb(0xd9, 0xdc, 0xe1),
-            selection: Color::Rgb(0xdd, 0xe3, 0xec),
             panel: Color::Rgb(0xee, 0xee, 0xf0),
             shell: Color::Rgb(0xb0, 0x35, 0x54),
             shell_dim: Color::Rgb(0xe6, 0xc2, 0xcb),
@@ -141,10 +138,6 @@ impl Theme {
 
     pub fn role_tool(self) -> Style {
         Style::new().fg(self.tool)
-    }
-
-    pub fn selected_row(self) -> Style {
-        Style::new().bg(self.selection)
     }
 
     pub fn error(self) -> Style {

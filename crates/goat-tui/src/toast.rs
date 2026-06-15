@@ -82,7 +82,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: Theme, toasts: &[Toast]) {
             Span::raw(" "),
             Span::raw(toast.message.clone()),
         ]);
-        frame.render_widget(Paragraph::new(line).style(theme.panel()), rect);
+        frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
         y = y.saturating_add(TOAST_HEIGHT + TOAST_GAP);
     }
 }

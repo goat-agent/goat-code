@@ -1805,6 +1805,7 @@ name = "goat-auth"
 version = "0.1.3"
 dependencies = [
  "base64",
+ "percent-encoding",
  "rand 0.10.1",
  "serde",
  "serde_json",
