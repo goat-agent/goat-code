@@ -132,11 +132,16 @@ fn content_block_to_part(
             (None, json!({ "thought": true, "thoughtSignature": data }))
         }
         ContentBlock::ToolUse { id, name, input } => {
+            let args = if input.is_object() {
+                input.clone()
+            } else {
+                json!({})
+            };
             let fc = if is_synthetic_id(id) {
                 *synthetic_counter += 1;
-                json!({ "functionCall": { "name": name, "args": input } })
+                json!({ "functionCall": { "name": name, "args": args } })
             } else {
-                json!({ "functionCall": { "name": name, "args": input, "id": id } })
+                json!({ "functionCall": { "name": name, "args": args, "id": id } })
             };
             (None, fc)
         }

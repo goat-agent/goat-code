@@ -88,7 +88,7 @@ fn append_message_items(
                     "type": "function_call",
                     "call_id": id,
                     "name": name,
-                    "arguments": args.to_string(),
+                    "arguments": common::tool_arguments(args),
                 }));
             }
             ContentBlock::ToolResult {

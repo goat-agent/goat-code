@@ -101,7 +101,7 @@ fn to_chat_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                     ContentBlock::ToolUse { id, name, input } => Some(json!({
                         "id": id,
                         "type": "function",
-                        "function": { "name": name, "arguments": input.to_string() },
+                        "function": { "name": name, "arguments": common::tool_arguments(input) },
                     })),
                     _ => None,
                 })
