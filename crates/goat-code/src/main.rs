@@ -66,7 +66,7 @@ async fn run_tui(worktree_label: Option<String>) -> color_eyre::Result<()> {
     let credentials = goat_auth::CredentialStore::new(auth_path);
     let store = goat_store::Store::open(&db_path)?;
     let registry = goat_providers::Registry::new(&credentials);
-    let agent = goat_agent::GoatAgent::new(registry, store, credentials, None);
+    let agent = goat_agent::GoatAgent::new(registry, store, credentials, None).await;
 
     let session = goat_core::Session::spawn(agent);
     let (ops, events, handle) = session.into_parts();

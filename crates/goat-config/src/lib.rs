@@ -75,6 +75,10 @@ pub fn config_path() -> Option<PathBuf> {
     app_home().map(|home| home.join("config.json"))
 }
 
+pub fn mcp_config_path() -> Option<PathBuf> {
+    app_home().map(|home| home.join("mcp.json"))
+}
+
 pub fn db_path() -> Option<PathBuf> {
     app_home().map(|home| home.join("goat-code.db"))
 }
