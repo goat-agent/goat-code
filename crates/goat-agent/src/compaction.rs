@@ -308,37 +308,44 @@ async fn collect_with_retry(
     request: &goat_provider::Request,
     token: &tokio_util::sync::CancellationToken,
 ) -> Result<(String, Usage), CollectFail> {
+    let started = std::time::Instant::now();
     let mut attempt = 1u32;
     loop {
-        match collect_text(provider, request.clone(), token).await {
+        let error = match collect_text(provider, request.clone(), token).await {
             Ok(collected) => return Ok(collected),
             Err(CollectEnd::Cancelled) => return Err(CollectFail::Cancelled),
             Err(CollectEnd::Failed(goat_provider::StreamError::ContextOverflow { .. })) => {
                 return Err(CollectFail::Overflow);
             }
-            Err(CollectEnd::Failed(error))
-                if crate::retry::retryable(&error) && attempt < crate::retry::MAX_ATTEMPTS =>
-            {
-                let delay = crate::retry::backoff_delay(&error, attempt);
-                let _ = ctx
-                    .events
-                    .send(goat_protocol::Event::Retrying {
-                        id: run.id,
-                        attempt,
-                        max_attempts: crate::retry::MAX_ATTEMPTS,
-                        delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                        reason: crate::retry::reason_label(&error).to_owned(),
-                    })
-                    .await;
-                tokio::select! {
-                    biased;
-                    () = token.cancelled() => return Err(CollectFail::Cancelled),
-                    () = tokio::time::sleep(delay) => {}
-                }
-                attempt += 1;
-            }
-            Err(CollectEnd::Failed(error)) => return Err(CollectFail::Fatal(error.to_string())),
+            Err(CollectEnd::Failed(error)) => error,
+        };
+        if !crate::retry::retryable(&error) {
+            return Err(CollectFail::Fatal(error.to_string()));
         }
+        if attempt >= crate::retry::MAX_ATTEMPTS {
+            return Err(CollectFail::Fatal(crate::retry::exhausted_message(
+                &error.to_string(),
+                attempt,
+                started,
+            )));
+        }
+        let delay = crate::retry::backoff_delay(&error, attempt);
+        let _ = ctx
+            .events
+            .send(goat_protocol::Event::Retrying {
+                id: run.id,
+                attempt,
+                max_attempts: crate::retry::MAX_ATTEMPTS,
+                delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                reason: crate::retry::reason_label(&error).to_owned(),
+            })
+            .await;
+        tokio::select! {
+            biased;
+            () = token.cancelled() => return Err(CollectFail::Cancelled),
+            () = tokio::time::sleep(delay) => {}
+        }
+        attempt += 1;
     }
 }
 

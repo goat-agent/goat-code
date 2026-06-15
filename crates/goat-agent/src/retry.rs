@@ -10,9 +10,9 @@ use crate::{
     rounds::{RoundEnd, RoundResult, run_round},
 };
 
-pub(crate) const MAX_ATTEMPTS: u32 = 10;
+pub(crate) const MAX_ATTEMPTS: u32 = 6;
 const BASE_DELAY: Duration = Duration::from_secs(1);
-const MAX_DELAY: Duration = Duration::from_mins(1);
+const MAX_DELAY: Duration = Duration::from_secs(30);
 const MIN_RETRY_AFTER: Duration = Duration::from_secs(1);
 const MAX_RETRY_AFTER: Duration = Duration::from_mins(10);
 
@@ -79,12 +79,16 @@ fn exhausted(mut result: RoundResult, attempts: u32, started: Instant) -> RoundR
         | StreamError::Transport { message },
     ) = &mut result.end
     {
-        *message = format!(
-            "gave up after {attempts} attempts ({}): {message}",
-            format_elapsed(started.elapsed()),
-        );
+        *message = exhausted_message(message, attempts, started);
     }
     result
+}
+
+pub(crate) fn exhausted_message(message: &str, attempts: u32, started: Instant) -> String {
+    format!(
+        "gave up after {attempts} attempts ({}): {message}",
+        format_elapsed(started.elapsed()),
+    )
 }
 
 pub(crate) async fn run_round_with_retry(
@@ -144,10 +148,10 @@ mod tests {
     #[test]
     fn backoff_grows_exponentially_with_jitter() {
         let error = StreamError::overloaded("busy");
-        for attempt in 1..=10 {
+        for attempt in 1..=super::MAX_ATTEMPTS {
             let delay = super::backoff_delay(&error, attempt);
             let ceiling =
-                Duration::from_secs(2u64.saturating_pow(attempt - 1)).min(Duration::from_mins(1));
+                Duration::from_secs(2u64.saturating_pow(attempt - 1)).min(Duration::from_secs(30));
             assert!(
                 delay <= ceiling,
                 "attempt {attempt}: {delay:?} > {ceiling:?}"
