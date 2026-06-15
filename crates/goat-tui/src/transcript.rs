@@ -39,9 +39,9 @@ struct RenderCache {
 }
 
 struct StreamCache {
-    len: usize,
+    prefix_len: usize,
     width: u16,
-    rows: Vec<Line<'static>>,
+    prefix_content: Vec<ratatui::text::Line<'static>>,
 }
 
 #[derive(Debug)]
@@ -245,16 +245,30 @@ impl Transcript {
         let Some(buffer) = &self.streaming else {
             return Vec::new();
         };
-        {
-            let guard = self.stream_cache.borrow();
-            if let Some(cached) = guard.as_ref()
-                && cached.len == buffer.len()
-                && cached.width == width
-            {
-                return cached.rows.clone();
+        let prefix_len = stable_prefix_len(buffer);
+        let prefix_content = {
+            let mut guard = self.stream_cache.borrow_mut();
+            match guard.as_ref() {
+                Some(cached) if cached.prefix_len == prefix_len && cached.width == width => {
+                    cached.prefix_content.clone()
+                }
+                _ => {
+                    let rendered = markdown::render(&buffer[..prefix_len], theme, hl);
+                    *guard = Some(StreamCache {
+                        prefix_len,
+                        width,
+                        prefix_content: rendered.clone(),
+                    });
+                    rendered
+                }
             }
+        };
+        let mut content = prefix_content;
+        let tail = markdown::render(&buffer[prefix_len..], theme, hl);
+        if !content.is_empty() && !tail.is_empty() {
+            content.push(Line::default());
         }
-        let mut content = markdown::render(buffer, theme, hl);
+        content.extend(tail);
         while content.last().is_some_and(is_blank) {
             content.pop();
         }
@@ -262,17 +276,11 @@ impl Transcript {
             last.spans
                 .push(Span::styled(symbols::ui::STREAM_CURSOR, theme.accent()));
         }
-        let rows = hang(
+        hang(
             &content,
             Span::styled(symbols::marker::AGENT, theme.role_agent()),
             width,
-        );
-        *self.stream_cache.borrow_mut() = Some(StreamCache {
-            len: buffer.len(),
-            width,
-            rows: rows.clone(),
-        });
-        rows
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -373,6 +381,27 @@ impl Transcript {
 
 fn is_blank(line: &Line<'_>) -> bool {
     line.spans.iter().all(|s| s.content.is_empty())
+}
+
+fn stable_prefix_len(buffer: &str) -> usize {
+    let mut in_fence = false;
+    let mut offset = 0usize;
+    let mut split = 0usize;
+    let mut prev_blank = true;
+    for line in buffer.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        let stripped = trimmed.trim_start();
+        if stripped.starts_with("```") || stripped.starts_with("~~~") {
+            in_fence = !in_fence;
+        }
+        let is_blank = trimmed.trim().is_empty();
+        if is_blank && !in_fence && !prev_blank {
+            split = offset + line.len();
+        }
+        prev_blank = is_blank;
+        offset += line.len();
+    }
+    split.min(buffer.len())
 }
 
 fn hang(content: &[Line<'static>], marker: Span<'static>, width: u16) -> Vec<Line<'static>> {
@@ -766,9 +795,9 @@ mod tests {
 
     use super::{
         Item, SHELL_BLOCK_CAP, ShellStatus, ToolStatus, Transcript, Working, format_elapsed,
-        sanitize_shell_output, shell_rows,
+        sanitize_shell_output, shell_rows, stable_prefix_len,
     };
-    use crate::{highlight::PlainHighlighter, symbols, theme::Theme};
+    use crate::{highlight::PlainHighlighter, markdown, symbols, theme::Theme};
 
     fn call(id: u64, name: &str, input: &str) -> ToolCall {
         ToolCall {
@@ -1104,5 +1133,54 @@ mod tests {
         );
         assert_eq!(rows.len(), 2);
         assert!(line_text(&rows[1]).contains("(no output)"));
+    }
+
+    #[test]
+    fn stable_prefix_splits_outside_fences_only() {
+        let text = "para one\n\npara two\n\nmore";
+        let split = stable_prefix_len(text);
+        assert_eq!(&text[..split], "para one\n\npara two\n\n");
+
+        let fenced = "intro\n\n```\ncode\n\nstill code\n```\n\nafter";
+        let split = stable_prefix_len(fenced);
+        assert_eq!(
+            &fenced[..split],
+            "intro\n\n```\ncode\n\nstill code\n```\n\n"
+        );
+
+        let open_fence = "intro\n\n```\ncode\n\nstill code";
+        let split = stable_prefix_len(open_fence);
+        assert_eq!(
+            &open_fence[..split],
+            "intro\n\n",
+            "must not split at a blank line inside an open fence"
+        );
+    }
+
+    #[test]
+    fn incremental_stream_render_matches_full_render() {
+        let hl = PlainHighlighter;
+        let theme = Theme::dark();
+        let buffer = "# Title\n\nSome **bold** text.\n\n```rust\nfn main() {}\n```\n\nTail line";
+        let split = stable_prefix_len(buffer);
+        let mut incremental = markdown::render(&buffer[..split], theme, &hl);
+        let tail = markdown::render(&buffer[split..], theme, &hl);
+        if !incremental.is_empty() && !tail.is_empty() {
+            incremental.push(ratatui::text::Line::default());
+        }
+        incremental.extend(tail);
+        let full = markdown::render(buffer, theme, &hl);
+        let render_text = |lines: &[ratatui::text::Line<'static>]| {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(render_text(&incremental), render_text(&full));
     }
 }
