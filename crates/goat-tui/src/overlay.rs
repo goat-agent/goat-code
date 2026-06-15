@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Clear},
+    widgets::{Block, BorderType, Clear},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -20,6 +20,20 @@ pub fn overlay_frame(frame: &mut Frame, area: Rect, theme: Theme) -> Option<Rect
         horizontal: 1,
         vertical: 1,
     });
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    Some(inner)
+}
+
+pub fn ask_sheet_frame(frame: &mut Frame, area: Rect, theme: Theme) -> Option<Rect> {
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(theme.border())
+        .style(theme.base());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
