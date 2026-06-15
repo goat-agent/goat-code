@@ -211,6 +211,13 @@ pub fn random_state() -> String {
     BASE64URL.encode(bytes)
 }
 
+fn form_urldecode(raw: &str) -> String {
+    let plus_decoded = raw.replace('+', " ");
+    percent_encoding::percent_decode_str(&plus_decoded)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
 pub async fn bind_loopback() -> Result<(TcpListener, u16), AuthError> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
@@ -252,9 +259,9 @@ async fn capture_loop(listener: TcpListener, expected_state: &str) -> Result<Str
         let mut state = None;
         for pair in query.split('&') {
             if let Some((key, value)) = pair.split_once('=') {
-                match key {
-                    "code" => code = Some(value.to_owned()),
-                    "state" => state = Some(value.to_owned()),
+                match form_urldecode(key).as_str() {
+                    "code" => code = Some(form_urldecode(value)),
+                    "state" => state = Some(form_urldecode(value)),
                     _ => {}
                 }
             }
@@ -479,5 +486,12 @@ mod tests {
     fn token_set_from_parts_fallback_refresh() {
         let ts = TokenSet::from_parts("access".to_owned(), None, None, Some("fallback"));
         assert_eq!(ts.refresh_token.as_ref().unwrap().expose(), "fallback");
+    }
+
+    #[test]
+    fn form_urldecode_handles_percent_and_plus() {
+        assert_eq!(super::form_urldecode("a%2Fb%3Dc"), "a/b=c");
+        assert_eq!(super::form_urldecode("one+two"), "one two");
+        assert_eq!(super::form_urldecode("plain"), "plain");
     }
 }
