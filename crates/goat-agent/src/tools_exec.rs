@@ -139,11 +139,7 @@ async fn execute_tool(
                     .map(ToolOutput::text),
             )
         } else if prep.name == ASK_TOOL_NAME && env.allow_delegate {
-            Some(
-                run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token)
-                    .await
-                    .map(ToolOutput::text),
-            )
+            Some(run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token).await)
         } else if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
             match ctx.semaphore.acquire().await {
                 Ok(_permit) if !token.is_cancelled() => Some(
