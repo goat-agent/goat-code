@@ -387,7 +387,7 @@ fn render_plan_overlay(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme:
 fn render_plan_title(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme: Theme) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" Plan ready", theme.base()),
+            Span::styled(" Plan contract", theme.base()),
             Span::styled(format!("  {}", plan.path), theme.muted()),
         ])),
         area,
