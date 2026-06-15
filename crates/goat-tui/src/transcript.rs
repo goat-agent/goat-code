@@ -8,9 +8,12 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
-use crate::{highlight::Highlighter, layout::format_tokens, markdown, symbols, theme::Theme, wrap};
+use crate::{
+    highlight::Highlighter, layout::format_tokens, markdown, overlay::truncate_to_width, symbols,
+    theme::Theme, wrap,
+};
 
 pub(crate) struct Working {
     pub elapsed: Option<u64>,
@@ -571,7 +574,7 @@ fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
             let mut spans = vec![
                 Span::styled(marker, marker_style),
                 Span::raw(" "),
-                Span::styled(name.clone(), theme.role_tool()),
+                Span::styled(name.clone(), theme.text()),
                 Span::styled("(", theme.muted()),
                 Span::styled(primary, theme.base()),
             ];
@@ -753,27 +756,6 @@ fn result_rows(summary: &str, theme: Theme, width: u16) -> Vec<Line<'static>> {
             ),
         ]));
     }
-    out
-}
-
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if s.width() <= max_width {
-        return s.to_owned();
-    }
-    let mut out = String::new();
-    let mut w = 0usize;
-    for c in s.chars() {
-        let cw = c.width().unwrap_or(0);
-        if w + cw + 1 > max_width {
-            break;
-        }
-        out.push(c);
-        w += cw;
-    }
-    out.push('…');
     out
 }
 
