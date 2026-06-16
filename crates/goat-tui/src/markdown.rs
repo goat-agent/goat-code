@@ -234,9 +234,17 @@ impl<'a> RenderState<'a> {
     }
 
     fn handle_link_end(&mut self) {
-        if self.link_url.take().is_some() {
+        if let Some(url) = self.link_url.take() {
+            let text: String = self.current_spans[self.link_text_start..]
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
             for span in &mut self.current_spans[self.link_text_start..] {
                 span.style = span.style.fg(self.theme.accent_color());
+            }
+            if !url.is_empty() && url != text {
+                self.current_spans
+                    .push(Span::styled(format!(" ({url})"), self.theme.muted()));
             }
         }
         self.link_text_start = 0;
@@ -293,7 +301,7 @@ impl<'a> RenderState<'a> {
     fn handle_rule(&mut self) {
         self.flush();
         self.lines.push(Line::from(Span::styled(
-            symbols::ui::RULE,
+            symbols::ui::HRULE,
             self.theme.muted(),
         )));
         self.lines.push(Line::default());
@@ -312,7 +320,9 @@ fn heading_style(level: HeadingLevel, theme: Theme) -> ratatui::style::Style {
     match level {
         HeadingLevel::H1 => theme.accent().add_modifier(Modifier::BOLD),
         HeadingLevel::H2 => theme.accent(),
-        _ => theme.key(),
+        HeadingLevel::H3 => theme.key(),
+        HeadingLevel::H4 => theme.base().add_modifier(Modifier::BOLD),
+        _ => theme.muted().add_modifier(Modifier::BOLD),
     }
 }
 
@@ -588,7 +598,7 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(text.contains('─'));
+        assert!(text.contains(crate::symbols::ui::HRULE));
     }
 
     #[test]
@@ -620,13 +630,13 @@ mod tests {
     }
 
     #[test]
-    fn link_text_accent_no_url() {
+    fn link_text_accent_with_url_text() {
         let theme = Theme::dark();
         let lines = render("[docs](https://example.com)", theme, &PlainHighlighter);
         let spans: Vec<_> = lines.iter().flat_map(|l| &l.spans).collect();
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("docs"));
-        assert!(!text.contains("example.com"));
+        assert!(text.contains("example.com"));
         let link = spans
             .iter()
             .find(|s| s.content.contains("docs"))

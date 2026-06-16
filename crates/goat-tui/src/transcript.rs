@@ -372,6 +372,25 @@ fn is_blank(line: &Line<'_>) -> bool {
     line.spans.iter().all(|s| s.content.is_empty())
 }
 
+fn leading_indent(line: &Line<'static>) -> Vec<Span<'static>> {
+    let mut prefix: Vec<Span<'static>> = Vec::new();
+    let gutter_ch = symbols::ui::QUOTE_GUTTER.chars().next().unwrap_or('▎');
+    for span in &line.spans {
+        let content = span.content.as_ref();
+        let is_blank = !content.is_empty() && content.chars().all(|c| c == ' ');
+        let is_gutter = content.starts_with(gutter_ch);
+        if is_blank {
+            prefix.push(Span::styled(content.to_owned(), span.style));
+        } else if is_gutter {
+            prefix.push(span.clone());
+            break;
+        } else {
+            break;
+        }
+    }
+    prefix
+}
+
 fn hang(content: &[Line<'static>], marker: Span<'static>, width: u16) -> Vec<Line<'static>> {
     let inner = width.saturating_sub(2);
     let mut first = Some(marker);
@@ -380,9 +399,29 @@ fn hang(content: &[Line<'static>], marker: Span<'static>, width: u16) -> Vec<Lin
     }
     let mut out: Vec<Line<'static>> = Vec::new();
     for line in content {
-        for mut row in wrap::wrap_line(line, inner) {
+        if line.spans.len() == 1 && line.spans[0].content.as_ref() == symbols::ui::HRULE {
+            let style = line.spans[0].style;
             let prefix = first.take().unwrap_or_else(|| Span::raw("  "));
-            row.spans.insert(0, prefix);
+            let prefix_w = UnicodeWidthStr::width(prefix.content.as_ref());
+            let rule_w = usize::from(width).saturating_sub(prefix_w).max(1);
+            out.push(Line::from(vec![
+                prefix,
+                Span::styled("─".repeat(rule_w), style),
+            ]));
+            continue;
+        }
+        let indent = leading_indent(line);
+        let mut wrapped = wrap::wrap_line(line, inner).into_iter();
+        if let Some(mut first_row) = wrapped.next() {
+            let prefix = first.take().unwrap_or_else(|| Span::raw("  "));
+            first_row.spans.insert(0, prefix);
+            out.push(first_row);
+        }
+        for mut row in wrapped {
+            for (i, span) in indent.iter().enumerate() {
+                row.spans.insert(i, span.clone());
+            }
+            row.spans.insert(0, Span::raw("  "));
             out.push(row);
         }
     }
@@ -392,6 +431,12 @@ fn hang(content: &[Line<'static>], marker: Span<'static>, width: u16) -> Vec<Lin
 fn plain_lines(text: &str, theme: Theme) -> Vec<Line<'static>> {
     text.split('\n')
         .map(|raw| Line::from(Span::styled(raw.to_owned(), theme.base())))
+        .collect()
+}
+
+fn plain_lines_styled(text: &str, style: Style) -> Vec<Line<'static>> {
+    text.split('\n')
+        .map(|raw| Line::from(Span::styled(raw.to_owned(), style)))
         .collect()
 }
 
@@ -513,7 +558,7 @@ fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
             command, status, ..
         } => shell_rows(command, status, theme, width),
         Item::Error(text) => hang(
-            &plain_lines(text, theme),
+            &plain_lines_styled(text, theme.error_body()),
             Span::styled(symbols::marker::ERROR, theme.error()),
             width,
         ),
@@ -525,17 +570,24 @@ fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
         Item::Compaction {
             tokens_before,
             tokens_after,
-        } => vec![Line::from(Span::styled(
-            format!(
-                "{} context compacted{}{} → {} {}",
-                symbols::ui::RULE,
+        } => {
+            let label = format!(
+                " context compacted{}{} → {} ",
                 symbols::ui::SEPARATOR,
                 format_tokens(u64::from(*tokens_before)),
                 format_tokens(u64::from(*tokens_after)),
-                symbols::ui::RULE,
-            ),
-            theme.muted(),
-        ))],
+            );
+            let total = usize::from(width).saturating_sub(2);
+            let dashes = total.saturating_sub(UnicodeWidthStr::width(label.as_str()));
+            let left = dashes / 2;
+            let right = dashes - left;
+            vec![Line::from(vec![
+                Span::raw("  "),
+                Span::styled("─".repeat(left), theme.muted()),
+                Span::styled(label, theme.muted()),
+                Span::styled("─".repeat(right), theme.muted()),
+            ])]
+        }
         Item::Tool {
             name,
             display,
@@ -545,23 +597,22 @@ fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
             let (marker, marker_style): (&str, _) = match status {
                 ToolStatus::Running => (symbols::SPINNER[0], theme.accent()),
                 ToolStatus::Done(ToolOutcome { ok: true, .. }) => {
-                    (symbols::ui::CHECK, theme.role_tool())
+                    (symbols::ui::CHECK, theme.success())
                 }
                 ToolStatus::Done(ToolOutcome { ok: false, .. }) => {
                     (symbols::ui::CROSS, theme.error())
                 }
             };
 
-            let name_w = name.width();
+            let verb = name.to_lowercase();
+            let verb_w = verb.width();
             let avail = usize::from(width)
                 .saturating_sub(2)
-                .saturating_sub(name_w)
+                .saturating_sub(verb_w)
                 .saturating_sub(2);
 
             let primary = truncate_to_width(&display.primary, avail);
-            let detail_avail = avail
-                .saturating_sub(primary.width())
-                .saturating_sub(symbols::ui::SEPARATOR.width());
+            let detail_avail = avail.saturating_sub(primary.width()).saturating_sub(2);
             let detail = display
                 .detail
                 .as_deref()
@@ -571,15 +622,14 @@ fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
             let mut spans = vec![
                 Span::styled(marker, marker_style),
                 Span::raw(" "),
-                Span::styled(name.clone(), theme.role_tool()),
-                Span::styled("(", theme.muted()),
+                Span::styled(verb, theme.role_tool()),
+                Span::raw("  "),
                 Span::styled(primary, theme.base()),
             ];
             if let Some(d) = detail {
-                spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
+                spans.push(Span::raw("  "));
                 spans.push(Span::styled(d, theme.muted()));
             }
-            spans.push(Span::styled(")", theme.muted()));
 
             let mut result = vec![Line::from(spans)];
             if let ToolStatus::Done(ToolOutcome {
@@ -784,7 +834,7 @@ mod tests {
 
     use super::{
         Item, SHELL_BLOCK_CAP, ShellStatus, ToolStatus, Transcript, Working, format_elapsed,
-        sanitize_shell_output, shell_rows,
+        item_rows, sanitize_shell_output, shell_rows,
     };
     use crate::{highlight::PlainHighlighter, symbols, theme::Theme};
 
@@ -1122,5 +1172,41 @@ mod tests {
         );
         assert_eq!(rows.len(), 2);
         assert!(line_text(&rows[1]).contains("(no output)"));
+    }
+
+    #[test]
+    fn blockquote_wrap_keeps_gutter_indent() {
+        let theme = Theme::dark();
+        let long = format!("> {}", "word ".repeat(20));
+        let mut t = Transcript::default();
+        t.commit_text(&long, &PlainHighlighter, theme);
+        let rows = match &t.items[0] {
+            Item::Agent(rendered) => item_rows(&Item::Agent(rendered.clone()), theme, 24),
+            _ => panic!("expected agent item"),
+        };
+        let wrapped: Vec<String> = rows.iter().map(line_text).collect();
+        assert!(wrapped.len() > 1, "blockquote must wrap at width 24");
+        for row in wrapped.iter().skip(1).filter(|r| !r.trim().is_empty()) {
+            assert!(
+                row.starts_with("  ") && row.contains('▎'),
+                "wrapped blockquote continuation keeps gutter indent: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hrule_expands_to_full_width() {
+        let theme = Theme::dark();
+        let mut t = Transcript::default();
+        t.commit_text("---", &PlainHighlighter, theme);
+        let rows = match &t.items[0] {
+            Item::Agent(rendered) => item_rows(&Item::Agent(rendered.clone()), theme, 40),
+            _ => panic!("expected agent item"),
+        };
+        let rule = rows
+            .iter()
+            .find(|l| line_text(l).contains('─'))
+            .expect("rule row");
+        assert!(line_text(rule).matches('─').count() > 10);
     }
 }
