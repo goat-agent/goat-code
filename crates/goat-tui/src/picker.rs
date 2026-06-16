@@ -11,8 +11,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     layout::{LIST_MAX, OVERLAY_CHROME, OVERLAY_CHROME_PLAIN, OVERLAY_W},
     overlay::{
-        centered_rect, clamp_u16, hint_line, overflow_hint, overlay_frame, overlay_layout,
-        overlay_layout_plain, selection_row,
+        centered_rect, clamp_u16, hint_line, overlay_frame, overlay_layout, overlay_layout_plain,
+        render_window, selection_row, truncate_to_width,
     },
     symbols,
     theme::Theme,
@@ -21,6 +21,26 @@ use crate::{
 pub enum PickerOutcome {
     NoOp,
     Selected(ModelTarget),
+}
+
+fn scroll_input(input: &str, avail: usize) -> (String, usize) {
+    let total = UnicodeWidthStr::width(input);
+    if total < avail {
+        return (input.to_owned(), 0);
+    }
+    let target = avail.saturating_sub(1).max(1);
+    let mut acc = 0usize;
+    let mut start_byte = input.len();
+    for (i, ch) in input.char_indices().rev() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if acc + w > target {
+            break;
+        }
+        acc += w;
+        start_byte = i;
+    }
+    let scrolled = total - acc;
+    (input[start_byte..].to_owned(), scrolled)
 }
 
 struct AccountPicker {
@@ -170,27 +190,17 @@ impl Picker {
 
         let width = usize::from(list_area.width);
         let rows = usize::from(list_area.height);
-        let mut lines: Vec<Line> = Vec::new();
-        if self.matches.is_empty() {
-            lines.push(Line::from(Span::styled(
+        let lines: Vec<Line> = if self.matches.is_empty() {
+            vec![Line::from(Span::styled(
                 format!(
                     " no models yet {} run /config to connect a provider",
                     symbols::ui::ELLIPSIS
                 ),
                 theme.muted(),
-            )));
+            ))]
         } else {
-            let start = if self.cursor >= rows {
-                self.cursor + 1 - rows
-            } else {
-                0
-            };
-            let shown = rows.min(self.matches.len().saturating_sub(start));
-            let (hint_above, hint_below) = overflow_hint(start, shown, self.matches.len());
-            if let Some(ref above) = hint_above {
-                lines.push(Line::from(Span::styled(format!(" {above}"), theme.muted())));
-            }
-            for (idx, entry) in self.matches.iter().enumerate().skip(start).take(rows) {
+            render_window(theme, width, self.cursor, self.matches.len(), rows, |idx| {
+                let entry = &self.matches[idx];
                 let selected = idx == self.cursor;
                 let is_current = self
                     .current
@@ -217,31 +227,12 @@ impl Picker {
                 } else {
                     Some(Span::styled(ctx, theme.muted()))
                 };
-                lines.push(selection_row(
-                    theme,
-                    selected,
-                    width,
-                    vec![Span::styled(name, name_style)],
-                    right,
-                ));
-            }
-            if let Some(ref below) = hint_below {
-                lines.push(Line::from(Span::styled(format!(" {below}"), theme.muted())));
-            }
-        }
+                (vec![Span::styled(name, name_style)], right)
+            })
+        };
         frame.render_widget(Paragraph::new(lines), list_area);
 
-        frame.render_widget(
-            Paragraph::new(hint_line(
-                &[
-                    (symbols::key::ARROWS_UPDOWN, "navigate"),
-                    (symbols::key::ENTER, "select"),
-                    (symbols::key::ESC, "close"),
-                ],
-                theme,
-            )),
-            hint_area,
-        );
+        let _ = hint_area;
 
         let col = 1 + self.query.width();
         let x = input_area.x + clamp_u16(col);
@@ -258,7 +249,6 @@ pub struct EffortPicker {
     label: String,
     options: Vec<Effort>,
     cursor: usize,
-    scroll: usize,
 }
 
 impl EffortPicker {
@@ -270,7 +260,6 @@ impl EffortPicker {
             label,
             options,
             cursor,
-            scroll: 0,
         }
     }
 
@@ -279,23 +268,12 @@ impl EffortPicker {
     }
 
     pub fn move_up(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        self.cursor -= 1;
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        }
+        self.cursor = self.cursor.saturating_sub(1);
     }
 
     pub fn move_down(&mut self) {
-        if self.cursor + 1 >= self.options.len() {
-            return;
-        }
-        self.cursor += 1;
-        let cap = self.cap();
-        if self.cursor >= self.scroll + cap {
-            self.scroll = self.cursor + 1 - cap;
+        if self.cursor + 1 < self.options.len() {
+            self.cursor += 1;
         }
     }
 
@@ -328,39 +306,20 @@ impl EffortPicker {
 
         let width = usize::from(list_area.width);
         let rows = usize::from(list_area.height).max(1);
-        let scroll = self.scroll.min(self.cursor);
-
-        let lines: Vec<Line> = self
-            .options
-            .iter()
-            .enumerate()
-            .skip(scroll)
-            .take(rows)
-            .map(|(index, effort)| {
-                let selected = index == self.cursor;
-                let name_style = if selected { theme.key() } else { theme.base() };
-                selection_row(
-                    theme,
-                    selected,
-                    width,
-                    vec![Span::styled(effort.as_str().to_owned(), name_style)],
-                    None,
-                )
-            })
-            .collect();
+        let lines = render_window(theme, width, self.cursor, self.options.len(), rows, |idx| {
+            let selected = idx == self.cursor;
+            let name_style = if selected { theme.key() } else { theme.base() };
+            (
+                vec![Span::styled(
+                    self.options[idx].as_str().to_owned(),
+                    name_style,
+                )],
+                None,
+            )
+        });
         frame.render_widget(Paragraph::new(lines), list_area);
 
-        frame.render_widget(
-            Paragraph::new(hint_line(
-                &[
-                    (symbols::key::ARROWS_UPDOWN, "navigate"),
-                    (symbols::key::ENTER, "select"),
-                    (symbols::key::ESC, "close"),
-                ],
-                theme,
-            )),
-            hint_area,
-        );
+        let _ = hint_area;
     }
 }
 
@@ -372,49 +331,24 @@ pub enum ThreadOutcome {
 pub struct ThreadPicker {
     threads: Vec<ThreadSummary>,
     cursor: usize,
-    scroll: usize,
 }
 
 impl ThreadPicker {
     pub fn new(threads: Vec<ThreadSummary>) -> Self {
-        Self {
-            threads,
-            cursor: 0,
-            scroll: 0,
-        }
+        Self { threads, cursor: 0 }
     }
 
     fn cap(&self) -> usize {
         self.threads.len().min(LIST_MAX)
     }
 
-    fn visible_items(&self) -> usize {
-        let cap = self.cap();
-        if self.threads.len() > LIST_MAX {
-            cap.saturating_sub(2)
-        } else {
-            cap
-        }
-    }
-
     pub fn move_up(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        self.cursor -= 1;
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        }
+        self.cursor = self.cursor.saturating_sub(1);
     }
 
     pub fn move_down(&mut self) {
-        if self.cursor + 1 >= self.threads.len() {
-            return;
-        }
-        self.cursor += 1;
-        let vis = self.visible_items();
-        if self.cursor >= self.scroll + vis {
-            self.scroll = self.cursor + 1 - vis;
+        if self.cursor + 1 < self.threads.len() {
+            self.cursor += 1;
         }
     }
 
@@ -439,31 +373,14 @@ impl ThreadPicker {
 
         let width = usize::from(list_area.width);
         let rows = usize::from(list_area.height).max(1);
-        let scroll = self.scroll.min(self.cursor);
-        let mut lines: Vec<Line> = Vec::new();
-        if self.threads.is_empty() {
-            lines.push(Line::from(Span::styled(
+        let lines: Vec<Line> = if self.threads.is_empty() {
+            vec![Line::from(Span::styled(
                 " no past conversations in this directory",
                 theme.muted(),
-            )));
+            ))]
         } else {
-            let above_rows = usize::from(scroll > 0);
-            let budget = rows.saturating_sub(above_rows);
-            let remaining = self.threads.len().saturating_sub(scroll);
-            let has_below = remaining > budget;
-            let take = if has_below {
-                budget.saturating_sub(1)
-            } else {
-                budget.min(remaining)
-            };
-
-            if scroll > 0 {
-                lines.push(Line::from(Span::styled(
-                    format!(" {} {} more", symbols::ui::MORE_ABOVE, scroll),
-                    theme.muted(),
-                )));
-            }
-            for (idx, thread) in self.threads.iter().enumerate().skip(scroll).take(take) {
+            render_window(theme, width, self.cursor, self.threads.len(), rows, |idx| {
+                let thread = &self.threads[idx];
                 let selected = idx == self.cursor;
                 let title_style = if selected { theme.key() } else { theme.base() };
                 let left = vec![
@@ -471,27 +388,13 @@ impl ThreadPicker {
                     Span::styled(thread.title.clone(), title_style),
                 ];
                 let right = Some(Span::styled(thread.model.clone(), theme.muted()));
-                lines.push(selection_row(theme, selected, width, left, right));
-            }
-            if has_below {
-                let hidden = self.threads.len() - scroll - take;
-                lines.push(Line::from(Span::styled(
-                    format!(" {} {} more", symbols::ui::MORE_BELOW, hidden),
-                    theme.muted(),
-                )));
-            }
-        }
+                (left, right)
+            })
+        };
         frame.render_widget(Paragraph::new(lines), list_area);
 
         frame.render_widget(
-            Paragraph::new(hint_line(
-                &[
-                    (symbols::key::ARROWS_UPDOWN, "navigate"),
-                    (symbols::key::ENTER, "resume"),
-                    (symbols::key::ESC, "close"),
-                ],
-                theme,
-            )),
+            Paragraph::new(hint_line(&[(symbols::key::ENTER, "resume")], theme)),
             hint_area,
         );
     }
@@ -513,34 +416,28 @@ fn render_account(frame: &mut Frame, inner: Rect, theme: Theme, account: &Accoun
 
     let width = usize::from(list_area.width);
     let rows = usize::from(list_area.height);
-    let lines: Vec<Line> = account
-        .choices
-        .iter()
-        .take(rows)
-        .enumerate()
-        .map(|(index, choice)| {
-            let selected = index == account.cursor;
+    let lines = render_window(
+        theme,
+        width,
+        account.cursor,
+        account.choices.len(),
+        rows,
+        |idx| {
+            let selected = idx == account.cursor;
             let name_style = if selected { theme.key() } else { theme.base() };
-            selection_row(
-                theme,
-                selected,
-                width,
-                vec![Span::styled(choice.display.clone(), name_style)],
+            (
+                vec![Span::styled(
+                    account.choices[idx].display.clone(),
+                    name_style,
+                )],
                 None,
             )
-        })
-        .collect();
+        },
+    );
     frame.render_widget(Paragraph::new(lines), list_area);
 
     frame.render_widget(
-        Paragraph::new(hint_line(
-            &[
-                (symbols::key::ARROWS_UPDOWN, "navigate"),
-                (symbols::key::ENTER, "select"),
-                (symbols::key::ESC, "back"),
-            ],
-            theme,
-        )),
+        Paragraph::new(hint_line(&[(symbols::key::ESC, "back")], theme)),
         hint_area,
     );
 }
@@ -774,9 +671,12 @@ impl AskPicker {
         } else {
             String::new()
         };
+        let dots_w = UnicodeWidthStr::width(dots.as_str());
+        let avail = usize::from(area.width).saturating_sub(dots_w + 1);
+        let question = truncate_to_width(&q.question, avail);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(format!(" {}", q.question), theme.base()),
+                Span::styled(format!(" {question}"), theme.base()),
                 Span::styled(dots, theme.muted()),
             ])),
             area,
@@ -804,22 +704,38 @@ impl AskPicker {
             ));
         }
         let input_selected = self.cursor == type_own_idx;
-        let input_content = if self.typing || !self.input.is_empty() {
-            Span::styled(format!(" {}", self.input), theme.base())
+        let caret = if input_selected {
+            Span::styled(format!(" {} ", symbols::ui::CARET), theme.accent())
         } else {
-            Span::styled(" type your answer", theme.muted())
+            Span::raw("   ")
         };
-        lines.push(selection_row(
-            theme,
-            input_selected,
-            width,
-            vec![input_content],
-            None,
-        ));
+        let avail = width.saturating_sub(3).max(1);
+        let (visible, scrolled) = scroll_input(&self.input, avail);
+        let body = if self.typing || !self.input.is_empty() {
+            Span::styled(visible, theme.base())
+        } else {
+            Span::styled("type your answer", theme.muted())
+        };
+        let row_style = if input_selected {
+            theme.selected_row()
+        } else {
+            ratatui::style::Style::default()
+        };
+        let used = 3 + UnicodeWidthStr::width(body.content.as_ref());
+        let pad = width.saturating_sub(used);
+        lines.push(Line::from(vec![
+            caret,
+            Span::styled(
+                body.content.clone().into_owned(),
+                body.style.patch(row_style),
+            ),
+            Span::styled(" ".repeat(pad), row_style),
+        ]));
         frame.render_widget(Paragraph::new(lines), area);
         if self.typing && input_selected {
             let row_y = area.y + clamp_u16(type_own_idx);
-            let col = 4 + UnicodeWidthStr::width(self.input.as_str());
+            let shown = UnicodeWidthStr::width(self.input.as_str()).saturating_sub(scrolled);
+            let col = 3 + shown.min(avail);
             let x = area.x + clamp_u16(col);
             frame.set_cursor_position((x.min(area.right().saturating_sub(1)), row_y));
         }
@@ -853,7 +769,6 @@ impl AskPicker {
                 &[
                     (symbols::key::ENTER, "submit"),
                     (symbols::key::ARROW_LEFT, "edit"),
-                    (symbols::key::ESC, "cancel"),
                 ],
                 theme,
             )),
@@ -864,33 +779,17 @@ impl AskPicker {
     fn render_hint(&self, frame: &mut Frame, area: Rect, theme: Theme) {
         let total = self.questions.len();
         let hint = if self.typing {
-            hint_line(
-                &[
-                    (symbols::key::ENTER, "confirm"),
-                    (symbols::key::ESC, "back"),
-                ],
-                theme,
-            )
+            hint_line(&[(symbols::key::ENTER, "confirm")], theme)
         } else if total > 1 {
             hint_line(
                 &[
-                    (symbols::key::ARROWS_UPDOWN, "navigate"),
-                    (symbols::key::ENTER, "next"),
                     (symbols::key::ARROW_RIGHT, "skip"),
                     (symbols::key::ARROW_LEFT, "back"),
-                    (symbols::key::ESC, "cancel"),
                 ],
                 theme,
             )
         } else {
-            hint_line(
-                &[
-                    (symbols::key::ARROWS_UPDOWN, "navigate"),
-                    (symbols::key::ENTER, "select"),
-                    (symbols::key::ESC, "cancel"),
-                ],
-                theme,
-            )
+            hint_line(&[], theme)
         };
         frame.render_widget(Paragraph::new(hint), area);
     }

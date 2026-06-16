@@ -2,13 +2,14 @@ use goat_commands::CommandRegistry;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    text::{Line, Span},
+    text::Span,
     widgets::Paragraph,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    overlay::{hint_line, selection_row},
+    layout::LIST_MAX,
+    overlay::{hint_line, render_window, truncate_to_width},
     symbols,
     theme::Theme,
 };
@@ -40,27 +41,6 @@ fn alias_label(aliases: &[String]) -> String {
     } else {
         format!(" ({})", aliases.join(", "))
     }
-}
-
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if s.width() <= max_width {
-        return s.to_owned();
-    }
-    let mut out = String::new();
-    let mut width = 0usize;
-    for c in s.chars() {
-        let char_width = c.width().unwrap_or(0);
-        if width + char_width + 1 > max_width {
-            break;
-        }
-        out.push(c);
-        width += char_width;
-    }
-    out.push_str(symbols::ui::ELLIPSIS);
-    out
 }
 
 struct Match {
@@ -127,7 +107,7 @@ impl CommandMenu {
     }
 
     pub fn desired_height(&self) -> u16 {
-        let rows = self.matches.len().max(1);
+        let rows = self.matches.len().clamp(1, LIST_MAX);
         u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(1)
     }
 
@@ -137,50 +117,40 @@ impl CommandMenu {
             Layout::vertical([Constraint::Min(1), Constraint::Length(hint_height)]).areas(area);
 
         let width = usize::from(list_area.width);
-        let lines: Vec<Line> = self
-            .matches
-            .iter()
-            .enumerate()
-            .map(|(pos, entry)| {
-                let selected = pos == self.cursor;
-                let name_style = if selected { theme.key() } else { theme.muted() };
-                let mut name_spans: Vec<Span> = vec![Span::styled("/", name_style)];
-                for (byte_i, ch) in entry.name.char_indices() {
-                    let style = if entry.positions.contains(&byte_i) {
-                        theme.accent()
-                    } else {
-                        name_style
-                    };
-                    name_spans.push(Span::styled(ch.to_string(), style));
-                }
-                if !entry.aliases.is_empty() {
-                    name_spans.push(Span::styled(alias_label(&entry.aliases), theme.muted()));
-                }
-                let desc_style = if selected {
-                    theme.base()
+        let rows = usize::from(list_area.height);
+        let lines = render_window(theme, width, self.cursor, self.matches.len(), rows, |idx| {
+            let entry = &self.matches[idx];
+            let selected = idx == self.cursor;
+            let name_style = if selected { theme.key() } else { theme.base() };
+            let mut name_spans: Vec<Span> = vec![Span::styled("/", name_style)];
+            for (byte_i, ch) in entry.name.char_indices() {
+                let style = if entry.positions.contains(&byte_i) {
+                    name_style.add_modifier(ratatui::style::Modifier::BOLD)
                 } else {
-                    theme.muted()
+                    name_style
                 };
-                let left_w: usize = name_spans.iter().map(|span| span.content.width()).sum();
-                let desc_width = width.saturating_sub(left_w + 6);
-                let right = (desc_width > 3).then(|| {
-                    Span::styled(
-                        truncate_to_width(&entry.description, desc_width),
-                        desc_style,
-                    )
-                });
-                selection_row(theme, selected, width, name_spans, right)
-            })
-            .collect();
+                name_spans.push(Span::styled(ch.to_string(), style));
+            }
+            if !entry.aliases.is_empty() {
+                name_spans.push(Span::styled(alias_label(&entry.aliases), theme.muted()));
+            }
+            let left_w: usize = name_spans.iter().map(|span| span.content.width()).sum();
+            let desc_width = width.saturating_sub(left_w + 6);
+            let right = (desc_width > 3).then(|| {
+                Span::styled(
+                    truncate_to_width(&entry.description, desc_width),
+                    theme.muted(),
+                )
+            });
+            (name_spans, right)
+        });
         frame.render_widget(Paragraph::new(lines), list_area);
 
         frame.render_widget(
             Paragraph::new(hint_line(
                 &[
-                    (symbols::key::ARROWS_UPDOWN, "navigate"),
                     (symbols::key::TAB, "complete"),
                     (symbols::key::ENTER, "run"),
-                    (symbols::key::ESC, "close"),
                 ],
                 theme,
             )),
@@ -193,7 +163,7 @@ impl CommandMenu {
 mod tests {
     use unicode_width::UnicodeWidthStr;
 
-    use super::truncate_to_width;
+    use crate::overlay::truncate_to_width;
 
     #[test]
     fn truncate_short_text_keeps_text() {
