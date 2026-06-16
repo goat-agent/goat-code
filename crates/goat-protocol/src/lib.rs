@@ -20,6 +20,8 @@ pub struct RateWindow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RateLimitSnapshot {
     pub windows: Vec<RateWindow>,
+    #[serde(default)]
+    pub representative: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
