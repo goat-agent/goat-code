@@ -64,8 +64,7 @@ impl App {
                     match entry {
                         TranscriptEntry::User(text) => self.transcript.push_user(text),
                         TranscriptEntry::Assistant(text) => {
-                            self.transcript
-                                .commit_text(&text, &self.highlighter, self.theme);
+                            self.transcript.commit_text(&text);
                         }
                         TranscriptEntry::Tool { call, outcome } => {
                             let id = call.id;
@@ -229,12 +228,9 @@ impl App {
             }
             EngineEvent::TextDone { id, text } => {
                 if let Some(i) = self.agent_index(id) {
-                    self.agent_runs[i]
-                        .transcript
-                        .commit_text(&text, &self.highlighter, self.theme);
+                    self.agent_runs[i].transcript.commit_text(&text);
                 } else {
-                    self.transcript
-                        .commit_text(&text, &self.highlighter, self.theme);
+                    self.transcript.commit_text(&text);
                 }
             }
             EngineEvent::ToolStarted { id, call } => {
@@ -278,25 +274,21 @@ impl App {
             EngineEvent::AgentDone { id, ok } => {
                 if let Some(i) = self.agent_index(id) {
                     self.agent_runs[i].done = Some(ok);
-                    self.agent_runs[i]
-                        .transcript
-                        .complete(!ok, &self.highlighter, self.theme);
+                    self.agent_runs[i].transcript.complete(!ok);
                 }
             }
             EngineEvent::TaskDone { interrupted, .. } => {
                 if !self.focused {
                     self.bell_pending = true;
                 }
-                self.transcript
-                    .complete(interrupted, &self.highlighter, self.theme);
+                self.transcript.complete(interrupted);
                 self.reset_active_state();
                 if interrupted {
                     self.restore_queued_to_composer();
                 }
             }
             EngineEvent::Error { message, .. } => {
-                self.transcript
-                    .push_error(message, &self.highlighter, self.theme);
+                self.transcript.push_error(message);
                 self.reset_active_state();
                 self.restore_queued_to_composer();
             }

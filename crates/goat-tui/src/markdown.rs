@@ -113,7 +113,7 @@ impl<'a> RenderState<'a> {
             Event::End(TagEnd::CodeBlock) => self.handle_code_block_end(),
             Event::Start(Tag::Link { dest_url, .. }) => {
                 self.link_url = Some(dest_url.to_string());
-                self.link_text_start = self.current_spans.len();
+                self.link_text_start = self.active_spans().len();
             }
             Event::End(TagEnd::Link) => self.handle_link_end(),
             Event::Start(Tag::Table(alignments)) => self.handle_table_start(alignments.len()),
@@ -233,10 +233,20 @@ impl<'a> RenderState<'a> {
         self.code_lang.clear();
     }
 
+    fn active_spans(&mut self) -> &mut Vec<Span<'static>> {
+        if self.in_table {
+            &mut self.current_cell
+        } else {
+            &mut self.current_spans
+        }
+    }
+
     fn handle_link_end(&mut self) {
         if self.link_url.take().is_some() {
-            for span in &mut self.current_spans[self.link_text_start..] {
-                span.style = span.style.fg(self.theme.accent_color());
+            let accent = self.theme.accent_color();
+            let start = self.link_text_start;
+            for span in &mut self.active_spans()[start..] {
+                span.style = span.style.fg(accent);
             }
         }
         self.link_text_start = 0;
@@ -633,6 +643,22 @@ mod tests {
             .expect("link span");
         assert_eq!(link.style.fg, Some(theme.accent_color()));
         assert!(!link.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn link_inside_table_cell_is_accented() {
+        let theme = Theme::dark();
+        let table = "| name | link |\n| --- | --- |\n| a | [docs](https://example.com) |";
+        let lines = render(table, theme, &PlainHighlighter);
+        let spans: Vec<_> = lines.iter().flat_map(|l| &l.spans).collect();
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("docs"));
+        assert!(!text.contains("example.com"));
+        let link = spans
+            .iter()
+            .find(|s| s.content.contains("docs"))
+            .expect("table link span");
+        assert_eq!(link.style.fg, Some(theme.accent_color()));
     }
 
     #[test]

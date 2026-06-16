@@ -67,7 +67,7 @@ pub(crate) enum ShellStatus {
 #[derive(Debug)]
 pub(crate) enum Item {
     User(String),
-    Agent(Vec<Line<'static>>),
+    Agent(String),
     Tool {
         id: ToolCallId,
         name: String,
@@ -125,11 +125,10 @@ impl Transcript {
             .push_str(chunk);
     }
 
-    pub fn commit_text(&mut self, text: &str, hl: &dyn Highlighter, theme: Theme) {
+    pub fn commit_text(&mut self, text: &str) {
         self.bump_version();
         self.streaming = None;
-        self.items
-            .push(Item::Agent(markdown::render(text, theme, hl)));
+        self.items.push(Item::Agent(text.to_owned()));
     }
 
     pub fn push_tool(&mut self, call: ToolCall) {
@@ -190,12 +189,11 @@ impl Transcript {
         }
     }
 
-    pub fn push_error(&mut self, text: impl Into<String>, hl: &dyn Highlighter, theme: Theme) {
+    pub fn push_error(&mut self, text: impl Into<String>) {
         self.bump_version();
         if let Some(buffer) = self.streaming.take() {
             let text = format!("{buffer} {} stopped", symbols::ui::ELLIPSIS);
-            self.items
-                .push(Item::Agent(markdown::render(&text, theme, hl)));
+            self.items.push(Item::Agent(text));
         }
         self.items.push(Item::Error(text.into()));
     }
@@ -213,7 +211,7 @@ impl Transcript {
         });
     }
 
-    pub fn complete(&mut self, interrupted: bool, hl: &dyn Highlighter, theme: Theme) {
+    pub fn complete(&mut self, interrupted: bool) {
         self.bump_version();
         if interrupted {
             for item in &mut self.items {
@@ -239,14 +237,13 @@ impl Transcript {
             } else {
                 buffer
             };
-            self.items
-                .push(Item::Agent(markdown::render(&text, theme, hl)));
+            self.items.push(Item::Agent(text));
         } else if interrupted && !matches!(self.items.last(), Some(Item::Error(_))) {
             self.items.push(Item::Notice("interrupted".into()));
         }
     }
 
-    fn ensure_cache(&self, theme: Theme, width: u16) {
+    fn ensure_cache(&self, theme: Theme, width: u16, hl: &dyn Highlighter) {
         let valid = self
             .cache
             .borrow()
@@ -255,7 +252,7 @@ impl Transcript {
         if valid {
             return;
         }
-        let (lines, spinner_lines, images) = build_static_lines(&self.items, theme, width);
+        let (lines, spinner_lines, images) = build_static_lines(&self.items, theme, width, hl);
         *self.cache.borrow_mut() = Some(RenderCache {
             width,
             version: self.version,
@@ -349,7 +346,7 @@ impl Transcript {
         working: Option<&Working>,
         queued: &[String],
     ) -> usize {
-        self.ensure_cache(theme, width);
+        self.ensure_cache(theme, width, hl);
         let base = self.cache.borrow().as_ref().map_or(0, |c| c.lines.len());
         base + self
             .tail_rows(
@@ -365,7 +362,7 @@ impl Transcript {
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
-        self.ensure_cache(ctx.theme, area.width);
+        self.ensure_cache(ctx.theme, area.width, ctx.hl);
         let guard = self.cache.borrow();
         let Some(cache) = guard.as_ref() else {
             return;
@@ -545,6 +542,7 @@ fn build_static_lines(
     items: &[Item],
     theme: Theme,
     width: u16,
+    hl: &dyn Highlighter,
 ) -> (Vec<Line<'static>>, Vec<usize>, Vec<ImagePlacement>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut spinner_lines: Vec<usize> = Vec::new();
@@ -569,7 +567,7 @@ fn build_static_lines(
         ) {
             spinner_lines.push(lines.len());
         }
-        lines.extend(item_rows(item, theme, width));
+        lines.extend(item_rows(item, theme, width, hl));
         if let Item::Tool {
             image: Some(img), ..
         } = item
@@ -590,14 +588,15 @@ fn build_static_lines(
     (lines, spinner_lines, images)
 }
 
-fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
+fn item_rows(item: &Item, theme: Theme, width: u16, hl: &dyn Highlighter) -> Vec<Line<'static>> {
     match item {
         Item::User(text) => hang(
             &plain_lines(text, theme),
             Span::styled(symbols::marker::USER, theme.role_user()),
             width,
         ),
-        Item::Agent(rendered) => {
+        Item::Agent(text) => {
+            let rendered = markdown::render(text, theme, hl);
             let end = rendered
                 .iter()
                 .rposition(|l| !is_blank(l))
@@ -861,10 +860,11 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::{
-        Item, SHELL_BLOCK_CAP, ShellStatus, ToolStatus, Transcript, Working, format_elapsed,
-        sanitize_shell_output, shell_rows, stable_prefix_len,
+        Item, SHELL_BLOCK_CAP, ShellStatus, ToolStatus, Transcript, Working, build_static_lines,
+        format_elapsed, sanitize_shell_output, shell_rows, stable_prefix_len,
     };
     use crate::{highlight::PlainHighlighter, markdown, symbols, theme::Theme};
+    use ratatui::text::Line;
 
     fn call(id: u64, name: &str, input: &str) -> ToolCall {
         ToolCall {
@@ -891,11 +891,29 @@ mod tests {
     }
 
     fn commit(t: &mut Transcript, text: &str) {
-        t.commit_text(text, &PlainHighlighter, Theme::dark());
+        t.commit_text(text);
     }
 
     fn height(t: &Transcript, width: u16) -> usize {
         t.content_height(width, Theme::dark(), &PlainHighlighter, None, &[])
+    }
+
+    #[test]
+    fn agent_text_restyles_on_theme_change() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+        let items = vec![Item::Agent("plain body".to_owned())];
+        let (dark_lines, _, _) = build_static_lines(&items, dark, 80, &PlainHighlighter);
+        let (light_lines, _, _) = build_static_lines(&items, light, 80, &PlainHighlighter);
+        let body_fg = |lines: &[Line<'static>]| {
+            lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .find(|s| s.content.contains("plain body"))
+                .map(|s| s.style.fg)
+        };
+        assert_eq!(body_fg(&dark_lines), Some(Some(dark.fg_color())));
+        assert_eq!(body_fg(&light_lines), Some(Some(light.fg_color())));
     }
 
     fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
@@ -958,7 +976,7 @@ mod tests {
     fn complete_interrupted_clears_running_tools() {
         let mut t = Transcript::default();
         t.push_tool(call(5, "Bash", "long cmd"));
-        t.complete(true, &PlainHighlighter, Theme::dark());
+        t.complete(true);
         if let Some(Item::Tool {
             status: ToolStatus::Done(o),
             ..
@@ -1033,7 +1051,7 @@ mod tests {
     #[test]
     fn interrupted_without_stream_pushes_notice() {
         let mut t = Transcript::default();
-        t.complete(true, &PlainHighlighter, Theme::dark());
+        t.complete(true);
         assert!(
             matches!(t.items.last(), Some(Item::Notice(_))),
             "interrupting with no stream must push a Notice item"
@@ -1044,10 +1062,10 @@ mod tests {
     fn error_commits_partial_stream_before_error_row() {
         let mut t = Transcript::default();
         t.push_delta("partial answer");
-        t.push_error("boom", &PlainHighlighter, Theme::dark());
+        t.push_error("boom");
         assert!(matches!(&t.items[0], Item::Agent(_)));
         assert!(matches!(&t.items[1], Item::Error(_)));
-        t.complete(true, &PlainHighlighter, Theme::dark());
+        t.complete(true);
         assert!(
             !matches!(t.items.last(), Some(Item::Notice(_))),
             "interrupted notice must be suppressed right after an error row"
@@ -1170,7 +1188,7 @@ mod tests {
     fn complete_interrupted_finishes_running_shell() {
         let mut t = Transcript::default();
         t.push_shell(TaskId(2), "sleep 99".to_owned());
-        t.complete(true, &PlainHighlighter, Theme::dark());
+        t.complete(true);
         assert!(matches!(
             &t.items[0],
             Item::Shell {
