@@ -722,6 +722,22 @@ impl App {
                 self.overlay = Overlay::None;
                 self.dirty = true;
             }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.usage_scroll = self.usage_scroll.saturating_sub(1);
+                self.dirty = true;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.usage_scroll = self.usage_scroll.saturating_add(1);
+                self.dirty = true;
+            }
+            KeyCode::PageUp => {
+                self.usage_scroll = self.usage_scroll.saturating_sub(8);
+                self.dirty = true;
+            }
+            KeyCode::PageDown => {
+                self.usage_scroll = self.usage_scroll.saturating_add(8);
+                self.dirty = true;
+            }
             _ => {}
         }
         Vec::new()

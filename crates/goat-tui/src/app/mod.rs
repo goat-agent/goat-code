@@ -123,6 +123,7 @@ pub struct App {
     pub(crate) usage_last: HashMap<(String, String), Usage>,
     pub(crate) usage_total: HashMap<(String, String), (u64, u64)>,
     pub(crate) rate_limits: HashMap<(String, String), (RateLimitSnapshot, i64)>,
+    pub(crate) usage_scroll: usize,
     pub(crate) context_window: Option<u32>,
     pub(crate) compaction_threshold: Option<u32>,
     pub(crate) retry: Option<RetryState>,
@@ -185,6 +186,7 @@ impl App {
             usage_last: HashMap::new(),
             usage_total: HashMap::new(),
             rate_limits: HashMap::new(),
+            usage_scroll: 0,
             context_window: None,
             compaction_threshold: None,
             retry: None,
@@ -416,6 +418,7 @@ impl App {
             }
             CommandEffect::OpenUsage => {
                 self.overlay = Overlay::Usage;
+                self.usage_scroll = 0;
                 self.dirty = true;
                 Vec::new()
             }
@@ -932,6 +935,7 @@ impl App {
             &self.rate_limits,
             self.context_window,
             self.model.as_ref(),
+            self.usage_scroll,
         )
     }
 
