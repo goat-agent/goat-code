@@ -7,13 +7,10 @@ use std::{
 };
 
 use goat_protocol::ToolDisplay;
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolImage, ToolOutput};
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput};
 use rmcp::{
     RoleClient, ServiceExt,
-    model::{
-        CallToolRequestParams, CallToolResult, ClientRequest, Content, RawContent,
-        ResourceContents, ServerResult, Tool as McpTool,
-    },
+    model::{CallToolRequestParams, ClientRequest, ServerResult, Tool as McpTool},
     service::{PeerRequestOptions, RunningService, ServiceError},
     transport::{ConfigureCommandExt, TokioChildProcess},
 };
@@ -29,6 +26,12 @@ use tokio_util::sync::CancellationToken;
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_mins(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+mod convert;
+mod names;
+
+use convert::convert_result;
+use names::unique_tool_name;
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
@@ -337,148 +340,6 @@ fn input_arguments(input: &str) -> Result<Map<String, Value>, McpError> {
     }
 }
 
-fn convert_result(tool_name: &str, result: CallToolResult) -> Result<ToolOutput, McpError> {
-    let mut fallback = Vec::new();
-    let mut first_image = None;
-    for content in result.content {
-        match content_to_tool_content(content) {
-            ToolResultPart::Text(text) => fallback.push(text),
-            ToolResultPart::Image(image) => {
-                if first_image.is_none() {
-                    first_image = Some(image);
-                }
-            }
-        }
-    }
-    if let Some(value) = result.structured_content {
-        fallback.push(format!("structuredContent: {value}"));
-    }
-    if result.is_error.unwrap_or(false) {
-        let message = if fallback.is_empty() {
-            "MCP tool returned an error".to_owned()
-        } else {
-            fallback.join("\n")
-        };
-        return Err(McpError::ToolError {
-            tool: tool_name.to_owned(),
-            message,
-        });
-    }
-    if !fallback.is_empty() {
-        Ok(ToolOutput::text(fallback.join("\n")).with_summary(summary(&fallback)))
-    } else if let Some(image) = first_image {
-        Ok(ToolOutput::image(image).with_summary("image"))
-    } else {
-        Ok(ToolOutput::text(String::new()))
-    }
-}
-
-enum ToolResultPart {
-    Text(String),
-    Image(ToolImage),
-}
-
-fn content_to_tool_content(content: Content) -> ToolResultPart {
-    match content.raw {
-        RawContent::Text(text) => ToolResultPart::Text(text.text),
-        RawContent::Image(image) => ToolResultPart::Image(ToolImage {
-            media_type: image.mime_type,
-            data: image.data,
-        }),
-        RawContent::Audio(audio) => ToolResultPart::Text(format!(
-            "audio result: mimeType={}, base64Bytes={}",
-            audio.mime_type,
-            audio.data.len()
-        )),
-        RawContent::Resource(resource) => {
-            ToolResultPart::Text(resource_fallback(resource.resource))
-        }
-        RawContent::ResourceLink(resource) => ToolResultPart::Text(format!(
-            "resource link: uri={}, name={}",
-            resource.uri, resource.name
-        )),
-    }
-}
-
-fn resource_fallback(resource: ResourceContents) -> String {
-    match resource {
-        ResourceContents::TextResourceContents {
-            uri,
-            mime_type,
-            text,
-            ..
-        } => format!(
-            "embedded resource: uri={}, mimeType={}\n{}",
-            uri,
-            mime_type.unwrap_or_default(),
-            text
-        ),
-        ResourceContents::BlobResourceContents {
-            uri,
-            mime_type,
-            blob,
-            ..
-        } => format!(
-            "embedded resource: uri={}, mimeType={}, base64Bytes={}",
-            uri,
-            mime_type.unwrap_or_default(),
-            blob.len()
-        ),
-    }
-}
-
-fn summary(parts: &[String]) -> String {
-    parts
-        .iter()
-        .find_map(|part| part.lines().find(|line| !line.trim().is_empty()))
-        .map_or_else(String::new, |line| line.chars().take(80).collect())
-}
-
-pub fn sanitize_component(input: &str) -> String {
-    let mut output = String::new();
-    let mut last_was_sep = false;
-    for ch in input.chars().flat_map(char::to_lowercase) {
-        if ch.is_ascii_alphanumeric() {
-            output.push(ch);
-            last_was_sep = false;
-        } else if !last_was_sep && !output.is_empty() {
-            output.push('_');
-            last_was_sep = true;
-        }
-    }
-    while output.ends_with('_') {
-        output.pop();
-    }
-    if output.is_empty() {
-        "unnamed".to_owned()
-    } else {
-        output
-    }
-}
-
-pub fn exposed_tool_name(server: &str, tool: &str) -> String {
-    format!(
-        "mcp__{}__{}",
-        sanitize_component(server),
-        sanitize_component(tool)
-    )
-}
-
-fn unique_tool_name(used: &mut HashSet<String>, server: &str, tool: &str) -> String {
-    let base = exposed_tool_name(server, tool);
-    if used.insert(base.clone()) {
-        return base;
-    }
-    let mut index = 2;
-    loop {
-        let candidate = format!("{base}_{index}");
-        if used.insert(candidate.clone()) {
-            return candidate;
-        }
-        index += 1;
-    }
-}
-
 fn leak(value: String) -> &'static str {
     Box::leak(value.into_boxed_str())
 }
@@ -488,6 +349,7 @@ mod tests {
     use rmcp::model::{CallToolResult, Content};
     use serde_json::json;
 
+    use super::names::exposed_tool_name;
     use super::*;
 
     #[test]
