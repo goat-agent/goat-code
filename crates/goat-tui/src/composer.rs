@@ -84,7 +84,7 @@ impl Composer {
         u16::try_from(total)
             .unwrap_or(u16::MAX)
             .saturating_add(2)
-            .clamp(4, 8)
+            .clamp(3, 8)
     }
 
     pub fn on_first_row(&self) -> bool {
