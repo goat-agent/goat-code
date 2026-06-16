@@ -1882,11 +1882,10 @@ dependencies = [
  "goat-providers",
  "goat-store",
  "goat-tui",
- "ignore",
+ "goat-worktree",
  "reqwest 0.12.28",
  "semver",
  "serde",
- "serde_json",
  "sha2 0.11.0",
  "tar",
  "tempfile",
@@ -2200,6 +2199,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2271,6 +2271,17 @@ dependencies = [
  "clap",
  "color-eyre",
  "tempfile",
+]
+
+[[package]]
+name = "goat-worktree"
+version = "0.1.3"
+dependencies = [
+ "ignore",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -219,3 +219,34 @@ fn final_text(history: &[Message]) -> String {
     }
     "(agent produced no output)".to_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{delegation_label, final_text};
+    use goat_provider::{Message, MessageRole};
+
+    #[test]
+    fn label_uses_first_line_and_truncates() {
+        assert_eq!(delegation_label("hello\nworld"), "hello");
+        let long = "x".repeat(60);
+        let label = delegation_label(&long);
+        assert_eq!(label.chars().count(), 51);
+        assert!(label.ends_with('…'));
+    }
+
+    #[test]
+    fn final_text_picks_last_nonempty_assistant() {
+        let history = vec![
+            Message::text(MessageRole::User, "ask"),
+            Message::text(MessageRole::Assistant, "first"),
+            Message::text(MessageRole::Assistant, "   "),
+        ];
+        assert_eq!(final_text(&history), "first");
+    }
+
+    #[test]
+    fn final_text_falls_back_when_no_output() {
+        let history = vec![Message::text(MessageRole::User, "ask")];
+        assert_eq!(final_text(&history), "(agent produced no output)");
+    }
+}

@@ -81,7 +81,8 @@ pub async fn ensure_session(
         }
         *slot = Some(launch().await?);
     }
-    Ok(slot.as_mut().expect("session was set above"))
+    slot.as_mut()
+        .ok_or_else(|| BrowserError::Message("browser session unavailable".to_owned()))
 }
 
 async fn launch() -> Result<BrowserSession, BrowserError> {

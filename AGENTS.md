@@ -18,15 +18,16 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-32 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
+36 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
 
 **Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
 - `goat-config` — config, `ThemeChoice`, `~/.goat-code` paths, log directory; no TUI deps; leaf.
 - `goat-core` — `Session` and the `Engine` trait; depends on `goat-protocol` only.
-- `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol` and `goat-commands`, not `goat-core` or any engine crate.
+- `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol`, `goat-commands`, and `goat-config`, not `goat-core` or any engine crate.
 - `goat-code` — the `goat` binary; wires the channels, logging, and CLI; depends on all.
 - `goat-update` — executable replacement helper for `goat update`; small CLI-only crate with no app-state ownership.
+- `goat-worktree` — git-worktree management (`enter`/`list`/`remove`); leaf crate (std + `ignore` + `serde`, shells out to `git`); `goat-code` keeps the clap `WorktreeCommand` and dispatches into it.
 
 **Providers**
 - `goat-provider` — the `Provider` trait; leaf. Key types: `Provider`, `Request` (incl. `ToolChoice`), `StreamEvent`, `StreamError`, `Message`, `Capabilities`, `Model`, `ProviderId`, `ContentBlock`. Providers classify their own wire errors into `StreamError` structurally (`error.rs` per provider); the engine never inspects error strings.
@@ -40,6 +41,8 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 **Agent**
 - `goat-agent` — `GoatAgent`, the production `Engine` implementation; owns the LLM loop, tool dispatch, and the `Conversation` history (messages + db row ids). Long-running capabilities live here: retry with exponential backoff over classified provider errors (`retry.rs`), mid-turn steering (queued `SubmitMessage` injected at round boundaries), and LLM-summarization auto-compaction with a `ContextTracker` token budget (`compaction.rs`). Also owns the `Agent` delegation tool and `AgentSpec`/`AgentRegistry` (`agent.rs`): built-in `explore` (read-only) and `general`, plus file-defined agents from `.goat/agents/<name>.md` (Claude Code custom-agent frontmatter — `name`/`description`/`tools`/`model`/`effort`). Module map and dependency direction live in `crates/goat-agent/AGENTS.md`.
+- `goat-mcp` — MCP (Model Context Protocol) client manager; launches stdio MCP servers and adapts their tools into the `Tool` trait via `rmcp`. A `goat-agent` dependency.
+- `goat-sandbox` — platform sandbox backend for shell execution (deny-file rules); used by `goat-tool-shell` and `goat-agent`.
 
 **Auth / Store**
 - `goat-auth` — credential store (provider API keys, OAuth tokens).
@@ -50,6 +53,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-tool-fs` — filesystem tools (read, write, list, search).
 - `goat-tool-shell` — shell execution tool.
 - `goat-tool-search` — web/code search tools.
+- `goat-tool-web` — the web-fetch tool; fetches a URL over HTTPS and converts to Markdown, with SSRF protection (`ssrf` module rejects private/link-local addresses).
 - `goat-tool-skill` — the `Skill` tool; loads a skill's instructions on demand from the cwd.
 - `goat-tool-computer` — the `Computer` tool; desktop control (screenshot + mouse/keyboard) via `xcap`/`enigo`. Opt-in: registered by `GoatAgent::new` only when `computer_use_enabled` is set.
 - `goat-tool-browser` — the `Browser` tool; drives a real Chrome via CDP (`chromiumoxide`). One tool with an `action` enum (navigate/snapshot/click/type/select/press_key/evaluate/screenshot/close); actions return a text accessibility snapshot with element refs (`screenshot` returns an image). Persistent login profile at `~/.goat-code/browser/profile`, headful. Opt-in: registered by `GoatAgent::new` only when `browser_enabled` is set.
@@ -61,6 +65,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-command-settings` — `/model`, `/effort`, `/config` commands (one module per command). `/model` and `/effort` accept an optional argument (`/model <name>`, `/effort <level>`) or open a picker when bare.
 - `goat-command-conversation` — `/clear`, `/compact`, and `/resume` commands. `/compact [focus]` summarizes the conversation to free context (deferred to after the turn when one is running). `/resume` opens a picker of past conversations in the cwd, or `/resume <n>` resumes the nth.
 - `goat-command-help` — `/help` command.
+- `goat-command-app` — app-lifecycle commands (`/exit`).
 - `goat-commands` — command registry; wires the per-category command crates and surfaces loaded skills as `/name` commands via `set_skills`; mirrors `goat-tools`.
 
 The UI and the engine communicate only through `goat-protocol` types over bounded

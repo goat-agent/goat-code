@@ -185,6 +185,11 @@ pub enum AuthError {
     Json(#[from] serde_json::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("credential store at {path} is corrupt: {source}")]
+    Corrupt {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     #[error("oauth error: {0}")]
     OAuth(String),
 }
@@ -305,7 +310,7 @@ impl CredentialStore {
     }
 
     pub fn entries(&self) -> Vec<(CredentialKey, CredentialKind)> {
-        self.load_file()
+        self.read_file()
             .credentials
             .into_iter()
             .map(|entry| {
@@ -316,7 +321,7 @@ impl CredentialStore {
     }
 
     pub fn remove(&self, key: &CredentialKey) -> Result<bool, AuthError> {
-        let mut file = self.load_file();
+        let mut file = self.load_file()?;
         let before = file.credentials.len();
         file.credentials.retain(|entry| &entry.key != key);
         let removed = file.credentials.len() != before;
@@ -326,11 +331,28 @@ impl CredentialStore {
         Ok(removed)
     }
 
-    fn load_file(&self) -> AuthFile {
-        fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+    fn load_file(&self) -> Result<AuthFile, AuthError> {
+        let raw = match fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AuthFile::default());
+            }
+            Err(err) => return Err(err.into()),
+        };
+        serde_json::from_str(&raw).map_err(|source| AuthError::Corrupt {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
+    fn read_file(&self) -> AuthFile {
+        match self.load_file() {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to read credential store; treating as empty");
+                AuthFile::default()
+            }
+        }
     }
 
     fn save_file(&self, file: &AuthFile) -> Result<(), AuthError> {
@@ -347,7 +369,7 @@ impl CredentialStore {
     }
 
     fn file_get(&self, key: &CredentialKey) -> Option<Credential> {
-        self.load_file()
+        self.read_file()
             .credentials
             .into_iter()
             .find(|entry| &entry.key == key)
@@ -355,7 +377,7 @@ impl CredentialStore {
     }
 
     fn file_set(&self, key: &CredentialKey, value: Credential) -> Result<(), AuthError> {
-        let mut file = self.load_file();
+        let mut file = self.load_file()?;
         let stored = StoredValue::from(value);
         if let Some(entry) = file.credentials.iter_mut().find(|entry| &entry.key == key) {
             entry.value = stored;
@@ -450,6 +472,39 @@ mod tests {
                 .resolve(&key, Some("GOAT_DEFINITELY_NOT_SET_VAR_42"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn corrupt_file_is_not_overwritten_on_store() {
+        let path = std::env::temp_dir().join("goat-auth-corrupt-test.json");
+        std::fs::write(&path, "{ not valid json").unwrap();
+        let store = CredentialStore::new(path.clone());
+        let key = CredentialKey {
+            provider: "p".into(),
+            account: "a".into(),
+        };
+        let result = store.store(&key, Credential::ApiKey(SecretString::from("k")));
+        assert!(matches!(result, Err(super::AuthError::Corrupt { .. })));
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, "{ not valid json");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn missing_file_loads_as_empty() {
+        let path = std::env::temp_dir().join("goat-auth-missing-test.json");
+        let _ = std::fs::remove_file(&path);
+        let store = CredentialStore::new(path.clone());
+        assert!(store.entries().is_empty());
+        let key = CredentialKey {
+            provider: "p".into(),
+            account: "a".into(),
+        };
+        store
+            .store(&key, Credential::ApiKey(SecretString::from("k")))
+            .unwrap();
+        assert_eq!(store.entries().len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

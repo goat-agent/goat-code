@@ -1,26 +1,20 @@
+mod item;
+mod render;
+
 use std::cell::RefCell;
 
-use goat_protocol::{TaskId, ToolCall, ToolCallId, ToolDisplay, ToolOutcome};
+use goat_protocol::{TaskId, ToolCall, ToolCallId, ToolOutcome};
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
 };
-use unicode_width::UnicodeWidthStr;
 
-use crate::{
-    highlight::Highlighter, layout::format_tokens, markdown, overlay::truncate_to_width, symbols,
-    theme::Theme, wrap,
-};
+use crate::{highlight::Highlighter, markdown, symbols, theme::Theme};
 
-pub(crate) struct Working {
-    pub elapsed: Option<u64>,
-    pub label: Option<String>,
-    pub thinking: bool,
-    pub tokens: Option<u64>,
-}
+pub(crate) use item::{Item, ShellStatus, ToolStatus, Working};
+use render::{build_static_lines, hang, is_blank, queued_rows, stable_prefix_len, working_rows};
 
 pub(crate) struct RenderCtx<'a> {
     pub theme: Theme,
@@ -32,10 +26,10 @@ pub(crate) struct RenderCtx<'a> {
     pub picker: Option<&'a ratatui_image::picker::Picker>,
 }
 
-struct ImagePlacement {
-    item: usize,
-    start: usize,
-    rows: u16,
+pub(super) struct ImagePlacement {
+    pub(super) item: usize,
+    pub(super) start: usize,
+    pub(super) rows: u16,
 }
 
 struct RenderCache {
@@ -50,42 +44,6 @@ struct StreamCache {
     prefix_len: usize,
     width: u16,
     prefix_content: Vec<ratatui::text::Line<'static>>,
-}
-
-#[derive(Debug)]
-pub(crate) enum ToolStatus {
-    Running,
-    Done(ToolOutcome),
-}
-
-#[derive(Debug)]
-pub(crate) enum ShellStatus {
-    Running,
-    Done(String),
-}
-
-#[derive(Debug)]
-pub(crate) enum Item {
-    User(String),
-    Agent(Vec<Line<'static>>),
-    Tool {
-        id: ToolCallId,
-        name: String,
-        display: ToolDisplay,
-        status: ToolStatus,
-        image: Option<Box<crate::screenshot::TranscriptImage>>,
-    },
-    Shell {
-        id: TaskId,
-        command: String,
-        status: ShellStatus,
-    },
-    Error(String),
-    Notice(String),
-    Compaction {
-        tokens_before: u32,
-        tokens_after: u32,
-    },
 }
 
 #[derive(Default)]
@@ -125,11 +83,10 @@ impl Transcript {
             .push_str(chunk);
     }
 
-    pub fn commit_text(&mut self, text: &str, hl: &dyn Highlighter, theme: Theme) {
+    pub fn commit_text(&mut self, text: &str) {
         self.bump_version();
         self.streaming = None;
-        self.items
-            .push(Item::Agent(markdown::render(text, theme, hl)));
+        self.items.push(Item::Agent(text.to_owned()));
     }
 
     pub fn push_tool(&mut self, call: ToolCall) {
@@ -190,12 +147,11 @@ impl Transcript {
         }
     }
 
-    pub fn push_error(&mut self, text: impl Into<String>, hl: &dyn Highlighter, theme: Theme) {
+    pub fn push_error(&mut self, text: impl Into<String>) {
         self.bump_version();
         if let Some(buffer) = self.streaming.take() {
             let text = format!("{buffer} {} stopped", symbols::ui::ELLIPSIS);
-            self.items
-                .push(Item::Agent(markdown::render(&text, theme, hl)));
+            self.items.push(Item::Agent(text));
         }
         self.items.push(Item::Error(text.into()));
     }
@@ -213,7 +169,7 @@ impl Transcript {
         });
     }
 
-    pub fn complete(&mut self, interrupted: bool, hl: &dyn Highlighter, theme: Theme) {
+    pub fn complete(&mut self, interrupted: bool) {
         self.bump_version();
         if interrupted {
             for item in &mut self.items {
@@ -239,14 +195,13 @@ impl Transcript {
             } else {
                 buffer
             };
-            self.items
-                .push(Item::Agent(markdown::render(&text, theme, hl)));
+            self.items.push(Item::Agent(text));
         } else if interrupted && !matches!(self.items.last(), Some(Item::Error(_))) {
             self.items.push(Item::Notice("interrupted".into()));
         }
     }
 
-    fn ensure_cache(&self, theme: Theme, width: u16) {
+    fn ensure_cache(&self, theme: Theme, width: u16, hl: &dyn Highlighter) {
         let valid = self
             .cache
             .borrow()
@@ -255,7 +210,7 @@ impl Transcript {
         if valid {
             return;
         }
-        let (lines, spinner_lines, images) = build_static_lines(&self.items, theme, width);
+        let (lines, spinner_lines, images) = build_static_lines(&self.items, theme, width, hl);
         *self.cache.borrow_mut() = Some(RenderCache {
             width,
             version: self.version,
@@ -349,7 +304,7 @@ impl Transcript {
         working: Option<&Working>,
         queued: &[String],
     ) -> usize {
-        self.ensure_cache(theme, width);
+        self.ensure_cache(theme, width, hl);
         let base = self.cache.borrow().as_ref().map_or(0, |c| c.lines.len());
         base + self
             .tail_rows(
@@ -365,7 +320,7 @@ impl Transcript {
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
-        self.ensure_cache(ctx.theme, area.width);
+        self.ensure_cache(ctx.theme, area.width, ctx.hl);
         let guard = self.cache.borrow();
         let Some(cache) = guard.as_ref() else {
             return;
@@ -429,442 +384,18 @@ impl Transcript {
     }
 }
 
-fn is_blank(line: &Line<'_>) -> bool {
-    line.spans.iter().all(|s| s.content.is_empty())
-}
-
-fn stable_prefix_len(buffer: &str) -> usize {
-    let mut in_fence = false;
-    let mut offset = 0usize;
-    let mut split = 0usize;
-    let mut prev_blank = true;
-    for line in buffer.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\n', '\r']);
-        let stripped = trimmed.trim_start();
-        if stripped.starts_with("```") || stripped.starts_with("~~~") {
-            in_fence = !in_fence;
-        }
-        let is_blank = trimmed.trim().is_empty();
-        if is_blank && !in_fence && !prev_blank {
-            split = offset + line.len();
-        }
-        prev_blank = is_blank;
-        offset += line.len();
-    }
-    split.min(buffer.len())
-}
-
-fn hang(content: &[Line<'static>], marker: Span<'static>, width: u16) -> Vec<Line<'static>> {
-    let inner = width.saturating_sub(2);
-    let mut first = Some(marker);
-    if content.is_empty() {
-        return vec![Line::from(vec![first.take().unwrap_or_default()])];
-    }
-    let mut out: Vec<Line<'static>> = Vec::new();
-    for line in content {
-        for mut row in wrap::wrap_line(line, inner) {
-            let prefix = first.take().unwrap_or_else(|| Span::raw("  "));
-            row.spans.insert(0, prefix);
-            out.push(row);
-        }
-    }
-    out
-}
-
-fn plain_lines(text: &str, theme: Theme) -> Vec<Line<'static>> {
-    text.split('\n')
-        .map(|raw| Line::from(Span::styled(raw.to_owned(), theme.base())))
-        .collect()
-}
-
-fn format_elapsed(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
-const QUEUED_ROW_CAP: usize = 3;
-
-fn queued_rows(theme: Theme, width: u16, queued: &[String]) -> Vec<Line<'static>> {
-    let inner = usize::from(width.saturating_sub(2));
-    let mut rows: Vec<Line<'static>> = Vec::new();
-    for label in queued.iter().take(QUEUED_ROW_CAP) {
-        rows.push(Line::from(vec![
-            Span::styled(symbols::marker::USER, theme.muted()),
-            Span::styled(truncate_to_width(label, inner), theme.muted()),
-        ]));
-    }
-    if queued.len() > QUEUED_ROW_CAP {
-        rows.push(Line::from(Span::styled(
-            format!(
-                "{} {} more queued",
-                symbols::ui::ELLIPSIS,
-                queued.len() - QUEUED_ROW_CAP
-            ),
-            theme.muted(),
-        )));
-    }
-    rows
-}
-
-fn working_rows(
-    theme: Theme,
-    width: u16,
-    spinner: &'static str,
-    w: &Working,
-) -> Vec<Line<'static>> {
-    let label = w.label.clone().unwrap_or_else(|| {
-        let verb = if w.thinking { "thinking" } else { "working" };
-        format!("{verb}{}", symbols::ui::ELLIPSIS)
-    });
-    let mut spans = vec![Span::styled(label, theme.muted())];
-    if let Some(secs) = w.elapsed {
-        spans.push(Span::styled(
-            format!("{}{}", symbols::ui::SEPARATOR, format_elapsed(secs)),
-            theme.muted(),
-        ));
-    }
-    if let Some(tokens) = w.tokens {
-        spans.push(Span::styled(
-            format!("{}{} tok", symbols::ui::SEPARATOR, format_tokens(tokens)),
-            theme.muted(),
-        ));
-    }
-    hang(
-        &[Line::from(spans)],
-        Span::styled(format!("{spinner} "), theme.accent()),
-        width,
-    )
-}
-
-fn build_static_lines(
-    items: &[Item],
-    theme: Theme,
-    width: u16,
-) -> (Vec<Line<'static>>, Vec<usize>, Vec<ImagePlacement>) {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut spinner_lines: Vec<usize> = Vec::new();
-    let mut images: Vec<ImagePlacement> = Vec::new();
-    for (i, item) in items.iter().enumerate() {
-        if i > 0 {
-            let prev_is_tool = matches!(items.get(i - 1), Some(Item::Tool { .. }));
-            let cur_is_tool = matches!(item, Item::Tool { .. });
-            if !(prev_is_tool && cur_is_tool) {
-                lines.push(Line::default());
-            }
-        }
-        if matches!(
-            item,
-            Item::Tool {
-                status: ToolStatus::Running,
-                ..
-            } | Item::Shell {
-                status: ShellStatus::Running,
-                ..
-            }
-        ) {
-            spinner_lines.push(lines.len());
-        }
-        lines.extend(item_rows(item, theme, width));
-        if let Item::Tool {
-            image: Some(img), ..
-        } = item
-        {
-            let rows = img.rows();
-            if rows > 0 {
-                images.push(ImagePlacement {
-                    item: i,
-                    start: lines.len(),
-                    rows,
-                });
-                for _ in 0..rows {
-                    lines.push(Line::default());
-                }
-            }
-        }
-    }
-    (lines, spinner_lines, images)
-}
-
-fn item_rows(item: &Item, theme: Theme, width: u16) -> Vec<Line<'static>> {
-    match item {
-        Item::User(text) => hang(
-            &plain_lines(text, theme),
-            Span::styled(symbols::marker::USER, theme.role_user()),
-            width,
-        ),
-        Item::Agent(rendered) => {
-            let end = rendered
-                .iter()
-                .rposition(|l| !is_blank(l))
-                .map_or(0, |i| i + 1);
-            hang(
-                &rendered[..end],
-                Span::styled(symbols::marker::AGENT, theme.role_agent()),
-                width,
-            )
-        }
-        Item::Shell {
-            command, status, ..
-        } => shell_rows(command, status, theme, width),
-        Item::Error(text) => hang(
-            &plain_lines(text, theme),
-            Span::styled(symbols::marker::ERROR, theme.error()),
-            width,
-        ),
-        Item::Notice(text) => hang(
-            &plain_lines(text, theme),
-            Span::styled(symbols::marker::NOTICE, theme.muted()),
-            width,
-        ),
-        Item::Compaction {
-            tokens_before,
-            tokens_after,
-        } => vec![Line::from(Span::styled(
-            format!(
-                "{} context compacted{}{} → {} {}",
-                symbols::ui::RULE,
-                symbols::ui::SEPARATOR,
-                format_tokens(u64::from(*tokens_before)),
-                format_tokens(u64::from(*tokens_after)),
-                symbols::ui::RULE,
-            ),
-            theme.muted(),
-        ))],
-        Item::Tool {
-            name,
-            display,
-            status,
-            ..
-        } => {
-            let (marker, marker_style): (&str, _) = match status {
-                ToolStatus::Running => (symbols::SPINNER[0], theme.accent()),
-                ToolStatus::Done(ToolOutcome { ok: true, .. }) => {
-                    (symbols::ui::CHECK, theme.role_tool())
-                }
-                ToolStatus::Done(ToolOutcome { ok: false, .. }) => {
-                    (symbols::ui::CROSS, theme.error())
-                }
-            };
-
-            let name_w = name.width();
-            let avail = usize::from(width)
-                .saturating_sub(2)
-                .saturating_sub(name_w)
-                .saturating_sub(2);
-
-            let primary = truncate_to_width(&display.primary, avail);
-            let detail_avail = avail
-                .saturating_sub(primary.width())
-                .saturating_sub(symbols::ui::SEPARATOR.width());
-            let detail = display
-                .detail
-                .as_deref()
-                .filter(|_| detail_avail > 1)
-                .map(|d| truncate_to_width(d, detail_avail));
-
-            let mut spans = vec![
-                Span::styled(marker, marker_style),
-                Span::raw(" "),
-                Span::styled(name.clone(), theme.text()),
-                Span::styled("(", theme.muted()),
-                Span::styled(primary, theme.base()),
-            ];
-            if let Some(d) = detail {
-                spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
-                spans.push(Span::styled(d, theme.muted()));
-            }
-            spans.push(Span::styled(")", theme.muted()));
-
-            let mut result = vec![Line::from(spans)];
-            if let ToolStatus::Done(ToolOutcome {
-                summary: Some(summary),
-                ..
-            }) = status
-            {
-                result.extend(result_rows(summary, theme, width));
-            }
-            result
-        }
-    }
-}
-
-const RESULT_BLOCK_CAP: usize = 6;
-const SHELL_BLOCK_CAP: usize = 20;
-const SHELL_EXIT_PREFIX: &str = "exit code: ";
-const SHELL_NO_OUTPUT: &str = "(no output)";
-
-fn resolve_carriage_returns(line: &str) -> &str {
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    line.rsplit('\r').next().unwrap_or(line)
-}
-
-fn strip_control_sequences(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => match chars.next() {
-                Some('[') => {
-                    for next in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&next) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    while let Some(next) = chars.next() {
-                        if next == '\u{7}' {
-                            break;
-                        }
-                        if next == '\u{1b}' {
-                            if chars.peek() == Some(&'\\') {
-                                chars.next();
-                            }
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            },
-            '\t' => out.push(c),
-            c if c.is_control() => {}
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-fn sanitize_shell_output(output: &str) -> Vec<String> {
-    let mut lines: Vec<String> = output
-        .split('\n')
-        .map(|line| strip_control_sequences(resolve_carriage_returns(line)))
-        .collect();
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines.pop();
-    }
-    lines
-}
-
-fn shell_line_style(line: &str, theme: Theme) -> Style {
-    if line.starts_with(SHELL_EXIT_PREFIX) || (line.starts_with('[') && line.ends_with(']')) {
-        theme.error()
-    } else if line.starts_with("+ ") {
-        theme.role_agent()
-    } else if line.starts_with("- ") {
-        theme.error()
-    } else {
-        theme.muted()
-    }
-}
-
-fn shell_rows(command: &str, status: &ShellStatus, theme: Theme, width: u16) -> Vec<Line<'static>> {
-    let inner = width.saturating_sub(2);
-    let (marker, marker_style) = match status {
-        ShellStatus::Running => (symbols::SPINNER[0], theme.accent()),
-        ShellStatus::Done(_) => (symbols::ui::BANG, theme.shell()),
-    };
-    let mut out = hang(
-        &plain_lines(command, theme),
-        Span::styled(format!("{marker} "), marker_style),
-        width,
-    );
-
-    let ShellStatus::Done(output) = status else {
-        return out;
-    };
-    let lines = sanitize_shell_output(output);
-    if lines.is_empty() {
-        out.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(SHELL_NO_OUTPUT, theme.muted()),
-        ]));
-        return out;
-    }
-    let exit_line = lines
-        .last()
-        .filter(|line| line.starts_with(SHELL_EXIT_PREFIX))
-        .cloned();
-    let mut rows: Vec<Line<'static>> = Vec::new();
-    for line in &lines {
-        let content = Line::from(Span::styled(
-            line.replace('\t', "  "),
-            shell_line_style(line, theme),
-        ));
-        for mut row in wrap::wrap_line(&content, inner) {
-            row.spans.insert(0, Span::raw("  "));
-            rows.push(row);
-        }
-    }
-    let total = rows.len();
-    if total > SHELL_BLOCK_CAP {
-        rows.truncate(SHELL_BLOCK_CAP);
-        rows.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("{} {} more", symbols::ui::ELLIPSIS, total - SHELL_BLOCK_CAP),
-                theme.muted(),
-            ),
-        ]));
-        if let Some(exit) = exit_line {
-            rows.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(exit, theme.error()),
-            ]));
-        }
-    }
-    out.extend(rows);
-    out
-}
-
-fn result_rows(summary: &str, theme: Theme, width: u16) -> Vec<Line<'static>> {
-    let src: Vec<&str> = summary.lines().collect();
-    let inner = width.saturating_sub(2);
-    let mut out: Vec<Line<'static>> = Vec::new();
-    for line in src.iter().take(RESULT_BLOCK_CAP) {
-        let style = if line.starts_with("+ ") {
-            theme.role_agent()
-        } else if line.starts_with("- ") {
-            theme.error()
-        } else {
-            theme.muted()
-        };
-        let content = Line::from(Span::styled(line.replace('\t', "  "), style));
-        for mut row in wrap::wrap_line(&content, inner) {
-            row.spans.insert(0, Span::raw("  "));
-            out.push(row);
-        }
-    }
-    if src.len() > RESULT_BLOCK_CAP {
-        out.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!(
-                    "{} {} more",
-                    symbols::ui::ELLIPSIS,
-                    src.len() - RESULT_BLOCK_CAP
-                ),
-                theme.muted(),
-            ),
-        ]));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use goat_protocol::{TaskId, ToolCall, ToolCallId, ToolOutcome};
     use ratatui::{Terminal, backend::TestBackend};
 
-    use super::{
-        Item, SHELL_BLOCK_CAP, ShellStatus, ToolStatus, Transcript, Working, format_elapsed,
-        sanitize_shell_output, shell_rows, stable_prefix_len,
+    use super::render::{
+        SHELL_BLOCK_CAP, build_static_lines, format_elapsed, sanitize_shell_output, shell_rows,
+        stable_prefix_len,
     };
+    use super::{Item, ShellStatus, ToolStatus, Transcript, Working};
     use crate::{highlight::PlainHighlighter, markdown, symbols, theme::Theme};
+    use ratatui::text::Line;
 
     fn call(id: u64, name: &str, input: &str) -> ToolCall {
         ToolCall {
@@ -891,11 +422,29 @@ mod tests {
     }
 
     fn commit(t: &mut Transcript, text: &str) {
-        t.commit_text(text, &PlainHighlighter, Theme::dark());
+        t.commit_text(text);
     }
 
     fn height(t: &Transcript, width: u16) -> usize {
         t.content_height(width, Theme::dark(), &PlainHighlighter, None, &[])
+    }
+
+    #[test]
+    fn agent_text_restyles_on_theme_change() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+        let items = vec![Item::Agent("plain body".to_owned())];
+        let (dark_lines, _, _) = build_static_lines(&items, dark, 80, &PlainHighlighter);
+        let (light_lines, _, _) = build_static_lines(&items, light, 80, &PlainHighlighter);
+        let body_fg = |lines: &[Line<'static>]| {
+            lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .find(|s| s.content.contains("plain body"))
+                .map(|s| s.style.fg)
+        };
+        assert_eq!(body_fg(&dark_lines), Some(Some(dark.fg_color())));
+        assert_eq!(body_fg(&light_lines), Some(Some(light.fg_color())));
     }
 
     fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
@@ -958,7 +507,7 @@ mod tests {
     fn complete_interrupted_clears_running_tools() {
         let mut t = Transcript::default();
         t.push_tool(call(5, "Bash", "long cmd"));
-        t.complete(true, &PlainHighlighter, Theme::dark());
+        t.complete(true);
         if let Some(Item::Tool {
             status: ToolStatus::Done(o),
             ..
@@ -1033,7 +582,7 @@ mod tests {
     #[test]
     fn interrupted_without_stream_pushes_notice() {
         let mut t = Transcript::default();
-        t.complete(true, &PlainHighlighter, Theme::dark());
+        t.complete(true);
         assert!(
             matches!(t.items.last(), Some(Item::Notice(_))),
             "interrupting with no stream must push a Notice item"
@@ -1044,10 +593,10 @@ mod tests {
     fn error_commits_partial_stream_before_error_row() {
         let mut t = Transcript::default();
         t.push_delta("partial answer");
-        t.push_error("boom", &PlainHighlighter, Theme::dark());
+        t.push_error("boom");
         assert!(matches!(&t.items[0], Item::Agent(_)));
         assert!(matches!(&t.items[1], Item::Error(_)));
-        t.complete(true, &PlainHighlighter, Theme::dark());
+        t.complete(true);
         assert!(
             !matches!(t.items.last(), Some(Item::Notice(_))),
             "interrupted notice must be suppressed right after an error row"
@@ -1170,7 +719,7 @@ mod tests {
     fn complete_interrupted_finishes_running_shell() {
         let mut t = Transcript::default();
         t.push_shell(TaskId(2), "sleep 99".to_owned());
-        t.complete(true, &PlainHighlighter, Theme::dark());
+        t.complete(true);
         assert!(matches!(
             &t.items[0],
             Item::Shell {

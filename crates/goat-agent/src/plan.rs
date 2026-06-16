@@ -95,7 +95,16 @@ pub(crate) async fn run_propose_plan(
     let Some(path) = env.plan_path.clone() else {
         return Err("no plan file is set for this session".to_owned());
     };
-    let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    let content = match tokio::fs::read_to_string(&path).await {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(format!(
+                "could not read the plan file at {}: {err}",
+                path.display()
+            ));
+        }
+    };
     if content.trim().is_empty() {
         return Err(
             "the plan file is empty — write the plan to it before proposing it for approval"
