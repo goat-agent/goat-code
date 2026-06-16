@@ -422,6 +422,17 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 )
                 .await;
             }
+            Op::ResumeLatest => {
+                threads::handle_resume_latest(
+                    &store,
+                    &skills,
+                    &tools,
+                    project_instructions.as_deref(),
+                    &mut state,
+                    &events,
+                )
+                .await;
+            }
             Op::RenameThread { title } => {
                 threads::handle_rename(&store, state.thread_id, title, &events).await;
             }
@@ -1361,6 +1372,78 @@ mod tests {
             }
         }
         panic!("expected ConversationRestored");
+    }
+
+    #[tokio::test]
+    async fn resume_latest_restores_most_recent_thread() {
+        let provider = MockProvider {
+            id: "mock".to_owned(),
+            reply: "ok".to_owned(),
+            delay_ms: 0,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials =
+            CredentialStore::new(std::env::temp_dir().join("goat-agent-resume-latest.json"));
+        let agent =
+            GoatAgent::new(registry, store.clone(), credentials, Some(target("mock"))).await;
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "hello there".to_owned(),
+        })
+        .await
+        .unwrap();
+        drain_until_task_done(&mut events).await;
+
+        ops.send(Op::ResumeLatest).await.unwrap();
+        while let Some(event) = events.recv().await {
+            if let Event::ConversationRestored { entries, .. } = event {
+                assert!(entries.iter().any(|entry| matches!(
+                    entry,
+                    goat_protocol::TranscriptEntry::User(text) if text == "hello there"
+                )));
+                return;
+            }
+        }
+        panic!("expected ConversationRestored");
+    }
+
+    #[tokio::test]
+    async fn resume_latest_without_history_notifies() {
+        let provider = MockProvider {
+            id: "mock".to_owned(),
+            reply: "ok".to_owned(),
+            delay_ms: 0,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials =
+            CredentialStore::new(std::env::temp_dir().join("goat-agent-resume-latest-empty.json"));
+        let agent =
+            GoatAgent::new(registry, store.clone(), credentials, Some(target("mock"))).await;
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+
+        ops.send(Op::ResumeLatest).await.unwrap();
+        ops.send(Op::Shutdown).await.unwrap();
+
+        let mut saw_notify = false;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Notify {
+                    kind: goat_protocol::NotifyKind::Info,
+                    ..
+                } => saw_notify = true,
+                Event::ConversationRestored { .. } => {
+                    panic!("nothing to restore in an empty store");
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_notify, "empty resume must emit an Info notify");
     }
 
     async fn drain_until_task_done(events: &mut mpsc::Receiver<Event>) {

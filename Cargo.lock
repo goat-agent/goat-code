@@ -1878,6 +1878,7 @@ dependencies = [
  "goat-auth",
  "goat-config",
  "goat-core",
+ "goat-protocol",
  "goat-provider",
  "goat-providers",
  "goat-store",
