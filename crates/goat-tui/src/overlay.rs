@@ -112,6 +112,88 @@ pub fn overflow_hint(start: usize, shown: usize, total: usize) -> (Option<String
     (above, below)
 }
 
+pub struct Window {
+    pub start: usize,
+    pub shown: usize,
+    pub above: Option<String>,
+    pub below: Option<String>,
+}
+
+pub fn window(cursor: usize, len: usize, rows: usize) -> Window {
+    if rows == 0 || len == 0 {
+        return Window {
+            start: 0,
+            shown: 0,
+            above: None,
+            below: None,
+        };
+    }
+    let needs_above = len > rows;
+    let needs_below = len > rows;
+    let body = rows
+        .saturating_sub(usize::from(needs_above))
+        .saturating_sub(usize::from(needs_below))
+        .max(1);
+    let mut start = if cursor >= body { cursor + 1 - body } else { 0 };
+    start = start.min(len.saturating_sub(body));
+    let shown = body.min(len.saturating_sub(start));
+    let (above, below) = overflow_hint(start, shown, len);
+    Window {
+        start,
+        shown,
+        above,
+        below,
+    }
+}
+
+pub fn render_window<'a, F>(
+    theme: Theme,
+    width: usize,
+    cursor: usize,
+    len: usize,
+    rows: usize,
+    mut row: F,
+) -> Vec<Line<'a>>
+where
+    F: FnMut(usize) -> (Vec<Span<'a>>, Option<Span<'a>>),
+{
+    let w = window(cursor, len, rows);
+    let mut lines: Vec<Line<'a>> = Vec::new();
+    if let Some(above) = &w.above {
+        lines.push(Line::from(Span::styled(format!(" {above}"), theme.muted())));
+    }
+    for idx in w.start..w.start + w.shown {
+        let selected = idx == cursor;
+        let (left, right) = row(idx);
+        lines.push(selection_row(theme, selected, width, left, right));
+    }
+    if let Some(below) = &w.below {
+        lines.push(Line::from(Span::styled(format!(" {below}"), theme.muted())));
+    }
+    lines
+}
+
+pub fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_owned();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for c in s.chars() {
+        let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + char_width + 1 > max_width {
+            break;
+        }
+        out.push(c);
+        width += char_width;
+    }
+    out.push_str(symbols::ui::ELLIPSIS);
+    out
+}
+
 pub fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
     let width = max_width.min(area.width.saturating_sub(4));
     let height = max_height.min(area.height.saturating_sub(2));

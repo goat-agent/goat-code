@@ -20,7 +20,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Block::new().style(theme.base()), full);
 
     let area = full.inner(Margin {
-        horizontal: 1,
+        horizontal: 0,
         vertical: 0,
     });
 
