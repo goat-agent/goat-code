@@ -157,8 +157,13 @@ async fn execute_tool(
         } else if prep.name == ASK_TOOL_NAME && env.allow_delegate {
             Some(run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token).await)
         } else if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
-            match ctx.semaphore.acquire().await {
-                Ok(_permit) if !token.is_cancelled() => Some(
+            let permit = tokio::select! {
+                biased;
+                () = token.cancelled() => None,
+                acquired = ctx.semaphore.acquire() => acquired.ok(),
+            };
+            match permit {
+                Some(_permit) if !token.is_cancelled() => Some(
                     run_delegation(ctx, env, prep.input_json, run.id, token)
                         .await
                         .map(ToolOutput::text),

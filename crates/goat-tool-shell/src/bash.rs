@@ -146,8 +146,12 @@ impl Tool for BashTool {
                         }
                     }
                 );
-                let _ = stdout_result;
-                let _ = stderr_result;
+                if let Err(err) = stdout_result {
+                    tracing::debug!(error = %err, "shell stdout read error; output may be truncated");
+                }
+                if let Err(err) = stderr_result {
+                    tracing::debug!(error = %err, "shell stderr read error; output may be truncated");
+                }
                 let status = guard.child.wait().await;
                 guard.reaped = true;
                 (stdout, stderr, status)

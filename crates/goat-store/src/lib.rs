@@ -101,6 +101,8 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("database version {0} is newer than this binary supports")]
     UnknownVersion(i64),
+    #[error("store task failed: {0}")]
+    BlockingTask(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,14 +245,17 @@ impl Store {
         T: Send + 'static,
     {
         let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             let guard = conn
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&guard)
         })
         .await
-        .expect("store blocking task panicked")
+        {
+            Ok(result) => result,
+            Err(err) => Err(StoreError::BlockingTask(err.to_string())),
+        }
     }
 
     pub async fn create_thread(&self, thread: NewThread) -> Result<i64, StoreError> {

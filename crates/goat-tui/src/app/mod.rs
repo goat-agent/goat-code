@@ -517,7 +517,7 @@ impl App {
                 } else {
                     goat_config::ThemeChoice::Light
                 };
-                let _ = cfg.save();
+                self.persist_config(&cfg);
                 Vec::new()
             }
             ConfigOutcome::SetMouseCapture { enabled } => {
@@ -525,21 +525,21 @@ impl App {
                 tui::set_mouse_capture(enabled);
                 let mut cfg = goat_config::Config::load();
                 cfg.mouse_capture_enabled = enabled;
-                let _ = cfg.save();
+                self.persist_config(&cfg);
                 Vec::new()
             }
             ConfigOutcome::SetComputerUse { enabled } => {
                 self.computer_use = enabled;
                 let mut cfg = goat_config::Config::load();
                 cfg.computer_use_enabled = enabled;
-                let _ = cfg.save();
+                self.persist_config(&cfg);
                 Vec::new()
             }
             ConfigOutcome::SetBrowser { enabled } => {
                 self.browser = enabled;
                 let mut cfg = goat_config::Config::load();
                 cfg.browser_enabled = enabled;
-                let _ = cfg.save();
+                self.persist_config(&cfg);
                 Vec::new()
             }
         }
@@ -783,6 +783,16 @@ impl App {
     pub(crate) fn push_toast(&mut self, kind: NotifyKind, message: String) {
         self.toasts.push(crate::toast::Toast::new(kind, message));
         self.dirty = true;
+    }
+
+    fn persist_config(&mut self, cfg: &goat_config::Config) {
+        if let Err(err) = cfg.save() {
+            tracing::warn!(error = %err, "failed to save config");
+            self.push_toast(
+                NotifyKind::Error,
+                "could not save settings; change may not persist".to_owned(),
+            );
+        }
     }
 
     pub(crate) fn clear_ctx_indicator(&mut self) {

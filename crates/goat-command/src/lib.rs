@@ -369,47 +369,56 @@ fn parse_parameters(
                 index = token_list.len();
                 break;
             }
-            ParameterValue::Word | ParameterValue::Integer | ParameterValue::Choice(_) => {
-                let Some(token) = token_list.get(index) else {
-                    if parameter.required {
-                        return Err(CommandParseError::MissingParameter {
+            ParameterValue::Word => {
+                if let Some(token) = next_token(&token_list, index) {
+                    let value = &args[token.start..token.end];
+                    parsed.push(ParsedParameter {
+                        name: parameter.name.clone(),
+                        value: ParsedValue::Word(value.to_owned()),
+                    });
+                    index += 1;
+                } else if parameter.required {
+                    return Err(missing(usage, parameter));
+                }
+            }
+            ParameterValue::Integer => {
+                if let Some(token) = next_token(&token_list, index) {
+                    let value = &args[token.start..token.end];
+                    let Ok(integer) = value.parse::<i64>() else {
+                        return Err(CommandParseError::InvalidInteger {
                             usage: usage.to_owned(),
                             name: parameter.name.clone(),
+                            value: value.to_owned(),
+                        });
+                    };
+                    parsed.push(ParsedParameter {
+                        name: parameter.name.clone(),
+                        value: ParsedValue::Integer(integer),
+                    });
+                    index += 1;
+                } else if parameter.required {
+                    return Err(missing(usage, parameter));
+                }
+            }
+            ParameterValue::Choice(choices) => {
+                if let Some(token) = next_token(&token_list, index) {
+                    let value = &args[token.start..token.end];
+                    if choices.iter().any(|choice| choice.value == value) {
+                        parsed.push(ParsedParameter {
+                            name: parameter.name.clone(),
+                            value: ParsedValue::Choice(value.to_owned()),
+                        });
+                        index += 1;
+                    } else {
+                        return Err(CommandParseError::InvalidChoice {
+                            usage: usage.to_owned(),
+                            name: parameter.name.clone(),
+                            value: value.to_owned(),
                         });
                     }
-                    continue;
-                };
-                let value = &args[token.start..token.end];
-                let parsed_value = match &parameter.value {
-                    ParameterValue::Word => ParsedValue::Word(value.to_owned()),
-                    ParameterValue::Integer => {
-                        let Ok(integer) = value.parse::<i64>() else {
-                            return Err(CommandParseError::InvalidInteger {
-                                usage: usage.to_owned(),
-                                name: parameter.name.clone(),
-                                value: value.to_owned(),
-                            });
-                        };
-                        ParsedValue::Integer(integer)
-                    }
-                    ParameterValue::Choice(choices) => {
-                        if choices.iter().any(|choice| choice.value == value) {
-                            ParsedValue::Choice(value.to_owned())
-                        } else {
-                            return Err(CommandParseError::InvalidChoice {
-                                usage: usage.to_owned(),
-                                name: parameter.name.clone(),
-                                value: value.to_owned(),
-                            });
-                        }
-                    }
-                    ParameterValue::TextTail => unreachable!(),
-                };
-                parsed.push(ParsedParameter {
-                    name: parameter.name.clone(),
-                    value: parsed_value,
-                });
-                index += 1;
+                } else if parameter.required {
+                    return Err(missing(usage, parameter));
+                }
             }
         }
     }
@@ -420,6 +429,17 @@ fn parse_parameters(
         });
     }
     Ok(parsed)
+}
+
+fn next_token(token_list: &[Token], index: usize) -> Option<&Token> {
+    token_list.get(index)
+}
+
+fn missing(usage: &str, parameter: &ParameterSpec) -> CommandParseError {
+    CommandParseError::MissingParameter {
+        usage: usage.to_owned(),
+        name: parameter.name.clone(),
+    }
 }
 
 #[derive(Clone, Copy)]

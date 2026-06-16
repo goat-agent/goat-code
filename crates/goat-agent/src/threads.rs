@@ -49,7 +49,13 @@ pub(crate) async fn handle_list_threads(store: &Store, events: &mpsc::Sender<Eve
         .ok()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
-    let threads = store.list_threads_in(cwd, 50).await.unwrap_or_default();
+    let threads = match store.list_threads_in(cwd, 50).await {
+        Ok(threads) => threads,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to list threads for picker");
+            Vec::new()
+        }
+    };
     let summaries = threads
         .into_iter()
         .map(|thread| ThreadSummary {
@@ -118,8 +124,28 @@ pub(crate) async fn handle_resume(
     plan_path: &mut Option<std::path::PathBuf>,
     events: &mpsc::Sender<Event>,
 ) {
-    let Some(thread) = store.get_thread(tid).await.ok().flatten() else {
-        return;
+    let thread = match store.get_thread(tid).await {
+        Ok(Some(thread)) => thread,
+        Ok(None) => {
+            tracing::warn!(thread_id = tid, "resume requested for unknown thread");
+            let _ = events
+                .send(Event::Notify {
+                    kind: NotifyKind::Error,
+                    message: format!("conversation {tid} was not found"),
+                })
+                .await;
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(thread_id = tid, error = %err, "failed to read thread for resume");
+            let _ = events
+                .send(Event::Notify {
+                    kind: NotifyKind::Error,
+                    message: "could not load that conversation".to_owned(),
+                })
+                .await;
+            return;
+        }
     };
     let restored_mode = crate::mode_from_string(thread.mode.as_deref());
     *mode = restored_mode;
@@ -134,8 +160,32 @@ pub(crate) async fn handle_resume(
         account: thread.account.clone(),
         effort: thread.effort.as_deref().and_then(Effort::parse),
     };
-    let messages = store.get_messages(tid).await.unwrap_or_default();
-    let compactions = store.compactions_for_thread(tid).await.unwrap_or_default();
+    let messages = match store.get_messages(tid).await {
+        Ok(messages) => messages,
+        Err(err) => {
+            tracing::warn!(thread_id = tid, error = %err, "failed to read messages for resume");
+            let _ = events
+                .send(Event::Notify {
+                    kind: NotifyKind::Error,
+                    message: "could not load that conversation's messages".to_owned(),
+                })
+                .await;
+            return;
+        }
+    };
+    let compactions = match store.compactions_for_thread(tid).await {
+        Ok(compactions) => compactions,
+        Err(err) => {
+            tracing::warn!(thread_id = tid, error = %err, "failed to read compactions for resume");
+            let _ = events
+                .send(Event::Notify {
+                    kind: NotifyKind::Error,
+                    message: "could not load that conversation's history".to_owned(),
+                })
+                .await;
+            return;
+        }
+    };
     let mut parsed: Vec<(i64, MessageRole, Vec<ContentBlock>)> = Vec::new();
     let mut entries: Vec<TranscriptEntry> = Vec::new();
     let mut tool_uses: std::collections::HashMap<String, (String, String)> =

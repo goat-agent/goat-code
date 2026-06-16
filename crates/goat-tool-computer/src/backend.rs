@@ -236,10 +236,10 @@ mod desktop {
                 .enigo
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if guard.is_none() {
-                *guard = Some(Enigo::new(&Settings::default())?);
-            }
-            let enigo = guard.as_mut().expect("enigo initialized above");
+            let enigo = match guard.as_mut() {
+                Some(enigo) => enigo,
+                None => guard.insert(Enigo::new(&Settings::default())?),
+            };
             match action {
                 Action::Screenshot | Action::Zoom { .. } | Action::Wait { .. } => {}
 
