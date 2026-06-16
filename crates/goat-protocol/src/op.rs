@@ -36,6 +36,7 @@ pub enum Op {
     Resume {
         thread_id: i64,
     },
+    ResumeLatest,
     RenameThread {
         title: String,
     },

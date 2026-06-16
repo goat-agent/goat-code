@@ -9,6 +9,9 @@ pub struct Cli {
     #[arg(long, short = 'w', value_name = "NAME")]
     pub worktree: Option<String>,
 
+    #[arg(long, short = 'c')]
+    pub r#continue: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -71,6 +74,26 @@ mod tests {
         let cli = Cli::try_parse_from(["goat", "--worktree", "plan"]).unwrap();
         assert_eq!(cli.worktree.as_deref(), Some("plan"));
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parses_short_continue_flag() {
+        let cli = Cli::try_parse_from(["goat", "-c"]).unwrap();
+        assert!(cli.r#continue);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parses_long_continue_flag() {
+        let cli = Cli::try_parse_from(["goat", "--continue"]).unwrap();
+        assert!(cli.r#continue);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn continue_defaults_off() {
+        let cli = Cli::try_parse_from(["goat"]).unwrap();
+        assert!(!cli.r#continue);
     }
 
     #[test]

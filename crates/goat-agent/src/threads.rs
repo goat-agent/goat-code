@@ -307,3 +307,39 @@ pub(crate) async fn handle_resume(
         })
         .await;
 }
+
+pub(crate) async fn handle_resume_latest(
+    store: &Store,
+    skills: &[SkillInfo],
+    tools: &ToolRegistry,
+    instructions: Option<&str>,
+    state: &mut crate::SessionState,
+    events: &mpsc::Sender<Event>,
+) {
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    match store.latest_thread_in(cwd).await {
+        Ok(Some(thread)) => {
+            handle_resume(store, skills, tools, instructions, thread.id, state, events).await;
+        }
+        Ok(None) => {
+            let _ = events
+                .send(Event::Notify {
+                    kind: NotifyKind::Info,
+                    message: "no previous conversation in this directory".to_owned(),
+                })
+                .await;
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to look up latest thread for resume");
+            let _ = events
+                .send(Event::Notify {
+                    kind: NotifyKind::Info,
+                    message: "could not load a previous conversation".to_owned(),
+                })
+                .await;
+        }
+    }
+}

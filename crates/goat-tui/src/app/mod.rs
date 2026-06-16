@@ -999,11 +999,12 @@ pub async fn run(
     ops: Sender<Op>,
     mut events: Receiver<EngineEvent>,
     theme: Theme,
+    initial_ops: Vec<Op>,
 ) -> color_eyre::Result<()> {
     let mut app = App::new(theme);
     let (mut terminal, picker) = tui::init(app.mouse_capture)?;
     app.picker = picker;
-    let result = event_loop(&mut terminal, &ops, &mut events, app).await;
+    let result = event_loop(&mut terminal, &ops, &mut events, app, initial_ops).await;
     tui::restore();
     let _ = ops.send(Op::Shutdown).await;
     result
@@ -1014,9 +1015,16 @@ async fn event_loop(
     ops: &Sender<Op>,
     events: &mut Receiver<EngineEvent>,
     mut app: App,
+    initial_ops: Vec<Op>,
 ) -> color_eyre::Result<()> {
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(TICK);
+
+    for op in initial_ops {
+        if ops.send(op).await.is_err() {
+            app.should_quit = true;
+        }
+    }
 
     terminal.draw(|frame| view::render(frame, &mut app))?;
     while !app.should_quit {
