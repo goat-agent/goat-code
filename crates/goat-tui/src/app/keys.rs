@@ -24,6 +24,11 @@ impl App {
                     return result;
                 }
             }
+            Overlay::Files(_) => {
+                if let Some(result) = self.on_file_menu_key(key) {
+                    return result;
+                }
+            }
             Overlay::Usage | Overlay::Help => return self.on_usage_key(key),
             Overlay::None => {}
         }
@@ -98,6 +103,41 @@ impl App {
                 if let Overlay::Commands(menu) = &mut self.overlay {
                     menu.move_down();
                 }
+                Some(Vec::new())
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn on_file_menu_key(&mut self, key: KeyEvent) -> Option<Vec<Op>> {
+        match key.code {
+            KeyCode::Tab | KeyCode::Enter => {
+                if let Overlay::Files(menu) = &self.overlay
+                    && let Some(path) = menu.selected()
+                {
+                    self.composer.replace_at_query(&path);
+                }
+                self.overlay = Overlay::None;
+                self.dirty = true;
+                Some(Vec::new())
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                self.dirty = true;
+                Some(Vec::new())
+            }
+            KeyCode::Up => {
+                if let Overlay::Files(menu) = &mut self.overlay {
+                    menu.move_up();
+                }
+                self.dirty = true;
+                Some(Vec::new())
+            }
+            KeyCode::Down => {
+                if let Overlay::Files(menu) = &mut self.overlay {
+                    menu.move_down();
+                }
+                self.dirty = true;
                 Some(Vec::new())
             }
             _ => None,

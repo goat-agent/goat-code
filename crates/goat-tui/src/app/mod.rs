@@ -17,6 +17,7 @@ use crate::{
     command::CommandMenu,
     composer::Composer,
     config::{Config, ConfigOutcome},
+    files::FileMenu,
     highlight::SyntectHighlighter,
     picker::{AskPicker, EffortPicker, Picker, ThreadPicker},
     symbols,
@@ -52,6 +53,7 @@ pub(crate) enum Overlay {
     Thread(ThreadPicker),
     Config(Config),
     Commands(CommandMenu),
+    Files(FileMenu),
     Agents(usize),
     Ask(AskPicker, ToolCallId),
     Plan(PlanOverlay),
@@ -691,10 +693,22 @@ impl App {
 
     pub(crate) fn update_command_menu(&mut self) {
         if self.composer.shell() {
-            if matches!(self.overlay, Overlay::Commands(_)) {
+            if matches!(self.overlay, Overlay::Commands(_) | Overlay::Files(_)) {
                 self.overlay = Overlay::None;
             }
             return;
+        }
+        if let Some(query) = self.composer.at_query() {
+            if let Overlay::Files(menu) = &mut self.overlay {
+                menu.update(&query);
+            } else {
+                let root = std::path::PathBuf::from(&self.cwd);
+                self.overlay = Overlay::Files(FileMenu::new(&root, &query));
+            }
+            return;
+        }
+        if matches!(self.overlay, Overlay::Files(_)) {
+            self.overlay = Overlay::None;
         }
         let text = self.composer.text();
         let trimmed = text.trim_start();
@@ -735,7 +749,7 @@ impl App {
     pub(crate) fn wheel_scroll_allowed(&self) -> bool {
         matches!(
             self.overlay,
-            Overlay::None | Overlay::Commands(_) | Overlay::Agents(_)
+            Overlay::None | Overlay::Commands(_) | Overlay::Files(_) | Overlay::Agents(_)
         )
     }
 

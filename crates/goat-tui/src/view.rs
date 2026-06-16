@@ -87,6 +87,30 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    if let Overlay::Files(menu) = app.overlay() {
+        let panel_h = menu
+            .desired_height()
+            .min(area.height.saturating_sub(composer_h + 2))
+            .max(1);
+        let [header, transcript_area, composer_area, panel] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(composer_h),
+            Constraint::Length(panel_h),
+        ])
+        .areas(area);
+
+        render_header(frame, header, app, theme);
+        render_transcript(frame, transcript_area, app, theme);
+        if let Overlay::Files(menu) = app.overlay() {
+            menu.render(frame, panel, theme);
+        }
+        app.composer()
+            .render(frame, composer_area, theme, true, app.plan_prompt_active());
+        render_toasts(frame, area, app, theme);
+        return;
+    }
+
     match app.overlay() {
         Overlay::Config(_)
         | Overlay::Model(_)
