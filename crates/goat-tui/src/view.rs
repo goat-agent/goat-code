@@ -20,7 +20,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Block::new().style(theme.base()), full);
 
     let area = full.inner(Margin {
-        horizontal: 1,
+        horizontal: 0,
         vertical: 0,
     });
 
@@ -79,6 +79,30 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_header(frame, header, app, theme);
         render_transcript(frame, transcript_area, app, theme);
         if let Overlay::Commands(menu) = app.overlay() {
+            menu.render(frame, panel, theme);
+        }
+        app.composer()
+            .render(frame, composer_area, theme, true, app.plan_prompt_active());
+        render_toasts(frame, area, app, theme);
+        return;
+    }
+
+    if let Overlay::Files(menu) = app.overlay() {
+        let panel_h = menu
+            .desired_height()
+            .min(area.height.saturating_sub(composer_h + 2))
+            .max(1);
+        let [header, transcript_area, composer_area, panel] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(composer_h),
+            Constraint::Length(panel_h),
+        ])
+        .areas(area);
+
+        render_header(frame, header, app, theme);
+        render_transcript(frame, transcript_area, app, theme);
+        if let Overlay::Files(menu) = app.overlay() {
             menu.render(frame, panel, theme);
         }
         app.composer()
@@ -183,7 +207,7 @@ fn render_agent_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, cu
             let selected = i == cursor;
             let (marker, marker_style) = match run.done {
                 None => (spinner, theme.accent()),
-                Some(true) => (symbols::ui::CHECK, theme.role_tool()),
+                Some(true) => (symbols::ui::CHECK, theme.success()),
                 Some(false) => (symbols::ui::CROSS, theme.error()),
             };
             let name_style = if selected { theme.key() } else { theme.muted() };

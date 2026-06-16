@@ -14,9 +14,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     layout::{OVERLAY_CHROME_PLAIN, OVERLAY_W, format_tokens},
-    overlay::{
-        centered_rect, clamp_u16, hint_line, overflow_hint, overlay_frame, overlay_layout_plain,
-    },
+    overlay::{self, centered_rect, clamp_u16, overlay_frame, overlay_layout_plain},
     symbols,
     theme::Theme,
 };
@@ -39,6 +37,7 @@ fn render_bar_line(
     right_text: &str,
     theme: Theme,
     area_width: usize,
+    is_rep: bool,
 ) -> Line<'static> {
     let filled = filled_cells(pct);
     let empty = BAR_WIDTH - filled;
@@ -48,12 +47,18 @@ fn render_bar_line(
         symbols::ui::BAR_EMPTY.repeat(empty)
     );
     let color = theme.meter(pct);
+    let label_style = if is_rep {
+        theme.muted().add_modifier(ratatui::style::Modifier::BOLD)
+    } else {
+        theme.muted()
+    };
     let pct_str = format!("  {pct:>3.0}%  ");
     let label_w = 8usize;
-    let pad = area_width.saturating_sub(5 + label_w + BAR_WIDTH + pct_str.len() + right_text.len());
+    let left_w = 5 + label_w + BAR_WIDTH + UnicodeWidthStr::width(pct_str.as_str());
+    let pad = area_width.saturating_sub(left_w + UnicodeWidthStr::width(right_text));
     Line::from(vec![
         Span::raw("     "),
-        Span::styled(format!("{label:<label_w$}"), theme.muted()),
+        Span::styled(format!("{label:<label_w$}"), label_style),
         Span::styled(bar_str, color),
         Span::styled(pct_str, color),
         Span::styled(" ".repeat(pad), theme.muted()),
@@ -121,6 +126,7 @@ pub struct UsageView<'a> {
     rate_limits: &'a HashMap<(String, String), (RateLimitSnapshot, i64)>,
     context_window: Option<u32>,
     active_model: Option<&'a ModelTarget>,
+    scroll: usize,
 }
 
 impl<'a> UsageView<'a> {
@@ -131,6 +137,7 @@ impl<'a> UsageView<'a> {
         rate_limits: &'a HashMap<(String, String), (RateLimitSnapshot, i64)>,
         context_window: Option<u32>,
         active_model: Option<&'a ModelTarget>,
+        scroll: usize,
     ) -> Self {
         Self {
             account_entries,
@@ -139,6 +146,7 @@ impl<'a> UsageView<'a> {
             rate_limits,
             context_window,
             active_model,
+            scroll,
         }
     }
 
@@ -222,13 +230,13 @@ impl<'a> UsageView<'a> {
                 let (status_text, status_style) = if is_oauth {
                     match self.rate_limits.get(&key) {
                         Some((_, cached_at)) => match staleness_label(*cached_at) {
-                            None => ("active".to_owned(), theme.role_agent()),
+                            None => ("active".to_owned(), theme.success()),
                             Some(age) => (age, theme.muted()),
                         },
                         None => ("not used".to_owned(), theme.muted()),
                     }
                 } else if self.usage_total.contains_key(&key) {
-                    ("active".to_owned(), theme.role_agent())
+                    ("active".to_owned(), theme.success())
                 } else {
                     ("not used".to_owned(), theme.muted())
                 };
@@ -252,12 +260,17 @@ impl<'a> UsageView<'a> {
                         Some((snapshot, _)) if !snapshot.windows.is_empty() => {
                             for window in &snapshot.windows {
                                 let reset_str = format_reset(window.resets_at);
+                                let is_rep = snapshot
+                                    .representative
+                                    .as_deref()
+                                    .is_some_and(|r| r == window.label);
                                 lines.push(render_bar_line(
                                     &window.label,
                                     window.used_percent,
                                     &reset_str,
                                     theme,
                                     w,
+                                    is_rep,
                                 ));
                             }
                         }
@@ -276,12 +289,15 @@ impl<'a> UsageView<'a> {
                         symbols::ui::MIDDOT,
                         format_tokens(out),
                     );
-                    let pad2 = w.saturating_sub(5 + tokens_str.len() + "  this session".len());
+                    let session_label = "  this session";
+                    let pad2 = w.saturating_sub(
+                        5 + tokens_str.width() + UnicodeWidthStr::width(session_label),
+                    );
                     lines.push(Line::from(vec![
                         Span::raw("     "),
                         Span::styled(tokens_str, theme.base()),
                         Span::raw(" ".repeat(pad2)),
-                        Span::styled("  this session", theme.muted()),
+                        Span::styled(session_label, theme.muted()),
                     ]));
                 }
             }
@@ -291,13 +307,15 @@ impl<'a> UsageView<'a> {
             let key = (model.provider.clone(), model.account.clone());
             if let Some(usage) = self.usage_last.get(&key) {
                 lines.push(Line::default());
-                let ctx_label_pad =
-                    w.saturating_sub(1 + "context".len() + "  this thread".len() + 3);
+                let this_thread = "  this thread";
+                let ctx_label_pad = w.saturating_sub(
+                    1 + UnicodeWidthStr::width("context") + UnicodeWidthStr::width(this_thread) + 3,
+                );
                 lines.push(Line::from(vec![
                     Span::raw(" "),
                     Span::styled("context", theme.accent()),
                     Span::raw(" ".repeat(ctx_label_pad)),
-                    Span::styled("  this thread", theme.muted()),
+                    Span::styled(this_thread, theme.muted()),
                 ]));
                 let ctx_used = u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
                 let pct = percent(ctx_used, window);
@@ -306,7 +324,7 @@ impl<'a> UsageView<'a> {
                     format_tokens(ctx_used),
                     format_tokens(u64::from(window))
                 );
-                lines.push(render_bar_line("", pct, &detail, theme, w));
+                lines.push(render_bar_line("", pct, &detail, theme, w, false));
             }
         }
 
@@ -317,24 +335,20 @@ impl<'a> UsageView<'a> {
             )));
         }
 
-        let max_shown = usize::from(body_area.height);
         let total = lines.len();
-        let shown = lines.len().min(max_shown);
-        let (above, below) = overflow_hint(0, shown, total);
-
-        let visible: Vec<Line> = lines.into_iter().take(shown).collect();
-        frame.render_widget(Paragraph::new(visible), body_area);
-
-        if let Some(hint) = above.or(below) {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(format!(" {hint}"), theme.muted()))),
-                hint_area,
-            );
-        } else {
-            frame.render_widget(
-                Paragraph::new(hint_line(&[(symbols::key::ESC, "close")], theme)),
-                hint_area,
-            );
+        let body_rows = usize::from(body_area.height);
+        let win = overlay::window(self.scroll.min(total.saturating_sub(1)), total, body_rows);
+        let mut visible: Vec<Line> = Vec::with_capacity(body_rows);
+        if let Some(above) = &win.above {
+            visible.push(Line::from(Span::styled(format!(" {above}"), theme.muted())));
         }
+        for line in lines.into_iter().skip(win.start).take(win.shown) {
+            visible.push(line);
+        }
+        if let Some(below) = &win.below {
+            visible.push(Line::from(Span::styled(format!(" {below}"), theme.muted())));
+        }
+        frame.render_widget(Paragraph::new(visible), body_area);
+        let _ = hint_area;
     }
 }

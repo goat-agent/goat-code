@@ -2,14 +2,14 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, BorderType, Paragraph},
+    widgets::{Block, BorderType, Padding, Paragraph},
 };
 use unicode_normalization::UnicodeNormalization;
 use unicode_width::UnicodeWidthChar;
 
 use crate::{symbols, theme::Theme, wrap};
 
-const BORDER_COLS: u16 = 2;
+const BORDER_COLS: u16 = 4;
 const PLACEHOLDER: &str = "Ask anything…";
 const SHELL_PLACEHOLDER: &str = "Run a shell command…";
 
@@ -84,7 +84,7 @@ impl Composer {
         u16::try_from(total)
             .unwrap_or(u16::MAX)
             .saturating_add(2)
-            .clamp(3, 8)
+            .clamp(4, 8)
     }
 
     pub fn on_first_row(&self) -> bool {
@@ -252,6 +252,49 @@ impl Composer {
         };
     }
 
+    pub fn at_query(&self) -> Option<String> {
+        if self.shell {
+            return None;
+        }
+        let line = &self.lines[self.row];
+        let mut start = self.col;
+        while start > 0 {
+            let c = line[start - 1];
+            if c == '@' {
+                let before_ok = start == 1 || line[start - 2].is_whitespace();
+                if before_ok {
+                    let token: String = line[start..self.col].iter().collect();
+                    if token.chars().all(|c| !c.is_whitespace()) {
+                        return Some(token);
+                    }
+                }
+                return None;
+            }
+            if c.is_whitespace() {
+                return None;
+            }
+            start -= 1;
+        }
+        None
+    }
+
+    pub fn replace_at_query(&mut self, replacement: &str) {
+        let line = &self.lines[self.row];
+        let mut at = self.col;
+        while at > 0 && line[at - 1] != '@' {
+            at -= 1;
+        }
+        if at == 0 {
+            return;
+        }
+        let start = at - 1;
+        let inserted: Vec<char> = format!("@{replacement} ").chars().collect();
+        let new_len = inserted.len();
+        self.lines[self.row].splice(start..self.col, inserted);
+        self.col = start + new_len;
+        self.hist_cursor = None;
+    }
+
     pub fn take(&mut self) -> String {
         let text = self.text();
         if !text.trim().is_empty() {
@@ -386,7 +429,8 @@ impl Composer {
         };
         let mut block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(border);
+            .border_style(border)
+            .padding(Padding::horizontal(1));
         if plan {
             block = block.title(Span::styled(" plan ", theme.plan()));
         }
@@ -588,7 +632,7 @@ mod tests {
     fn desired_height_counts_wide_chars_exactly() {
         let mut composer = Composer::default();
         composer.insert_str("한한한한한");
-        assert_eq!(composer.desired_height(9), 5);
+        assert_eq!(composer.desired_height(9), 7);
     }
 
     #[test]
@@ -652,5 +696,42 @@ mod tests {
         composer.insert_str("ls");
         composer.clear();
         assert!(!composer.shell());
+    }
+
+    #[test]
+    fn at_query_detects_token_at_cursor() {
+        let mut composer = Composer::default();
+        composer.insert_str("see @src/li");
+        assert_eq!(composer.at_query().as_deref(), Some("src/li"));
+    }
+
+    #[test]
+    fn at_query_requires_word_boundary() {
+        let mut composer = Composer::default();
+        composer.insert_str("email me@host");
+        assert_eq!(composer.at_query(), None);
+    }
+
+    #[test]
+    fn at_query_at_start_of_input() {
+        let mut composer = Composer::default();
+        composer.insert_str("@lib");
+        assert_eq!(composer.at_query().as_deref(), Some("lib"));
+    }
+
+    #[test]
+    fn replace_at_query_inserts_path() {
+        let mut composer = Composer::default();
+        composer.insert_str("see @src/li");
+        composer.replace_at_query("src/lib.rs");
+        assert_eq!(composer.text(), "see @src/lib.rs ");
+    }
+
+    #[test]
+    fn at_query_none_in_shell_mode() {
+        let mut composer = Composer::default();
+        composer.enter_shell();
+        composer.insert_str("@file");
+        assert_eq!(composer.at_query(), None);
     }
 }

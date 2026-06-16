@@ -11,6 +11,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    layout::LIST_MAX,
     overlay::{hint_line, selection_row, truncate_to_width},
     symbols,
     theme::Theme,
@@ -159,7 +160,7 @@ impl CommandMenu {
     }
 
     pub fn desired_height(&self) -> u16 {
-        let rows = self.rows().len().max(1);
+        let rows = self.rows().len().clamp(1, LIST_MAX);
         u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(1)
     }
 
@@ -169,21 +170,25 @@ impl CommandMenu {
             Layout::vertical([Constraint::Min(1), Constraint::Length(hint_height)]).areas(area);
 
         let width = usize::from(list_area.width);
-        let lines: Vec<Line> = self
-            .rows()
-            .iter()
-            .enumerate()
-            .map(|(pos, entry)| render_row(pos == self.cursor, width, entry, theme))
-            .collect();
+        let rows = self.rows();
+        let win = crate::overlay::window(self.cursor, rows.len(), usize::from(list_area.height));
+        let mut lines: Vec<Line> = Vec::new();
+        if let Some(above) = &win.above {
+            lines.push(Line::from(Span::styled(format!(" {above}"), theme.muted())));
+        }
+        for (pos, entry) in rows.iter().enumerate().skip(win.start).take(win.shown) {
+            lines.push(render_row(pos == self.cursor, width, entry, theme));
+        }
+        if let Some(below) = &win.below {
+            lines.push(Line::from(Span::styled(format!(" {below}"), theme.muted())));
+        }
         frame.render_widget(Paragraph::new(lines), list_area);
 
         frame.render_widget(
             Paragraph::new(hint_line(
                 &[
-                    (symbols::key::ARROWS_UPDOWN, "navigate"),
                     (symbols::key::TAB, "complete"),
                     (symbols::key::ENTER, "run"),
-                    (symbols::key::ESC, "close"),
                 ],
                 theme,
             )),
@@ -199,11 +204,11 @@ impl CommandMenu {
 }
 
 fn render_row(selected: bool, width: usize, entry: &Row, theme: Theme) -> Line<'static> {
-    let name_style = if selected { theme.key() } else { theme.muted() };
+    let name_style = if selected { theme.key() } else { theme.base() };
     let mut name_spans = Vec::new();
     for (byte_i, ch) in entry.label.char_indices() {
         let style = if entry.positions.contains(&byte_i) {
-            theme.accent()
+            name_style.add_modifier(ratatui::style::Modifier::BOLD)
         } else {
             name_style
         };

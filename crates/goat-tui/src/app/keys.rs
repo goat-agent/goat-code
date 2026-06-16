@@ -25,6 +25,11 @@ impl App {
                     return result;
                 }
             }
+            Overlay::Files(_) => {
+                if let Some(result) = self.on_file_menu_key(key) {
+                    return result;
+                }
+            }
             Overlay::Usage | Overlay::Help => return self.on_usage_key(key),
             Overlay::None => {}
         }
@@ -102,6 +107,41 @@ impl App {
                 if let Overlay::Commands(menu) = &mut self.overlay {
                     menu.move_down();
                 }
+                Some(Vec::new())
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn on_file_menu_key(&mut self, key: KeyEvent) -> Option<Vec<Op>> {
+        match key.code {
+            KeyCode::Tab | KeyCode::Enter => {
+                if let Overlay::Files(menu) = &self.overlay
+                    && let Some(path) = menu.selected()
+                {
+                    self.composer.replace_at_query(&path);
+                }
+                self.overlay = Overlay::None;
+                self.dirty = true;
+                Some(Vec::new())
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                self.dirty = true;
+                Some(Vec::new())
+            }
+            KeyCode::Up => {
+                if let Overlay::Files(menu) = &mut self.overlay {
+                    menu.move_up();
+                }
+                self.dirty = true;
+                Some(Vec::new())
+            }
+            KeyCode::Down => {
+                if let Overlay::Files(menu) = &mut self.overlay {
+                    menu.move_down();
+                }
+                self.dirty = true;
                 Some(Vec::new())
             }
             _ => None,
@@ -728,6 +768,22 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                 self.overlay = Overlay::None;
+                self.dirty = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.usage_scroll = self.usage_scroll.saturating_sub(1);
+                self.dirty = true;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.usage_scroll = self.usage_scroll.saturating_add(1);
+                self.dirty = true;
+            }
+            KeyCode::PageUp => {
+                self.usage_scroll = self.usage_scroll.saturating_sub(8);
+                self.dirty = true;
+            }
+            KeyCode::PageDown => {
+                self.usage_scroll = self.usage_scroll.saturating_add(8);
                 self.dirty = true;
             }
             _ => {}

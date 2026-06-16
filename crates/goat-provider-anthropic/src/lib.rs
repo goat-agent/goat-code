@@ -232,23 +232,65 @@ fn thinking_config(model: &str, effort: Option<Effort>) -> ThinkingConfig {
     }
 }
 
+const UNIFIED_PREFIX: &str = "anthropic-ratelimit-unified-";
+const UNIFIED_SUFFIX: &str = "-utilization";
+
+fn unified_label(period: &str) -> String {
+    match period {
+        "5h" => "5h".to_owned(),
+        "7d" => "weekly".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn representative_period(claim: &str) -> String {
+    match claim {
+        "five_hour" => "5h".to_owned(),
+        "seven_day" => "7d".to_owned(),
+        other => other.replace('_', ""),
+    }
+}
+
 fn parse_anthropic_unified_ratelimits(
     headers: &reqwest::header::HeaderMap,
 ) -> Option<RateLimitSnapshot> {
-    let mut windows = Vec::new();
-
-    if let Some(window) = parse_unified_window(headers, "5h", "5h") {
-        windows.push(window);
+    let mut periods: Vec<String> = Vec::new();
+    for name in headers.keys() {
+        let key = name.as_str();
+        if let Some(rest) = key.strip_prefix(UNIFIED_PREFIX)
+            && let Some(period) = rest.strip_suffix(UNIFIED_SUFFIX)
+            && !period.is_empty()
+            && !periods.iter().any(|p| p == period)
+        {
+            periods.push(period.to_owned());
+        }
     }
-    if let Some(window) = parse_unified_window(headers, "7d", "weekly") {
-        windows.push(window);
+    periods.sort_by_key(|p| match p.as_str() {
+        "5h" => 0,
+        "7d" => 1,
+        _ => 2,
+    });
+
+    let mut windows = Vec::new();
+    for period in &periods {
+        if let Some(window) = parse_unified_window(headers, period, &unified_label(period)) {
+            windows.push(window);
+        }
     }
 
     if windows.is_empty() {
-        None
-    } else {
-        Some(RateLimitSnapshot { windows })
+        return None;
     }
+
+    let representative = headers
+        .get("anthropic-ratelimit-unified-representative-claim")
+        .and_then(|v| v.to_str().ok())
+        .map(|claim| unified_label(&representative_period(claim)));
+
+    Some(RateLimitSnapshot {
+        windows,
+        representative,
+    })
 }
 
 fn parse_unified_window(
@@ -912,7 +954,67 @@ impl Provider for AnthropicProvider {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{event_index, parse_input_json_delta, parse_text_delta, parse_web_search_results};
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+    use super::{
+        event_index, parse_anthropic_unified_ratelimits, parse_input_json_delta, parse_text_delta,
+        parse_web_search_results,
+    };
+
+    fn headers_from(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (k, v) in pairs {
+            map.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn unified_scan_reads_5h_and_weekly_decimal() {
+        let h = headers_from(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.018"),
+            ("anthropic-ratelimit-unified-5h-reset", "1764554400"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.737"),
+            ("anthropic-ratelimit-unified-7d-reset", "1764615600"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "five_hour",
+            ),
+        ]);
+        let snap = parse_anthropic_unified_ratelimits(&h).expect("snapshot");
+        assert_eq!(snap.windows.len(), 2);
+        assert_eq!(snap.windows[0].label, "5h");
+        assert_eq!(snap.windows[1].label, "weekly");
+        assert!((snap.windows[1].used_percent - 73.7).abs() < 0.1);
+        assert_eq!(snap.representative.as_deref(), Some("5h"));
+    }
+
+    #[test]
+    fn unified_scan_accepts_percent_encoding() {
+        let h = headers_from(&[("anthropic-ratelimit-unified-5h-utilization", "42%")]);
+        let snap = parse_anthropic_unified_ratelimits(&h).expect("snapshot");
+        assert!((snap.windows[0].used_percent - 42.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn unified_scan_surfaces_unknown_period() {
+        let h = headers_from(&[("anthropic-ratelimit-unified-30d-utilization", "0.5")]);
+        let snap = parse_anthropic_unified_ratelimits(&h).expect("snapshot");
+        assert_eq!(snap.windows.len(), 1);
+        assert_eq!(snap.windows[0].label, "30d");
+    }
+
+    #[test]
+    fn unified_scan_ignores_non_period_headers() {
+        let h = headers_from(&[
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-fallback-percentage", "0.2"),
+        ]);
+        assert!(parse_anthropic_unified_ratelimits(&h).is_none());
+    }
 
     #[test]
     fn extracts_web_search_results() {

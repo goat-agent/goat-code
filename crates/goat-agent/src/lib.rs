@@ -269,6 +269,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 account: account.to_owned(),
                 snapshot: goat_protocol::RateLimitSnapshot {
                     windows: entry.windows.clone(),
+                    representative: None,
                 },
                 cached_at: entry.cached_at,
             })

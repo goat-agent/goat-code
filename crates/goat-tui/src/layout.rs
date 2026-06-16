@@ -1,5 +1,5 @@
 pub const PAD_X: u16 = 1;
-pub const SCROLL_GUTTER: u16 = 2;
+pub const SCROLL_GUTTER: u16 = 1;
 pub const OVERLAY_W: u16 = 64;
 pub const OVERLAY_CHROME: u16 = 4;
 pub const OVERLAY_CHROME_PLAIN: u16 = 3;

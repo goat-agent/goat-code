@@ -30,6 +30,26 @@ pub enum AskOutcome {
     Submit(Vec<String>),
 }
 
+fn scroll_input(input: &str, avail: usize) -> (String, usize) {
+    let total = UnicodeWidthStr::width(input);
+    if total < avail {
+        return (input.to_owned(), 0);
+    }
+    let target = avail.saturating_sub(1).max(1);
+    let mut acc = 0usize;
+    let mut start_byte = input.len();
+    for (i, ch) in input.char_indices().rev() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if acc + w > target {
+            break;
+        }
+        acc += w;
+        start_byte = i;
+    }
+    let scrolled = total - acc;
+    (input[start_byte..].to_owned(), scrolled)
+}
+
 pub struct AskPicker {
     pub questions: Vec<AskQuestion>,
     pub cursor: usize,
@@ -402,22 +422,26 @@ impl AskPicker {
             lines.push(Self::ask_row(selected, width, left, right, theme));
         }
         let input_selected = self.cursor == type_own_idx;
-        let input_content = if self.typing || !self.input.is_empty() {
-            Span::styled(format!(" {}", self.input), theme.text())
+        let caret = if input_selected {
+            Span::styled(format!(" {} ", symbols::ui::CARET), theme.accent())
         } else {
-            Span::styled(" Type custom answer", theme.muted())
+            Span::raw("   ")
         };
-        lines.push(Self::ask_row(
-            input_selected,
-            width,
-            vec![input_content],
-            None,
-            theme,
-        ));
+        let avail = width.saturating_sub(3).max(1);
+        let (visible, scrolled) = scroll_input(&self.input, avail);
+        let body = if self.typing || !self.input.is_empty() {
+            Span::styled(visible, theme.text())
+        } else {
+            Span::styled("Type custom answer".to_owned(), theme.muted())
+        };
+        let used = 3 + UnicodeWidthStr::width(body.content.as_ref());
+        let pad = width.saturating_sub(used);
+        lines.push(Line::from(vec![caret, body, Span::raw(" ".repeat(pad))]));
         frame.render_widget(Paragraph::new(lines), area);
         if self.typing && input_selected {
             let row_y = area.y + clamp_u16(type_own_idx);
-            let col = 4 + UnicodeWidthStr::width(self.input.as_str());
+            let shown = UnicodeWidthStr::width(self.input.as_str()).saturating_sub(scrolled);
+            let col = 3 + shown.min(avail);
             let x = area.x + clamp_u16(col);
             frame.set_cursor_position((x.min(area.right().saturating_sub(1)), row_y));
         }
