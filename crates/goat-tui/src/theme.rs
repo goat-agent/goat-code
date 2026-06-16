@@ -11,10 +11,15 @@ pub struct CodePalette {
     pub number: Color,
     pub type_: Color,
     pub function: Color,
+    pub variable: Color,
+    pub operator: Color,
+    pub macro_: Color,
+    pub property: Color,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
+    id: u8,
     bg: Color,
     fg: Color,
     dark: bool,
@@ -24,7 +29,9 @@ pub struct Theme {
     error: Color,
     muted: Color,
     accent: Color,
+    success: Color,
     border: Color,
+    border_dim: Color,
     selection: Color,
     panel: Color,
     shell: Color,
@@ -41,16 +48,19 @@ impl Default for Theme {
 impl Theme {
     pub const fn dark() -> Self {
         Self {
+            id: 1,
             bg: Color::Reset,
             dark: true,
-            fg: Color::Rgb(0xe6, 0xe6, 0xe6),
-            user: Color::Rgb(0x7a, 0xa2, 0xf7),
-            agent: Color::Rgb(0x9e, 0xce, 0x6a),
-            tool: Color::Rgb(0xe0, 0xaf, 0x68),
-            error: Color::Rgb(0xf7, 0x76, 0x8e),
-            muted: Color::Rgb(0x6b, 0x70, 0x7c),
-            accent: Color::Rgb(0xbb, 0x9a, 0xf7),
+            fg: Color::Rgb(0xd7, 0xda, 0xe0),
+            user: Color::Rgb(0x7d, 0x9b, 0xd4),
+            agent: Color::Rgb(0x6f, 0xb3, 0xa8),
+            tool: Color::Rgb(0xcf, 0x9b, 0x6b),
+            error: Color::Rgb(0xc9, 0x7a, 0x7a),
+            muted: Color::Rgb(0x7a, 0x80, 0x8c),
+            accent: Color::Rgb(0xa9, 0x8f, 0xd0),
+            success: Color::Rgb(0x8f, 0xb9, 0x8a),
             border: Color::Rgb(0x2a, 0x2c, 0x32),
+            border_dim: Color::Rgb(0x22, 0x24, 0x29),
             selection: Color::Rgb(0x2f, 0x33, 0x3e),
             panel: Color::Rgb(0x1b, 0x1b, 0x1e),
             shell: Color::Rgb(0xdb, 0x4b, 0x4b),
@@ -63,12 +73,17 @@ impl Theme {
                 number: Color::Rgb(0xb5, 0xce, 0xa8),
                 type_: Color::Rgb(0x4e, 0xc9, 0xb0),
                 function: Color::Rgb(0xdc, 0xdc, 0xaa),
+                variable: Color::Rgb(0x9c, 0xda, 0xfe),
+                operator: Color::Rgb(0xd4, 0xd4, 0xd4),
+                macro_: Color::Rgb(0xc5, 0x86, 0xc0),
+                property: Color::Rgb(0x9c, 0xda, 0xfe),
             },
         }
     }
 
     pub const fn light() -> Self {
         Self {
+            id: 2,
             bg: Color::Rgb(0xfa, 0xfa, 0xfa),
             dark: false,
             fg: Color::Rgb(0x1c, 0x1e, 0x22),
@@ -78,7 +93,9 @@ impl Theme {
             error: Color::Rgb(0xc6, 0x28, 0x28),
             muted: Color::Rgb(0x8a, 0x8f, 0x98),
             accent: Color::Rgb(0x6a, 0x3d, 0xc9),
+            success: Color::Rgb(0x2f, 0x7d, 0x32),
             border: Color::Rgb(0xd9, 0xdc, 0xe1),
+            border_dim: Color::Rgb(0xe6, 0xe8, 0xec),
             selection: Color::Rgb(0xdd, 0xe3, 0xec),
             panel: Color::Rgb(0xee, 0xee, 0xf0),
             shell: Color::Rgb(0xb0, 0x35, 0x54),
@@ -91,6 +108,10 @@ impl Theme {
                 number: Color::Rgb(0x09, 0x88, 0x58),
                 type_: Color::Rgb(0x26, 0x7f, 0x99),
                 function: Color::Rgb(0x79, 0x5e, 0x26),
+                variable: Color::Rgb(0x00, 0x16, 0x80),
+                operator: Color::Rgb(0x3b, 0x3b, 0x3b),
+                macro_: Color::Rgb(0xaf, 0x00, 0xdb),
+                property: Color::Rgb(0x00, 0x16, 0x80),
             },
         }
     }
@@ -116,7 +137,7 @@ impl Theme {
     }
 
     pub fn border_dim(self) -> Style {
-        Style::new().fg(self.panel)
+        Style::new().fg(self.border_dim)
     }
 
     pub fn shell(self) -> Style {
@@ -144,6 +165,18 @@ impl Theme {
     }
 
     pub fn error(self) -> Style {
+        Style::new().fg(self.error)
+    }
+
+    pub fn success(self) -> Style {
+        Style::new().fg(self.success)
+    }
+
+    pub fn plan(self) -> Style {
+        Style::new().fg(self.agent)
+    }
+
+    pub fn error_body(self) -> Style {
         Style::new().fg(self.error)
     }
 
@@ -183,5 +216,9 @@ impl Theme {
 
     pub fn is_dark(self) -> bool {
         self.dark
+    }
+
+    pub fn id(self) -> u8 {
+        self.id
     }
 }

@@ -39,7 +39,7 @@ fn syntax_set() -> &'static SyntaxSet {
 }
 
 pub struct SyntectHighlighter {
-    cached_syntect_theme: Mutex<Option<(bool, SyntectTheme)>>,
+    cached_syntect_theme: Mutex<Option<(u8, SyntectTheme)>>,
 }
 
 impl SyntectHighlighter {
@@ -50,15 +50,15 @@ impl SyntectHighlighter {
     }
 
     fn get_or_build_syntect_theme(&self, theme: Theme) -> SyntectTheme {
-        let is_dark = theme.is_dark();
+        let id = theme.id();
         let mut guard = self.cached_syntect_theme.lock().unwrap();
-        if let Some((cached_dark, ref built)) = *guard
-            && cached_dark == is_dark
+        if let Some((cached_id, ref built)) = *guard
+            && cached_id == id
         {
             return built.clone();
         }
         let built = palette_to_syntect_theme(&theme.code, theme.fg_color(), theme.code.bg);
-        *guard = Some((is_dark, built.clone()));
+        *guard = Some((id, built.clone()));
         built
     }
 }
@@ -116,6 +116,22 @@ fn palette_to_syntect_theme(code: &CodePalette, fg: Color, bg: Color) -> Syntect
             make_scope_item(
                 "entity.name.function, support.function, variable.function, meta.function-call",
                 code.function,
+            ),
+            make_scope_item(
+                "variable, variable.other, variable.parameter, meta.definition.variable",
+                code.variable,
+            ),
+            make_scope_item(
+                "keyword.operator.arithmetic, keyword.operator.logical, keyword.operator.assignment, punctuation.separator, punctuation.terminator",
+                code.operator,
+            ),
+            make_scope_item(
+                "entity.name.macro, support.macro, meta.macro, variable.annotation, meta.annotation",
+                code.macro_,
+            ),
+            make_scope_item(
+                "variable.other.property, variable.other.member, entity.other.attribute-name, support.type.property-name, meta.attribute",
+                code.property,
             ),
         ],
     }
