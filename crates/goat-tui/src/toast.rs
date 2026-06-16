@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::{symbols, theme::Theme};
+use crate::{symbols, theme::Theme, wrap};
 
 pub struct Toast {
     message: String,
@@ -16,9 +16,9 @@ pub struct Toast {
 }
 
 const TOAST_TICKS: u16 = 33;
-const TOAST_HEIGHT: u16 = 1;
 const TOAST_GAP: u16 = 1;
 const MIN_WIDTH: u16 = 12;
+const TOAST_MAX_LINES: usize = 3;
 
 impl Toast {
     pub fn new(kind: NotifyKind, message: String) -> Self {
@@ -39,7 +39,7 @@ impl Toast {
 
     fn icon_style(&self, theme: Theme) -> ratatui::style::Style {
         match self.kind {
-            NotifyKind::Success => theme.role_agent(),
+            NotifyKind::Success => theme.success(),
             NotifyKind::Error => theme.error(),
             NotifyKind::Info => theme.muted(),
         }
@@ -56,33 +56,62 @@ pub fn tick(toasts: &mut Vec<Toast>) -> bool {
 }
 
 pub fn render(frame: &mut Frame, area: Rect, theme: Theme, toasts: &[Toast]) {
-    if toasts.is_empty() || area.width < MIN_WIDTH + 4 || area.height < TOAST_HEIGHT + 1 {
+    if toasts.is_empty() || area.width < MIN_WIDTH + 4 || area.height < 2 {
         return;
     }
     let max_width = area.width.saturating_sub(4);
+    let text_width = max_width.saturating_sub(4).max(1);
     let mut y = area.y.saturating_add(1);
     for toast in toasts.iter().rev() {
-        if y.saturating_add(TOAST_HEIGHT) > area.bottom() {
+        let body = Line::from(Span::raw(toast.message.clone()));
+        let mut wrapped = wrap::wrap_line(&body, text_width);
+        let truncated = wrapped.len() > TOAST_MAX_LINES;
+        wrapped.truncate(TOAST_MAX_LINES);
+        if wrapped.is_empty() {
+            wrapped.push(Line::default());
+        }
+        let height = u16::try_from(wrapped.len()).unwrap_or(1);
+        if y.saturating_add(height) > area.bottom() {
             break;
         }
-        let message_width =
-            u16::try_from(UnicodeWidthStr::width(toast.message.as_str())).unwrap_or(u16::MAX);
-        let width = message_width.saturating_add(4).clamp(MIN_WIDTH, max_width);
+        let content_w = wrapped
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0);
+        let width = u16::try_from(content_w)
+            .unwrap_or(u16::MAX)
+            .saturating_add(4)
+            .clamp(MIN_WIDTH, max_width);
         let x = area.right().saturating_sub(width).saturating_sub(1);
         let rect = Rect {
             x,
             y,
             width,
-            height: TOAST_HEIGHT,
+            height,
         };
         frame.render_widget(Clear, rect);
-        let line = Line::from(vec![
-            Span::raw(" "),
-            Span::styled(toast.icon(), toast.icon_style(theme)),
-            Span::raw(" "),
-            Span::raw(toast.message.clone()),
-        ]);
-        frame.render_widget(Paragraph::new(line).style(theme.panel()), rect);
-        y = y.saturating_add(TOAST_HEIGHT + TOAST_GAP);
+        let mut lines: Vec<Line> = Vec::with_capacity(wrapped.len());
+        for (i, mut line) in wrapped.into_iter().enumerate() {
+            let icon = if i == 0 {
+                Span::styled(toast.icon(), toast.icon_style(theme))
+            } else {
+                Span::raw(" ")
+            };
+            if truncated && i + 1 == TOAST_MAX_LINES {
+                line.spans
+                    .push(Span::styled(symbols::ui::ELLIPSIS, theme.muted()));
+            }
+            let mut spans = vec![Span::raw(" "), icon, Span::raw(" ")];
+            spans.extend(line.spans);
+            lines.push(Line::from(spans));
+        }
+        frame.render_widget(Paragraph::new(lines).style(theme.panel()), rect);
+        y = y.saturating_add(height + TOAST_GAP);
     }
 }
