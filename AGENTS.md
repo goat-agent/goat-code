@@ -18,7 +18,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-35 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
+36 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
 
 **Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
@@ -27,6 +27,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol`, `goat-commands`, and `goat-config`, not `goat-core` or any engine crate.
 - `goat-code` — the `goat` binary; wires the channels, logging, and CLI; depends on all.
 - `goat-update` — executable replacement helper for `goat update`; small CLI-only crate with no app-state ownership.
+- `goat-worktree` — git-worktree management (`enter`/`list`/`remove`); leaf crate (std + `ignore` + `serde`, shells out to `git`); `goat-code` keeps the clap `WorktreeCommand` and dispatches into it.
 
 **Providers**
 - `goat-provider` — the `Provider` trait; leaf. Key types: `Provider`, `Request` (incl. `ToolChoice`), `StreamEvent`, `StreamError`, `Message`, `Capabilities`, `Model`, `ProviderId`, `ContentBlock`. Providers classify their own wire errors into `StreamError` structurally (`error.rs` per provider); the engine never inspects error strings.

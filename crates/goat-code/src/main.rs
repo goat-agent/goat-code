@@ -2,12 +2,11 @@ mod auth;
 mod cli;
 mod logging;
 mod update;
-mod worktree;
 
 use clap::Parser;
 use color_eyre::eyre::eyre;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, WorktreeCommand};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -32,7 +31,11 @@ async fn main() -> color_eyre::Result<()> {
         }
         Some(Command::Worktree(command)) => {
             reject_worktree(cli.worktree.as_ref())?;
-            worktree::run(command).map_err(color_eyre::Report::from)
+            let result = match command {
+                WorktreeCommand::List => goat_worktree::list(),
+                WorktreeCommand::Remove { label } => goat_worktree::remove(&label),
+            };
+            result.map_err(color_eyre::Report::from)
         }
         None => run_tui(cli.worktree).await,
     }
@@ -47,7 +50,7 @@ fn reject_worktree(worktree: Option<&String>) -> color_eyre::Result<()> {
 
 async fn run_tui(worktree_label: Option<String>) -> color_eyre::Result<()> {
     if let Some(label) = worktree_label.as_deref() {
-        worktree::enter(label)?;
+        goat_worktree::enter(label)?;
     }
 
     goat_tui::install_hooks()?;
