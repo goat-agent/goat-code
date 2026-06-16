@@ -85,11 +85,74 @@ async fn drain_steering(ctx: &Ctx<'_>, run: &Run<'_>, conversation: &mut Convers
     }
 }
 
-fn normalize_tool_input(input: String) -> String {
-    match serde_json::from_str::<serde_json::Value>(&input) {
-        Ok(value) if value.is_object() => input,
-        _ => "{}".to_owned(),
+fn normalize_tool_input(input: String, schema: Option<&serde_json::Value>) -> String {
+    if input.trim().is_empty() {
+        return "{}".to_owned();
     }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&input) else {
+        return input;
+    };
+    let Some(object) = as_object_value(value) else {
+        return input;
+    };
+    let object = unwrap_object_fields(object, schema);
+    serde_json::Value::Object(object).to_string()
+}
+
+fn as_object_value(value: serde_json::Value) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match value {
+        serde_json::Value::Object(map) => Some(map),
+        serde_json::Value::String(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(serde_json::Value::Object(map)) => Some(map),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn unwrap_object_fields(
+    mut object: serde_json::Map<String, serde_json::Value>,
+    schema: Option<&serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let Some(properties) = schema
+        .and_then(|schema| schema.get("properties"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return object;
+    };
+    for (field, value) in &mut object {
+        let serde_json::Value::String(text) = value else {
+            continue;
+        };
+        let Some(expected) = properties
+            .get(field)
+            .and_then(|spec| spec.get("type"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        if expected != "array" && expected != "object" {
+            continue;
+        }
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) else {
+            continue;
+        };
+        let matches = matches!(
+            (expected, &parsed),
+            ("array", serde_json::Value::Array(_)) | ("object", serde_json::Value::Object(_))
+        );
+        if matches {
+            *value = parsed;
+        }
+    }
+    object
+}
+
+fn tool_input_value(input: &str) -> serde_json::Value {
+    serde_json::from_str(input)
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()))
 }
 
 pub(crate) async fn run_round(
@@ -137,7 +200,7 @@ pub(crate) async fn run_round(
                     redacted.push(data);
                 }
                 Some(StreamEvent::ToolCall { id: vendor_id, name, input }) => {
-                    pending_calls.push((vendor_id, name, normalize_tool_input(input)));
+                    pending_calls.push((vendor_id, name, input));
                 }
                 Some(StreamEvent::Usage { usage: u }) => {
                     usage = Some(u);
@@ -224,7 +287,18 @@ pub(crate) async fn process_round_output(
             .await;
     }
     let raw = round.raw;
-    let pending_calls = round.pending_calls;
+    let pending_calls: Vec<(String, String, String)> = round
+        .pending_calls
+        .into_iter()
+        .map(|(vendor_id, name, input)| {
+            let schema = env
+                .tool_defs
+                .iter()
+                .find(|def| def.name == name)
+                .map(|def| &def.input_schema);
+            (vendor_id, name, normalize_tool_input(input, schema))
+        })
+        .collect();
     let shown_text = (!raw.is_empty()).then(|| raw.clone());
     if !raw.is_empty()
         || !pending_calls.is_empty()
@@ -245,14 +319,10 @@ pub(crate) async fn process_round_output(
             content.push(ContentBlock::Text { text: raw.clone() });
         }
         for (vendor_id, name, input_json) in &pending_calls {
-            let input_val = serde_json::from_str(input_json)
-                .ok()
-                .filter(serde_json::Value::is_object)
-                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
             content.push(ContentBlock::ToolUse {
                 id: vendor_id.clone(),
                 name: name.clone(),
-                input: input_val,
+                input: tool_input_value(input_json),
             });
         }
         let message = Message {
@@ -423,29 +493,99 @@ pub(crate) async fn core_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_tool_input;
+    use super::{normalize_tool_input, tool_input_value};
+
+    fn norm(input: &str) -> String {
+        normalize_tool_input(input.to_owned(), None)
+    }
+
+    fn norm_with(input: &str, schema: &serde_json::Value) -> String {
+        normalize_tool_input(input.to_owned(), Some(schema))
+    }
+
+    fn value(input: &str) -> serde_json::Value {
+        serde_json::from_str(input).expect("valid json")
+    }
 
     #[test]
     fn empty_input_becomes_empty_object() {
-        assert_eq!(normalize_tool_input(String::new()), "{}");
-    }
-
-    #[test]
-    fn whitespace_input_becomes_empty_object() {
-        assert_eq!(normalize_tool_input("   ".to_owned()), "{}");
-    }
-
-    #[test]
-    fn non_object_input_becomes_empty_object() {
-        assert_eq!(normalize_tool_input("5".to_owned()), "{}");
-        assert_eq!(normalize_tool_input("\"hi\"".to_owned()), "{}");
-        assert_eq!(normalize_tool_input("[1,2]".to_owned()), "{}");
-        assert_eq!(normalize_tool_input("null".to_owned()), "{}");
+        assert_eq!(norm(""), "{}");
+        assert_eq!(norm("   "), "{}");
     }
 
     #[test]
     fn object_input_is_preserved() {
-        let input = "{\"path\":\"a.txt\"}".to_owned();
-        assert_eq!(normalize_tool_input(input.clone()), input);
+        assert_eq!(
+            value(&norm("{\"path\":\"a.txt\"}")),
+            value("{\"path\":\"a.txt\"}")
+        );
+    }
+
+    #[test]
+    fn normalization_is_idempotent() {
+        let once = norm("{\"path\":\"a.txt\"}");
+        let twice = normalize_tool_input(once.clone(), None);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn whole_argument_stringify_is_unwrapped() {
+        let input = "\"{\\\"path\\\":\\\"a.txt\\\"}\"";
+        assert_eq!(value(&norm(input)), value("{\"path\":\"a.txt\"}"));
+    }
+
+    #[test]
+    fn field_level_array_stringify_is_unwrapped() {
+        let schema = value("{\"properties\":{\"questions\":{\"type\":\"array\"}}}");
+        let input = "{\"questions\":\"[{\\\"question\\\":\\\"A?\\\"}]\"}";
+        let out = value(&norm_with(input, &schema));
+        assert_eq!(out, value("{\"questions\":[{\"question\":\"A?\"}]}"));
+    }
+
+    #[test]
+    fn field_level_object_stringify_is_unwrapped() {
+        let schema = value("{\"properties\":{\"filter\":{\"type\":\"object\"}}}");
+        let input = "{\"filter\":\"{\\\"k\\\":1}\"}";
+        let out = value(&norm_with(input, &schema));
+        assert_eq!(out, value("{\"filter\":{\"k\":1}}"));
+    }
+
+    #[test]
+    fn string_field_is_never_unwrapped() {
+        let schema = value("{\"properties\":{\"body\":{\"type\":\"string\"}}}");
+        let input = "{\"body\":\"{\\\"k\\\":1}\"}";
+        let out = value(&norm_with(input, &schema));
+        assert_eq!(out, value("{\"body\":\"{\\\"k\\\":1}\"}"));
+    }
+
+    #[test]
+    fn multilingual_payloads_pass_through() {
+        for payload in [
+            "{\"text\":\"앱을 만들어줘\"}",
+            "{\"text\":\"アプリを作って\"}",
+            "{\"text\":\"اصنع تطبيقا\"}",
+            "{\"text\":\"ship it 🚀🦊\"}",
+        ] {
+            assert_eq!(value(&norm(payload)), value(payload));
+        }
+    }
+
+    #[test]
+    fn non_object_input_is_preserved_not_discarded() {
+        for input in ["5", "[1,2]", "null", "\"hi\""] {
+            assert_eq!(norm(input), input);
+        }
+    }
+
+    #[test]
+    fn history_value_is_object_for_normalizable_input() {
+        assert!(tool_input_value(&norm("{\"path\":\"a.txt\"}")).is_object());
+    }
+
+    #[test]
+    fn history_value_falls_back_to_object_for_non_object() {
+        let block = tool_input_value(&norm("[1,2]"));
+        assert!(block.is_object());
+        assert_eq!(block, value("{}"));
     }
 }
