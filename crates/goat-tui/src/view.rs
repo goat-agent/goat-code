@@ -183,7 +183,7 @@ fn render_agent_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, cu
             let selected = i == cursor;
             let (marker, marker_style) = match run.done {
                 None => (spinner, theme.accent()),
-                Some(true) => (symbols::ui::CHECK, theme.role_tool()),
+                Some(true) => (symbols::ui::CHECK, theme.success()),
                 Some(false) => (symbols::ui::CROSS, theme.error()),
             };
             let name_style = if selected { theme.key() } else { theme.muted() };
