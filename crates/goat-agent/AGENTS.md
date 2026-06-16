@@ -1,8 +1,10 @@
 # goat-agent
 
 `GoatAgent` is the production `Engine`. The crate is split by responsibility; `lib.rs` is the
-shared-types hub (`GoatAgent`, `run()` op loop, `Ctx`, `Run`/`Report`/`TurnIds`, `LoopEnv`,
-`Flow`) and every module imports from it.
+shared-types hub (`GoatAgent`, `run()` op loop, `Ctx`, `SessionState`, `Run`/`Report`/`TurnIds`,
+`LoopEnv`, `Flow`) and every module imports from it. `Ctx` bundles the immutable shared services
+for a turn; `SessionState` bundles the six mutable per-session fields (`target`, `conversation`,
+`tracker`, `thread_id`, `mode`, `plan_path`) threaded through the turn lifecycle.
 
 ## Modules
 
@@ -12,7 +14,7 @@ shared-types hub (`GoatAgent`, `run()` op loop, `Ctx`, `Run`/`Report`/`TurnIds`,
 | `accounts` | login/account lifecycle, model discovery, per-account registries, `provider_for` |
 | `threads` | thread listing/rename/resume, stored-message parsing |
 | `persist` | every goat-store write: threads, turns, messages, tool calls, `now_ms` |
-| `turn` | `handle_turn` (top-level turn lifecycle, mid-turn op select loop), `handle_idle_op`, `TurnEnd` |
+| `turn` | `handle_turn` (top-level turn lifecycle, mid-turn op select loop), `handle_idle_op`, `handle_shell`, `handle_compact`, `SessionState`, `TurnEnd` |
 | `rounds` | `core_loop`, `run_round` (provider stream consumption), `process_round_output` |
 | `tools_exec` | tool defs, parallel tool batches, `execute_tool` routing, display helpers |
 | `delegate` | the `Agent` tool: spec resolution, child runs, concurrency cap |
@@ -20,6 +22,12 @@ shared-types hub (`GoatAgent`, `run()` op loop, `Ctx`, `Run`/`Report`/`TurnIds`,
 | `agent` | `AgentSpec`/`AgentRegistry` (built-ins + `.goat/agents/*.md`) |
 | `instructions` | AGENTS.md discovery and injection |
 | `rate_limit_cache` | rate-limit snapshot persistence |
+| `shell` | `<shell-input>`/`<shell-output>` history encode/decode for `SubmitShell` |
+| `websearch` | the engine-level `WebSearch` tool (provider `web_search`) |
+| `plan` | `EnterPlanMode`/`ProposePlan` engine tools, plan-mode tool gating, plan-file IO |
+| `conversation` | the `Conversation` history (messages + db row ids) |
+| `retry` | exponential-backoff retry over classified provider errors |
+| `compaction` | `ContextTracker` budget and LLM-summarization auto-compaction |
 
 ## Dependency direction
 

@@ -33,3 +33,45 @@ impl Command for Resume {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Resume;
+    use goat_command::{Command, CommandEffect, CommandInvocation, ParsedParameter, ParsedValue};
+
+    fn invocation(parameters: Vec<ParsedParameter>) -> CommandInvocation {
+        CommandInvocation {
+            name: "resume".to_owned(),
+            subcommand: None,
+            raw: "/resume".to_owned(),
+            raw_args: String::new(),
+            parameters,
+        }
+    }
+
+    #[test]
+    fn bare_opens_picker() {
+        let effect = Resume.run(invocation(Vec::new()));
+        assert!(matches!(effect, CommandEffect::OpenThreadPicker));
+    }
+
+    #[test]
+    fn positive_index_is_zero_based() {
+        let effect = Resume.run(invocation(vec![ParsedParameter {
+            name: "n".to_owned(),
+            value: ParsedValue::Integer(3),
+        }]));
+        assert!(matches!(effect, CommandEffect::ResumeIndex(2)));
+    }
+
+    #[test]
+    fn zero_or_negative_is_error() {
+        for value in [0, -1] {
+            let effect = Resume.run(invocation(vec![ParsedParameter {
+                name: "n".to_owned(),
+                value: ParsedValue::Integer(value),
+            }]));
+            assert!(matches!(effect, CommandEffect::Error(_)));
+        }
+    }
+}
