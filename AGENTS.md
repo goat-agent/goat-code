@@ -18,14 +18,16 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-31 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
+36 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
 
 **Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
 - `goat-config` — config, `ThemeChoice`, `~/.goat-code` paths, log directory; no TUI deps; leaf.
 - `goat-core` — `Session` and the `Engine` trait; depends on `goat-protocol` only.
-- `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol` and `goat-commands`, not `goat-core` or any engine crate.
+- `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol`, `goat-commands`, and `goat-config`, not `goat-core` or any engine crate.
 - `goat-code` — the `goat` binary; wires the channels, logging, and CLI; depends on all.
+- `goat-update` — executable replacement helper for `goat update`; small CLI-only crate with no app-state ownership.
+- `goat-worktree` — git-worktree management (`enter`/`list`/`remove`); leaf crate (std + `ignore` + `serde`, shells out to `git`); `goat-code` keeps the clap `WorktreeCommand` and dispatches into it.
 
 **Providers**
 - `goat-provider` — the `Provider` trait; leaf. Key types: `Provider`, `Request` (incl. `ToolChoice`), `StreamEvent`, `StreamError`, `Message`, `Capabilities`, `Model`, `ProviderId`, `ContentBlock`. Providers classify their own wire errors into `StreamError` structurally (`error.rs` per provider); the engine never inspects error strings.
@@ -39,6 +41,8 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 **Agent**
 - `goat-agent` — `GoatAgent`, the production `Engine` implementation; owns the LLM loop, tool dispatch, and the `Conversation` history (messages + db row ids). Long-running capabilities live here: retry with exponential backoff over classified provider errors (`retry.rs`), mid-turn steering (queued `SubmitMessage` injected at round boundaries), and LLM-summarization auto-compaction with a `ContextTracker` token budget (`compaction.rs`). Also owns the `Agent` delegation tool and `AgentSpec`/`AgentRegistry` (`agent.rs`): built-in `explore` (read-only) and `general`, plus file-defined agents from `.goat/agents/<name>.md` (Claude Code custom-agent frontmatter — `name`/`description`/`tools`/`model`/`effort`). Module map and dependency direction live in `crates/goat-agent/AGENTS.md`.
+- `goat-mcp` — MCP (Model Context Protocol) client manager; launches stdio MCP servers and adapts their tools into the `Tool` trait via `rmcp`. A `goat-agent` dependency.
+- `goat-sandbox` — platform sandbox backend for shell execution (deny-file rules); used by `goat-tool-shell` and `goat-agent`.
 
 **Auth / Store**
 - `goat-auth` — credential store (provider API keys, OAuth tokens).
@@ -49,6 +53,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-tool-fs` — filesystem tools (read, write, list, search).
 - `goat-tool-shell` — shell execution tool.
 - `goat-tool-search` — web/code search tools.
+- `goat-tool-web` — the web-fetch tool; fetches a URL over HTTPS and converts to Markdown, with SSRF protection (`ssrf` module rejects private/link-local addresses).
 - `goat-tool-skill` — the `Skill` tool; loads a skill's instructions on demand from the cwd.
 - `goat-tool-computer` — the `Computer` tool; desktop control (screenshot + mouse/keyboard) via `xcap`/`enigo`. Opt-in: registered by `GoatAgent::new` only when `computer_use_enabled` is set.
 - `goat-tool-browser` — the `Browser` tool; drives a real Chrome via CDP (`chromiumoxide`). One tool with an `action` enum (navigate/snapshot/click/type/select/press_key/evaluate/screenshot/close); actions return a text accessibility snapshot with element refs (`screenshot` returns an image). Persistent login profile at `~/.goat-code/browser/profile`, headful. Opt-in: registered by `GoatAgent::new` only when `browser_enabled` is set.
@@ -60,6 +65,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-command-settings` — `/model`, `/effort`, `/config` commands (one module per command). `/model` and `/effort` accept an optional argument (`/model <name>`, `/effort <level>`) or open a picker when bare.
 - `goat-command-conversation` — `/clear`, `/compact`, and `/resume` commands. `/compact [focus]` summarizes the conversation to free context (deferred to after the turn when one is running). `/resume` opens a picker of past conversations in the cwd, or `/resume <n>` resumes the nth.
 - `goat-command-help` — `/help` command.
+- `goat-command-app` — app-lifecycle commands (`/exit`).
 - `goat-commands` — command registry; wires the per-category command crates and surfaces loaded skills as `/name` commands via `set_skills`; mirrors `goat-tools`.
 
 The UI and the engine communicate only through `goat-protocol` types over bounded
@@ -83,21 +89,21 @@ The UI and the engine communicate only through `goat-protocol` types over bounde
 - Mid-turn `Op::SubmitMessage` is steering: it queues in the turn's `SteeringQueue` and injects as a user message at the next round boundary (`Event::UserMessage` confirms placement); a turn ends only when the model stops and the queue is empty. `Op::DequeueMessage` retracts a queued message (`Event::MessageDequeued` confirms); whichever event arrives is the truth the TUI renders.
 - Reasoning effort is a per-model property carried on `ModelTarget.effort` (persisted per thread). Providers advertise the valid set per model via `Provider::efforts` and translate the chosen `Request.effort` themselves — OpenAI/Codex send `reasoning.effort`, Anthropic maps to `output_config.effort`/`thinking.budget_tokens`. Anthropic extended thinking requires the `ContentBlock::Thinking`/`RedactedThinking` blocks to round-trip unchanged in history, which is why they are first-class content blocks every provider must handle.
 - The `Agent` tool is engine-level, not a registry tool: the model calls it like a tool, but `GoatAgent` intercepts the call in dispatch and runs the same loop core nested — its own history, restricted tool set (no `Agent`, so no recursion), a child `TaskId`, and no persistence. Several run concurrently via a semaphore-bounded `join_all`, and a parent `CancellationToken` fans out to every child on interrupt. The shared loop core is parameterized by a `Run` (top-level emits + persists; child emits child-tagged events only).
-- Human-facing tool presentation belongs to the tools, never the TUI: each tool renders its own input via `Tool::display_input` (parsing its own `Input` struct) and may attach a display `summary` to `ToolOutput`; the engine ships both over `goat-protocol` (`ToolCall.display`, `ToolOutcome.summary`), and the TUI renders exactly what arrives with zero per-tool knowledge.
+- Human-facing tool presentation belongs to the tools, never the TUI: each tool renders its own input via `Tool::display_input` (parsing its own `Input` struct) and may attach a display `summary` to `ToolOutput`; the engine ships both over `goat-protocol` (`ToolCall.display`, `ToolOutcome.summary`), and the TUI renders exactly what arrives with zero per-tool knowledge. Screenshot-producing tools (computer/browser) ship the captured image too: the engine attaches it to `ToolOutcome.image` (alongside the provider-history `ContentBlock::Image`) and the TUI renders it inline via `ratatui-image`, using the terminal's graphics protocol (Kitty/iTerm2/Sixel) or unicode-halfblock fallback. The image is live-session only — it is not persisted, so `/resume` shows the text marker.
 - The TUI normalizes three event sources into one `AppEvent`, runs a pure `App::update` reducer, and renders on a dirty flag — never on every tick. Child-agent events are routed by `TaskId` to a per-run transcript; a footer agent selector (↓ to focus, arrows, Esc to leave) drills the main area into one run by swapping which transcript renders — the same swap mechanism `/resume` uses.
 - The composer is a first-party widget. Do not add `tui-textarea`; it does not support ratatui 0.30.
 - On startup, `GoatAgent` reads project `AGENTS.md` files and injects them into the system prompt. Discovery follows the Codex standard: global `~/.goat-code/AGENTS.md` first, then git root → cwd (root-to-leaf order, each file capped at 32 KiB). `AGENTS.override.md` in any directory takes precedence over `AGENTS.md` in the same directory. The same injected content reaches both the main loop and delegated subagents.
 
 ## Distribution
 
-Native install only, via `cargo-dist` (install.sh + GitHub Releases + axoupdater). The
-project is not published to crates.io and internal crates are `publish = false`; the binary
-opts into distribution with `[package.metadata.dist] dist = true`. Do not add `cargo install`
-flows or crates.io publishing.
-
-A release is cut by pushing a tag: `git tag vX.Y.Z && git push --tags`. The release workflow
-`.github/workflows/release.yml` is generated by `dist generate` from `dist-workspace.toml` —
-change the config and regenerate; never hand-edit the workflow.
+Native install only. The root `install.sh` is the official Unix/macOS installer and installs
+`goat` plus `goat-update` into `/usr/local/bin`; Windows initial install is archive-only.
+GitHub Actions builds stable release archives and `SHA256SUMS`; `goat update` stages releases
+and `goat-update` performs executable replacement. Installation metadata is not persisted; the
+install location is fixed by platform policy. `cargo-release` owns version bumping and
+`v{{version}}` tag creation; pushed release tags trigger `.github/workflows/release.yml`.
+The project is not published to crates.io and internal crates are `publish = false`. Do not add
+`cargo install` distribution flows and do not reintroduce cargo-dist.
 
 ## Testing
 

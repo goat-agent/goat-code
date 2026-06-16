@@ -1,13 +1,33 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Margin, Rect},
-    style::Style,
+    layout::{Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, Clear},
+    widgets::{Block, BorderType, Clear},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{symbols, theme::Theme};
+
+pub fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if s.width() <= max_width {
+        return s.to_owned();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for c in s.chars() {
+        let char_width = c.width().unwrap_or(0);
+        if width + char_width + 1 > max_width {
+            break;
+        }
+        out.push(c);
+        width += char_width;
+    }
+    out.push_str(symbols::ui::ELLIPSIS);
+    out
+}
 
 pub fn clamp_u16(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
@@ -15,23 +35,26 @@ pub fn clamp_u16(n: usize) -> u16 {
 
 pub fn overlay_frame(frame: &mut Frame, area: Rect, theme: Theme) -> Option<Rect> {
     frame.render_widget(Clear, area);
-    frame.render_widget(Block::new().style(theme.panel()), area);
-    let inner = area.inner(Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(theme.border())
+        .style(theme.base());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
     Some(inner)
 }
 
+pub fn ask_sheet_frame(frame: &mut Frame, area: Rect, theme: Theme) -> Option<Rect> {
+    overlay_frame(frame, area, theme)
+}
+
 pub fn overlay_layout(inner: Rect) -> (Rect, Rect, Rect) {
-    let [context, _, body, _, hint] = Layout::vertical([
-        Constraint::Length(1),
+    let [context, body, hint] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
@@ -39,12 +62,7 @@ pub fn overlay_layout(inner: Rect) -> (Rect, Rect, Rect) {
 }
 
 pub fn overlay_layout_plain(inner: Rect) -> (Rect, Rect) {
-    let [body, _, hint] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
+    let [body, hint] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     (body, hint)
 }
 
@@ -77,22 +95,13 @@ pub fn selection_row<'a>(
     let caret_w = 3usize;
     let pad =
         inner_width.saturating_sub(caret_w + left_w + right_w + usize::from(right_span.is_some()));
-    let row_style = if selected {
-        theme.selected_row()
-    } else {
-        Style::default()
-    };
     let mut spans = vec![caret];
-    spans.extend(left_spans.into_iter().map(|s| {
-        let patched = s.style.patch(row_style);
-        Span::styled(s.content, patched)
-    }));
+    spans.extend(left_spans);
     if let Some(right) = right_span {
-        spans.push(Span::styled(" ".repeat(pad), row_style));
-        let patched = right.style.patch(row_style);
-        spans.push(Span::styled(right.content, patched));
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(right);
     } else {
-        spans.push(Span::styled(" ".repeat(pad), row_style));
+        spans.push(Span::raw(" ".repeat(pad)));
     }
     Line::from(spans)
 }
@@ -173,27 +182,6 @@ where
     lines
 }
 
-pub fn truncate_to_width(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_owned();
-    }
-    let mut out = String::new();
-    let mut width = 0usize;
-    for c in s.chars() {
-        let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if width + char_width + 1 > max_width {
-            break;
-        }
-        out.push(c);
-        width += char_width;
-    }
-    out.push_str(symbols::ui::ELLIPSIS);
-    out
-}
-
 pub fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
     let width = max_width.min(area.width.saturating_sub(4));
     let height = max_height.min(area.height.saturating_sub(2));
@@ -204,5 +192,23 @@ pub fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
         y,
         width,
         height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::text::Span;
+
+    use super::selection_row;
+    use crate::theme::Theme;
+
+    #[test]
+    fn selected_row_has_no_background_band() {
+        let theme = Theme::dark();
+        let line = selection_row(theme, true, 40, vec![Span::raw("item")], None);
+        assert!(
+            line.spans.iter().all(|span| span.style.bg.is_none()),
+            "selection must not paint a full-width background band"
+        );
     }
 }

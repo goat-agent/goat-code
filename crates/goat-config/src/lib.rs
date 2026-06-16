@@ -75,6 +75,10 @@ pub fn config_path() -> Option<PathBuf> {
     app_home().map(|home| home.join("config.json"))
 }
 
+pub fn mcp_config_path() -> Option<PathBuf> {
+    app_home().map(|home| home.join("mcp.json"))
+}
+
 pub fn db_path() -> Option<PathBuf> {
     app_home().map(|home| home.join("goat-code.db"))
 }
@@ -101,6 +105,10 @@ pub fn plans_dir() -> Option<PathBuf> {
 
 pub fn browser_profile_dir() -> Option<PathBuf> {
     browser_dir().map(|dir| dir.join("profile"))
+}
+
+pub fn update_dir() -> Option<PathBuf> {
+    app_home().map(|home| home.join("update"))
 }
 
 pub const PROJECT_SKILLS_SUBDIR: &str = ".goat/skills";

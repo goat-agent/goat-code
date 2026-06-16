@@ -7,9 +7,6 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[package.metadata.dist]
-dist = true
-
 [[bin]]
 name = "goat"
 path = "src/main.rs"
@@ -21,18 +18,22 @@ goat-config = { workspace = true }
 goat-agent = { workspace = true }
 goat-auth = { workspace = true }
 goat-store = { workspace = true }
+goat-protocol = { workspace = true }
 goat-provider = { workspace = true }
 goat-providers = { workspace = true }
+goat-worktree = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-ignore = { workspace = true }
 color-eyre = { workspace = true }
 thiserror = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+semver = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
-axoupdater = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

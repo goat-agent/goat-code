@@ -3,9 +3,10 @@ use goat_protocol::{Op, PlanDecision};
 
 use super::{App, CLEAR_ARM_TICKS, Overlay, PlanFocus, QUIT_ARM_TICKS};
 use crate::{
+    ask::AskOutcome,
     config::ConfigOutcome,
     keymap,
-    picker::{AskOutcome, EffortOutcome, PickerOutcome, ThreadOutcome},
+    picker::{EffortOutcome, PickerOutcome, ThreadOutcome},
 };
 
 impl App {
@@ -69,25 +70,28 @@ impl App {
         match key.code {
             KeyCode::Tab => {
                 if let Overlay::Commands(menu) = &self.overlay
-                    && let Some(name) = menu.selected_name()
+                    && let Some(completion) = menu.selected_completion()
                 {
-                    let completed = format!("/{name} ");
-                    self.composer.clear();
-                    self.composer.insert_str(&completed);
+                    let text = self.composer.text();
+                    let completed = completion.apply(&text);
+                    self.composer.set_plain_text(&completed);
+                    self.update_command_menu();
                 }
-                self.overlay = Overlay::None;
                 Some(Vec::new())
             }
             KeyCode::Enter => {
                 if let Overlay::Commands(menu) = &self.overlay
-                    && let Some(name) = menu.selected_name()
+                    && let Some(completion) = menu.selected_command_completion()
                 {
-                    let completed = format!("/{name}");
-                    self.overlay = Overlay::None;
-                    self.composer.clear();
-                    return Some(self.dispatch_slash_command(&completed));
+                    let text = self.composer.text();
+                    let completed = completion.apply(&text);
+                    self.composer.set_plain_text(&completed);
+                    self.update_command_menu();
+                    return Some(Vec::new());
                 }
-                None
+                self.overlay = Overlay::None;
+                self.dirty = true;
+                Some(self.submit())
             }
             KeyCode::Esc => {
                 self.overlay = Overlay::None;
@@ -511,7 +515,11 @@ impl App {
             KeyCode::Enter => return self.ask_enter(),
             KeyCode::Char(c) => {
                 if let Overlay::Ask(ref mut picker, _) = self.overlay {
-                    picker.on_char(c);
+                    if c == ' ' && picker.wants_toggle() {
+                        picker.toggle();
+                    } else {
+                        picker.on_char(c);
+                    }
                 }
             }
             _ => {}

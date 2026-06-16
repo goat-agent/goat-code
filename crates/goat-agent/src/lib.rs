@@ -63,17 +63,22 @@ pub struct GoatAgent {
     store: Store,
     credentials: CredentialStore,
     target: Option<ModelTarget>,
+    mcp: Arc<goat_mcp::McpManager>,
 }
 
 impl GoatAgent {
-    pub fn new(
+    pub async fn new(
         registry: Registry,
         store: Store,
         credentials: CredentialStore,
         target: Option<ModelTarget>,
     ) -> Self {
         let config = goat_config::Config::load();
-        let mut tools = ToolRegistry::builtin();
+        let mcp = goat_mcp::load_manager(goat_config::mcp_config_path().as_deref()).await;
+        let mut tools = ToolRegistry::builtin().with_many(mcp.tools());
+        if !mcp.is_empty() {
+            tracing::info!(tool_count = mcp.len(), "registered mcp tools");
+        }
         if config.computer_use_enabled {
             match goat_tool_computer::desktop_tool() {
                 Ok(ct) => tools = tools.with(Box::new(ct)),
@@ -89,6 +94,7 @@ impl GoatAgent {
             store,
             credentials,
             target,
+            mcp,
         }
     }
 }
@@ -122,6 +128,15 @@ pub(crate) struct Ctx<'a> {
 pub(crate) enum Flow {
     Continue,
     Shutdown,
+}
+
+pub(crate) struct SessionState {
+    pub(crate) target: Option<ModelTarget>,
+    pub(crate) conversation: conversation::Conversation,
+    pub(crate) tracker: compaction::ContextTracker,
+    pub(crate) thread_id: Option<i64>,
+    pub(crate) mode: Mode,
+    pub(crate) plan_path: Option<PathBuf>,
 }
 
 pub(crate) struct TurnIds {
@@ -207,18 +222,22 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
         tools,
         store,
         credentials,
-        mut target,
+        target,
+        mcp,
     } = agent;
-    let mut conversation = conversation::Conversation::new();
-    let mut tracker = compaction::ContextTracker::new();
-    let mut thread_id: Option<i64> = None;
-    let mut mode = Mode::Normal;
-    let mut plan_path: Option<PathBuf> = None;
+    let mut state = SessionState {
+        target,
+        conversation: conversation::Conversation::new(),
+        tracker: compaction::ContextTracker::new(),
+        thread_id: None,
+        mode: Mode::Normal,
+        plan_path: None,
+    };
 
-    if target.is_none() {
-        target = accounts::restore_target(&store, &credentials).await;
+    if state.target.is_none() {
+        state.target = accounts::restore_target(&store, &credentials).await;
     }
-    accounts::announce_startup(&events, &registry, &credentials, target.as_ref()).await;
+    accounts::announce_startup(&events, &registry, &credentials, state.target.as_ref()).await;
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let skills = prompt::load_skill_infos(&cwd);
@@ -260,41 +279,36 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     let account_registries: std::sync::Mutex<HashMap<String, Arc<Registry>>> =
         std::sync::Mutex::new(HashMap::new());
 
+    macro_rules! ctx {
+        () => {
+            Ctx {
+                registry: &registry,
+                account_registries: &account_registries,
+                credentials: &credentials,
+                tools: &tools,
+                agents: &agents,
+                store: &store,
+                events: &events,
+                skills: &skills,
+                instructions: project_instructions.as_deref(),
+                semaphore: &semaphore,
+                child_ids: &child_ids,
+                asks: &asks,
+                plans: &plans,
+                engine_ids: &engine_ids,
+                plan_shell,
+                rl_cache: &rl_cache,
+                rl_path: rl_path.as_deref(),
+            }
+        };
+    }
+
     while let Some(op) = ops.recv().await {
         match op {
             Op::SubmitMessage { id, text } => {
-                let ctx = Ctx {
-                    registry: &registry,
-                    account_registries: &account_registries,
-                    credentials: &credentials,
-                    tools: &tools,
-                    agents: &agents,
-                    store: &store,
-                    events: &events,
-                    skills: &skills,
-                    instructions: project_instructions.as_deref(),
-                    semaphore: &semaphore,
-                    child_ids: &child_ids,
-                    asks: &asks,
-                    plans: &plans,
-                    engine_ids: &engine_ids,
-                    plan_shell,
-                    rl_cache: &rl_cache,
-                    rl_path: rl_path.as_deref(),
-                };
-                if let Flow::Shutdown = turn::handle_turn(
-                    &ctx,
-                    id,
-                    text,
-                    &mut target,
-                    &mut conversation,
-                    &mut tracker,
-                    &mut thread_id,
-                    &mut mode,
-                    &mut plan_path,
-                    &mut ops,
-                )
-                .await
+                let ctx = ctx!();
+                if let Flow::Shutdown =
+                    turn::handle_turn(&ctx, id, text, &mut state, &mut ops).await
                 {
                     break;
                 }
@@ -304,107 +318,52 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
             | Op::DequeueMessage { .. }
             | Op::ResolvePlan { .. } => {}
             Op::SetMode { mode: requested } => {
-                mode = requested;
+                state.mode = requested;
                 if requested == Mode::Normal {
-                    plan_path = None;
+                    state.plan_path = None;
                 }
-                if let Some(tid) = thread_id
+                if let Some(tid) = state.thread_id
                     && let Err(err) = store
-                        .update_thread_mode(tid, mode_string(mode), persist::now_ms())
+                        .update_thread_mode(tid, mode_string(state.mode), persist::now_ms())
                         .await
                 {
                     tracing::warn!(%err, "failed to persist thread mode");
                 }
                 let _ = events
                     .send(Event::ModeChanged {
-                        mode,
-                        plan_path: plan_path.as_ref().map(|path| path.display().to_string()),
+                        mode: state.mode,
+                        plan_path: state
+                            .plan_path
+                            .as_ref()
+                            .map(|path| path.display().to_string()),
                     })
                     .await;
             }
             Op::Compact { id, instructions } => {
-                let ctx = Ctx {
-                    registry: &registry,
-                    account_registries: &account_registries,
-                    credentials: &credentials,
-                    tools: &tools,
-                    agents: &agents,
-                    store: &store,
-                    events: &events,
-                    skills: &skills,
-                    instructions: project_instructions.as_deref(),
-                    semaphore: &semaphore,
-                    child_ids: &child_ids,
-                    asks: &asks,
-                    plans: &plans,
-                    engine_ids: &engine_ids,
-                    plan_shell,
-                    rl_cache: &rl_cache,
-                    rl_path: rl_path.as_deref(),
-                };
-                if let Flow::Shutdown = turn::handle_compact(
-                    &ctx,
-                    id,
-                    instructions,
-                    &mut target,
-                    &mut conversation,
-                    &mut tracker,
-                    &mut thread_id,
-                    &mut mode,
-                    &mut plan_path,
-                    &mut ops,
-                )
-                .await
+                let ctx = ctx!();
+                if let Flow::Shutdown =
+                    turn::handle_compact(&ctx, id, instructions, &mut state, &mut ops).await
                 {
                     break;
                 }
             }
             Op::SubmitShell { id, command } => {
-                let ctx = Ctx {
-                    registry: &registry,
-                    account_registries: &account_registries,
-                    credentials: &credentials,
-                    tools: &tools,
-                    agents: &agents,
-                    store: &store,
-                    events: &events,
-                    skills: &skills,
-                    instructions: project_instructions.as_deref(),
-                    semaphore: &semaphore,
-                    child_ids: &child_ids,
-                    asks: &asks,
-                    plans: &plans,
-                    engine_ids: &engine_ids,
-                    plan_shell,
-                    rl_cache: &rl_cache,
-                    rl_path: rl_path.as_deref(),
-                };
-                if let Flow::Shutdown = turn::handle_shell(
-                    &ctx,
-                    id,
-                    &command,
-                    &mut target,
-                    &mut conversation,
-                    &mut tracker,
-                    &mut thread_id,
-                    &mut mode,
-                    &mut plan_path,
-                    &mut ops,
-                )
-                .await
+                let ctx = ctx!();
+                if let Flow::Shutdown =
+                    turn::handle_shell(&ctx, id, &command, &mut state, &mut ops).await
                 {
                     break;
                 }
             }
             Op::Clear => {
-                conversation.clear();
-                tracker.invalidate();
-                thread_id = None;
-                mode = Mode::Normal;
-                plan_path = None;
+                state.conversation.clear();
+                state.tracker.invalidate();
+                state.thread_id = None;
+                state.mode = Mode::Normal;
+                state.plan_path = None;
             }
             Op::SelectModel { .. } => {
-                turn::handle_idle_op(op, &store, thread_id, &mut target, &events).await;
+                turn::handle_idle_op(op, &store, state.thread_id, &mut state.target, &events).await;
             }
             Op::Login {
                 provider,
@@ -459,22 +418,29 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     &tools,
                     project_instructions.as_deref(),
                     tid,
-                    &mut target,
-                    &mut conversation,
-                    &mut tracker,
-                    &mut thread_id,
-                    &mut mode,
-                    &mut plan_path,
+                    &mut state,
+                    &events,
+                )
+                .await;
+            }
+            Op::ResumeLatest => {
+                threads::handle_resume_latest(
+                    &store,
+                    &skills,
+                    &tools,
+                    project_instructions.as_deref(),
+                    &mut state,
                     &events,
                 )
                 .await;
             }
             Op::RenameThread { title } => {
-                threads::handle_rename(&store, thread_id, title, &events).await;
+                threads::handle_rename(&store, state.thread_id, title, &events).await;
             }
             Op::Shutdown => break,
         }
     }
+    mcp.shutdown().await;
 }
 
 #[cfg(test)]
@@ -624,7 +590,7 @@ mod tests {
         }
     }
 
-    fn seq_agent(delay_ms: u64) -> (GoatAgent, Arc<std::sync::atomic::AtomicUsize>) {
+    async fn seq_agent(delay_ms: u64) -> (GoatAgent, Arc<std::sync::atomic::AtomicUsize>) {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let provider = SeqTextProvider {
             calls: calls.clone(),
@@ -635,14 +601,14 @@ mod tests {
         let credentials =
             CredentialStore::new(std::env::temp_dir().join("goat-agent-steering.json"));
         (
-            GoatAgent::new(registry, store, credentials, Some(target("mock"))),
+            GoatAgent::new(registry, store, credentials, Some(target("mock"))).await,
             calls,
         )
     }
 
     #[tokio::test]
     async fn steering_extends_the_turn_and_injects_message() {
-        let (agent, calls) = seq_agent(150);
+        let (agent, calls) = seq_agent(150).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -691,7 +657,7 @@ mod tests {
 
     #[tokio::test]
     async fn dequeue_removes_pending_steering_message() {
-        let (agent, calls) = seq_agent(300);
+        let (agent, calls) = seq_agent(300).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -727,7 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn followup_message_mid_turn_is_never_lost() {
-        let (agent, _calls) = seq_agent(10);
+        let (agent, _calls) = seq_agent(10).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -841,7 +807,8 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let credentials =
             CredentialStore::new(std::env::temp_dir().join("goat-agent-overflow.json"));
-        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let agent =
+            GoatAgent::new(registry, store.clone(), credentials, Some(target("mock"))).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -927,7 +894,8 @@ mod tests {
             store.clone(),
             credentials.clone(),
             Some(target("mock")),
-        );
+        )
+        .await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -949,7 +917,8 @@ mod tests {
             delay_ms: 0,
         };
         let registry2 = Registry::from_providers(vec![Arc::new(provider2)]);
-        let agent2 = GoatAgent::new(registry2, store.clone(), credentials, Some(target("mock")));
+        let agent2 =
+            GoatAgent::new(registry2, store.clone(), credentials, Some(target("mock"))).await;
         let session2 = Session::spawn(agent2);
         let (ops2, mut events2, _handle2) = session2.into_parts();
         ops2.send(Op::Resume { thread_id: 1 }).await.unwrap();
@@ -1018,7 +987,7 @@ mod tests {
         }
     }
 
-    fn failing_agent(
+    async fn failing_agent(
         failures: usize,
         error: StreamError,
     ) -> (GoatAgent, Arc<std::sync::atomic::AtomicUsize>) {
@@ -1032,14 +1001,14 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-retry.json"));
         (
-            GoatAgent::new(registry, store, credentials, Some(target("mock"))),
+            GoatAgent::new(registry, store, credentials, Some(target("mock"))).await,
             calls,
         )
     }
 
     #[tokio::test(start_paused = true)]
     async fn retries_transient_failures_until_success() {
-        let (agent, calls) = failing_agent(2, StreamError::overloaded("busy"));
+        let (agent, calls) = failing_agent(2, StreamError::overloaded("busy")).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -1077,7 +1046,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_failure_aborts_without_retry() {
-        let (agent, calls) = failing_agent(usize::MAX, StreamError::auth("expired"));
+        let (agent, calls) = failing_agent(usize::MAX, StreamError::auth("expired")).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -1114,7 +1083,8 @@ mod tests {
         let (agent, _calls) = failing_agent(
             usize::MAX,
             StreamError::rate_limited("slow", Some(std::time::Duration::from_secs(30))),
-        );
+        )
+        .await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -1158,7 +1128,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let credentials =
             CredentialStore::new(std::env::temp_dir().join("goat-agent-delegate.json"));
-        let agent = GoatAgent::new(registry, store, credentials, Some(target("mock")));
+        let agent = GoatAgent::new(registry, store, credentials, Some(target("mock"))).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -1198,7 +1168,7 @@ mod tests {
         }
     }
 
-    fn agent_with(reply: &str, delay_ms: u64) -> GoatAgent {
+    async fn agent_with(reply: &str, delay_ms: u64) -> GoatAgent {
         let provider = MockProvider {
             id: "mock".to_owned(),
             reply: reply.to_owned(),
@@ -1207,12 +1177,12 @@ mod tests {
         let registry = Registry::from_providers(vec![Arc::new(provider)]);
         let store = Store::open_in_memory().unwrap();
         let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-test.json"));
-        GoatAgent::new(registry, store, credentials, Some(target("mock")))
+        GoatAgent::new(registry, store, credentials, Some(target("mock"))).await
     }
 
     #[tokio::test]
     async fn bridges_text_to_protocol_events() {
-        let session = Session::spawn(agent_with("hello", 0));
+        let session = Session::spawn(agent_with("hello", 0).await);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
@@ -1252,7 +1222,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrupt_ends_turn() {
-        let session = Session::spawn(agent_with("late", 5_000));
+        let session = Session::spawn(agent_with("late", 5_000).await);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
             id: TaskId(9),
@@ -1283,7 +1253,7 @@ mod tests {
         let registry = Registry::from_providers(vec![]);
         let store = Store::open_in_memory().unwrap();
         let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-ghost.json"));
-        let agent = GoatAgent::new(registry, store, credentials, Some(target("ghost")));
+        let agent = GoatAgent::new(registry, store, credentials, Some(target("ghost"))).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitMessage {
@@ -1306,7 +1276,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_runs_and_reports_output() {
-        let session = Session::spawn(agent_with("unused", 0));
+        let session = Session::spawn(agent_with("unused", 0).await);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitShell {
             id: TaskId(7),
@@ -1338,7 +1308,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_interrupt_kills_command() {
-        let session = Session::spawn(agent_with("unused", 0));
+        let session = Session::spawn(agent_with("unused", 0).await);
         let (ops, mut events, _handle) = session.into_parts();
         ops.send(Op::SubmitShell {
             id: TaskId(8),
@@ -1372,7 +1342,8 @@ mod tests {
         let registry = Registry::from_providers(vec![Arc::new(provider)]);
         let store = Store::open_in_memory().unwrap();
         let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-shell.json"));
-        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let agent =
+            GoatAgent::new(registry, store.clone(), credentials, Some(target("mock"))).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
 
@@ -1404,6 +1375,78 @@ mod tests {
         panic!("expected ConversationRestored");
     }
 
+    #[tokio::test]
+    async fn resume_latest_restores_most_recent_thread() {
+        let provider = MockProvider {
+            id: "mock".to_owned(),
+            reply: "ok".to_owned(),
+            delay_ms: 0,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials =
+            CredentialStore::new(std::env::temp_dir().join("goat-agent-resume-latest.json"));
+        let agent =
+            GoatAgent::new(registry, store.clone(), credentials, Some(target("mock"))).await;
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "hello there".to_owned(),
+        })
+        .await
+        .unwrap();
+        drain_until_task_done(&mut events).await;
+
+        ops.send(Op::ResumeLatest).await.unwrap();
+        while let Some(event) = events.recv().await {
+            if let Event::ConversationRestored { entries, .. } = event {
+                assert!(entries.iter().any(|entry| matches!(
+                    entry,
+                    goat_protocol::TranscriptEntry::User(text) if text == "hello there"
+                )));
+                return;
+            }
+        }
+        panic!("expected ConversationRestored");
+    }
+
+    #[tokio::test]
+    async fn resume_latest_without_history_notifies() {
+        let provider = MockProvider {
+            id: "mock".to_owned(),
+            reply: "ok".to_owned(),
+            delay_ms: 0,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials =
+            CredentialStore::new(std::env::temp_dir().join("goat-agent-resume-latest-empty.json"));
+        let agent =
+            GoatAgent::new(registry, store.clone(), credentials, Some(target("mock"))).await;
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+
+        ops.send(Op::ResumeLatest).await.unwrap();
+        ops.send(Op::Shutdown).await.unwrap();
+
+        let mut saw_notify = false;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Notify {
+                    kind: goat_protocol::NotifyKind::Info,
+                    ..
+                } => saw_notify = true,
+                Event::ConversationRestored { .. } => {
+                    panic!("nothing to restore in an empty store");
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_notify, "empty resume must emit an Info notify");
+    }
+
     async fn drain_until_task_done(events: &mut mpsc::Receiver<Event>) {
         while let Some(event) = events.recv().await {
             if matches!(event, Event::TaskDone { .. }) {
@@ -1422,7 +1465,8 @@ mod tests {
         let registry = Registry::from_providers(vec![Arc::new(provider)]);
         let store = Store::open_in_memory().unwrap();
         let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-clear.json"));
-        let agent = GoatAgent::new(registry, store.clone(), credentials, Some(target("mock")));
+        let agent =
+            GoatAgent::new(registry, store.clone(), credentials, Some(target("mock"))).await;
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
 

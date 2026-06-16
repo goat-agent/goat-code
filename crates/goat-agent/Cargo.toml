@@ -15,6 +15,7 @@ goat-providers = { workspace = true }
 goat-auth = { workspace = true }
 goat-store = { workspace = true }
 goat-config = { workspace = true }
+goat-mcp = { workspace = true }
 goat-tool = { workspace = true }
 goat-sandbox = { workspace = true }
 goat-tools = { workspace = true }
@@ -28,6 +29,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
+unicode-width = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

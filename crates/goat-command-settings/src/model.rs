@@ -1,4 +1,6 @@
-use goat_command::{Command, CommandEffect};
+use goat_command::{
+    Command, CommandEffect, CommandInvocation, CommandShape, ParameterSpec, ParameterValue,
+};
 
 pub struct Model;
 
@@ -8,15 +10,23 @@ impl Command for Model {
     }
 
     fn description(&self) -> &'static str {
-        "switch model (optional: /model <name>)"
+        "switch model"
     }
 
-    fn run(&self, args: &str) -> CommandEffect {
-        let args = args.trim();
-        if args.is_empty() {
-            CommandEffect::OpenModelPicker
+    fn shape(&self) -> CommandShape {
+        CommandShape::Parameters(vec![ParameterSpec {
+            name: "name".to_owned(),
+            description: "model name".to_owned(),
+            required: false,
+            value: ParameterValue::TextTail,
+        }])
+    }
+
+    fn run(&self, invocation: CommandInvocation) -> CommandEffect {
+        if let Some(name) = invocation.text("name") {
+            CommandEffect::SelectModelNamed(name.to_owned())
         } else {
-            CommandEffect::SelectModelNamed(args.to_owned())
+            CommandEffect::OpenModelPicker
         }
     }
 }

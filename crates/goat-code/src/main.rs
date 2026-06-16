@@ -2,12 +2,11 @@ mod auth;
 mod cli;
 mod logging;
 mod update;
-mod worktree;
 
 use clap::Parser;
 use color_eyre::eyre::eyre;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, WorktreeCommand};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -15,6 +14,7 @@ async fn main() -> color_eyre::Result<()> {
 
     if cli.print_log_path {
         reject_worktree(cli.worktree.as_ref())?;
+        reject_continue(cli.r#continue)?;
         if let Some(dir) = goat_config::log_dir() {
             println!("{}", dir.display());
         }
@@ -22,19 +22,26 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     match cli.command {
-        Some(Command::Update) => {
+        Some(Command::Update { force }) => {
             reject_worktree(cli.worktree.as_ref())?;
-            update::run().await
+            reject_continue(cli.r#continue)?;
+            update::run(force).await
         }
         Some(Command::Auth(command)) => {
             reject_worktree(cli.worktree.as_ref())?;
+            reject_continue(cli.r#continue)?;
             auth::run(command).await
         }
         Some(Command::Worktree(command)) => {
             reject_worktree(cli.worktree.as_ref())?;
-            worktree::run(command).map_err(color_eyre::Report::from)
+            reject_continue(cli.r#continue)?;
+            let result = match command {
+                WorktreeCommand::List => goat_worktree::list(),
+                WorktreeCommand::Remove { label } => goat_worktree::remove(&label),
+            };
+            result.map_err(color_eyre::Report::from)
         }
-        None => run_tui(cli.worktree).await,
+        None => run_tui(cli.worktree, cli.r#continue).await,
     }
 }
 
@@ -45,9 +52,16 @@ fn reject_worktree(worktree: Option<&String>) -> color_eyre::Result<()> {
     Ok(())
 }
 
-async fn run_tui(worktree_label: Option<String>) -> color_eyre::Result<()> {
+fn reject_continue(r#continue: bool) -> color_eyre::Result<()> {
+    if r#continue {
+        return Err(eyre!("--continue can only be used when launching the TUI"));
+    }
+    Ok(())
+}
+
+async fn run_tui(worktree_label: Option<String>, r#continue: bool) -> color_eyre::Result<()> {
     if let Some(label) = worktree_label.as_deref() {
-        worktree::enter(label)?;
+        goat_worktree::enter(label)?;
     }
 
     goat_tui::install_hooks()?;
@@ -66,11 +80,16 @@ async fn run_tui(worktree_label: Option<String>) -> color_eyre::Result<()> {
     let credentials = goat_auth::CredentialStore::new(auth_path);
     let store = goat_store::Store::open(&db_path)?;
     let registry = goat_providers::Registry::new(&credentials);
-    let agent = goat_agent::GoatAgent::new(registry, store, credentials, None);
+    let agent = goat_agent::GoatAgent::new(registry, store, credentials, None).await;
 
     let session = goat_core::Session::spawn(agent);
     let (ops, events, handle) = session.into_parts();
-    goat_tui::run(ops, events, theme).await?;
+    let initial_ops = if r#continue {
+        vec![goat_protocol::Op::ResumeLatest]
+    } else {
+        Vec::new()
+    };
+    goat_tui::run(ops, events, theme, initial_ops).await?;
     handle.await.ok();
     Ok(())
 }

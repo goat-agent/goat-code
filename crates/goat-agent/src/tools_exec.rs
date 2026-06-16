@@ -1,4 +1,4 @@
-use goat_protocol::{Event, ToolCall, ToolCallId, ToolDisplay, ToolOutcome};
+use goat_protocol::{Event, ToolCall, ToolCallId, ToolDisplay, ToolImageData, ToolOutcome};
 use goat_provider::{ContentBlock, Provider, ToolDefinition};
 use goat_tool::{ToolContent, ToolContext, ToolOutput};
 use goat_tools::ToolRegistry;
@@ -47,11 +47,27 @@ pub(crate) fn tool_outcome(result: &Result<ToolOutput, String>) -> ToolOutcome {
         Ok(output) => ToolOutcome {
             ok: true,
             summary: output.summary.clone(),
+            image: outcome_image(&output.content),
         },
         Err(message) => ToolOutcome {
             ok: false,
             summary: Some(message.clone()),
+            image: None,
         },
+    }
+}
+
+const MAX_OUTCOME_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+fn outcome_image(content: &ToolContent) -> Option<ToolImageData> {
+    match content {
+        ToolContent::Image(img) if img.data.len() <= MAX_OUTCOME_IMAGE_BYTES => {
+            Some(ToolImageData {
+                media_type: img.media_type.clone(),
+                data: img.data.clone(),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -139,14 +155,15 @@ async fn execute_tool(
                     .map(ToolOutput::text),
             )
         } else if prep.name == ASK_TOOL_NAME && env.allow_delegate {
-            Some(
-                run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token)
-                    .await
-                    .map(ToolOutput::text),
-            )
+            Some(run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token).await)
         } else if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
-            match ctx.semaphore.acquire().await {
-                Ok(_permit) if !token.is_cancelled() => Some(
+            let permit = tokio::select! {
+                biased;
+                () = token.cancelled() => None,
+                acquired = ctx.semaphore.acquire() => acquired.ok(),
+            };
+            match permit {
+                Some(_permit) if !token.is_cancelled() => Some(
                     run_delegation(ctx, env, prep.input_json, run.id, token)
                         .await
                         .map(ToolOutput::text),
@@ -160,6 +177,7 @@ async fn execute_tool(
         let outcome = ToolOutcome {
             ok: false,
             summary: Some("interrupted".to_owned()),
+            image: None,
         };
         finish_tool_db(ctx, prep.db_id, &outcome).await;
         let _ = ctx
@@ -304,4 +322,37 @@ pub(crate) fn build_tool_defs(
         TransitionTool::Propose => defs.push(propose_plan_tool_def()),
     }
     defs
+}
+
+#[cfg(test)]
+mod tests {
+    use goat_tool::{ToolImage, ToolOutput};
+
+    use super::tool_outcome;
+
+    #[test]
+    fn image_output_populates_outcome_image() {
+        let output = ToolOutput::image(ToolImage {
+            media_type: "image/png".to_owned(),
+            data: "AAAA".to_owned(),
+        });
+        let outcome = tool_outcome(&Ok(output));
+        assert!(outcome.ok);
+        let image = outcome.image.expect("image attached");
+        assert_eq!(image.media_type, "image/png");
+        assert_eq!(image.data, "AAAA");
+    }
+
+    #[test]
+    fn text_output_has_no_image() {
+        let outcome = tool_outcome(&Ok(ToolOutput::text("hi")));
+        assert!(outcome.image.is_none());
+    }
+
+    #[test]
+    fn error_output_has_no_image() {
+        let outcome = tool_outcome(&Err("boom".to_owned()));
+        assert!(!outcome.ok);
+        assert!(outcome.image.is_none());
+    }
 }

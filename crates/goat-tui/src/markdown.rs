@@ -113,7 +113,7 @@ impl<'a> RenderState<'a> {
             Event::End(TagEnd::CodeBlock) => self.handle_code_block_end(),
             Event::Start(Tag::Link { dest_url, .. }) => {
                 self.link_url = Some(dest_url.to_string());
-                self.link_text_start = self.current_spans.len();
+                self.link_text_start = self.active_spans().len();
             }
             Event::End(TagEnd::Link) => self.handle_link_end(),
             Event::Start(Tag::Table(alignments)) => self.handle_table_start(alignments.len()),
@@ -233,18 +233,27 @@ impl<'a> RenderState<'a> {
         self.code_lang.clear();
     }
 
+    fn active_spans(&mut self) -> &mut Vec<Span<'static>> {
+        if self.in_table {
+            &mut self.current_cell
+        } else {
+            &mut self.current_spans
+        }
+    }
+
     fn handle_link_end(&mut self) {
         if let Some(url) = self.link_url.take() {
-            let text: String = self.current_spans[self.link_text_start..]
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
-            for span in &mut self.current_spans[self.link_text_start..] {
-                span.style = span.style.fg(self.theme.accent_color());
+            let accent = self.theme.accent_color();
+            let muted = self.theme.muted();
+            let in_table = self.in_table;
+            let start = self.link_text_start;
+            let spans = self.active_spans();
+            let text: String = spans[start..].iter().map(|s| s.content.as_ref()).collect();
+            for span in &mut spans[start..] {
+                span.style = span.style.fg(accent);
             }
-            if !url.is_empty() && url != text {
-                self.current_spans
-                    .push(Span::styled(format!(" ({url})"), self.theme.muted()));
+            if !in_table && !url.is_empty() && url != text {
+                spans.push(Span::styled(format!(" ({url})"), muted));
             }
         }
         self.link_text_start = 0;
@@ -643,6 +652,22 @@ mod tests {
             .expect("link span");
         assert_eq!(link.style.fg, Some(theme.accent_color()));
         assert!(!link.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn link_inside_table_cell_is_accented() {
+        let theme = Theme::dark();
+        let table = "| name | link |\n| --- | --- |\n| a | [docs](https://example.com) |";
+        let lines = render(table, theme, &PlainHighlighter);
+        let spans: Vec<_> = lines.iter().flat_map(|l| &l.spans).collect();
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("docs"));
+        assert!(!text.contains("example.com"));
+        let link = spans
+            .iter()
+            .find(|s| s.content.contains("docs"))
+            .expect("table link span");
+        assert_eq!(link.style.fg, Some(theme.accent_color()));
     }
 
     #[test]

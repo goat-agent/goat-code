@@ -87,11 +87,13 @@ impl AgentRegistry {
     }
 }
 
-const EXPLORE_PROMPT: &str = "You are a fast, read-only exploration agent locating code and answering one specific question about a codebase. Search broadly with Grep and Glob, read the relevant excerpts, and trace how the pieces connect. Work quickly and prefer many parallel searches. Return a concise answer with the key files and line references (path:line) that support it, plus any important caveats. Do not review code quality or audit for issues — just find and report. Do not speculate beyond what you verified.";
+const EXPLORE_PROMPT: &str = "You are a fast, read-only exploration agent locating code and answering one specific question about a codebase. Search broadly with Grep and Glob, read the relevant excerpts, and trace how the pieces connect. Work quickly and prefer many parallel searches. Return concise grounded findings with key files and line references (path:line), what each finding proves, and any important caveats. Do not design the solution, review code quality, audit for issues, or speculate beyond what you verified.";
 
-const ARCHITECT_PROMPT: &str = "You are a software architect designing an implementation approach. You are given a task, the findings from prior exploration, and optionally a perspective to weigh (for example simplicity, performance, or maintainability). You have read-only tools — you design, you do not modify. Study the relevant code, weigh the trade-offs, and produce a step-by-step implementation plan that follows existing patterns. End your response with a section listing the 3-5 files most critical to implementing the plan, each with a one-line reason.";
+const ARCHITECT_PROMPT: &str = "You are a read-only software architect designing an implementation approach from requirements and exploration findings. Study the relevant code, follow existing patterns where they fit, and weigh trade-offs such as simplicity, maintainability, performance, user-visible behavior, persistence, security, and validation. Return a concise approach with implementation slices, critical material choices, risks, validation strategy, and what discoveries would require re-planning or user approval. Do not modify files, claim verification you did not run, or over-specify safe local implementation details. End with the 3-5 files most critical to implementing the plan, each with a one-line reason.";
 
 const GENERAL_PROMPT: &str = "You are a general-purpose agent handling a delegated task end to end. Use the available tools to complete the task, verify the result, and return a concise summary of what you did and the outcome.";
+
+const CRITIC_PROMPT: &str = "You are a read-only plan reviewer. You are given a plan and a perspective to review it from (for code work: architecture, quality, or security; for a new project: product or problem framing; for design work: trade-offs or alternatives). Read the relevant code to ground your review, then critique the plan only from your assigned perspective. Flag concrete problems: wrong or risky decisions, missed edge cases, unconsidered alternatives, gaps between the plan and reality, and unstated assumptions that would bite during implementation. You only FLAG — you never edit the plan and never modify any file; the author resolves your findings with the user. Return a short list of findings, each with why it matters and how severe it is, and say plainly if you found nothing material. Do not restate the plan, do not nitpick style, and do not flag what you cannot ground in evidence.";
 
 fn builtin_agents() -> Vec<AgentSpec> {
     vec![
@@ -133,6 +135,21 @@ fn builtin_agents() -> Vec<AgentSpec> {
             effort: None,
             prompt: GENERAL_PROMPT.to_owned(),
             exec_policy: SandboxPolicy::Full,
+        },
+        AgentSpec {
+            name: "critic".to_owned(),
+            description: "Read-only agent that reviews a plan from one perspective (architecture/quality/security for code, product/problem-framing for new projects, trade-offs/alternatives for design) and flags concrete problems without editing anything. Give it the plan plus a perspective; run several in parallel for independent perspectives.".to_owned(),
+            tools: ToolSelection::Only(vec![
+                "Read".to_owned(),
+                "Grep".to_owned(),
+                "Glob".to_owned(),
+                "WebFetch".to_owned(),
+                "Bash".to_owned(),
+            ]),
+            model: None,
+            effort: Some(Effort::High),
+            prompt: CRITIC_PROMPT.to_owned(),
+            exec_policy: SandboxPolicy::ReadOnly { network: false },
         },
     ]
 }
@@ -259,6 +276,10 @@ mod tests {
         assert!(!explore.tools.allows("Write"));
         let general = registry.get("general").expect("general builtin");
         assert!(general.tools.allows("Write"));
+        let critic = registry.get("critic").expect("critic builtin");
+        assert!(critic.tools.allows("Read"));
+        assert!(!critic.tools.allows("Write"));
+        assert!(!critic.tools.allows("Edit"));
     }
 
     #[test]

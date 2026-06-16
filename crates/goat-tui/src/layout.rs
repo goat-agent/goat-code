@@ -1,8 +1,8 @@
 pub const PAD_X: u16 = 1;
 pub const SCROLL_GUTTER: u16 = 1;
 pub const OVERLAY_W: u16 = 64;
-pub const OVERLAY_CHROME: u16 = 6;
-pub const OVERLAY_CHROME_PLAIN: u16 = 4;
+pub const OVERLAY_CHROME: u16 = 4;
+pub const OVERLAY_CHROME_PLAIN: u16 = 3;
 pub const LIST_MAX: usize = 10;
 pub const METER_WARN: f32 = 70.0;
 pub const METER_HIGH: f32 = 90.0;

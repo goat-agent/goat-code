@@ -4,7 +4,6 @@ pub mod marker {
     pub const NOTICE: &str = "→ ";
     pub const ERROR: &str = "✗ ";
     pub const PROMPT: &str = "❯ ";
-    pub const PLAN: &str = "✦ ";
     pub const SHELL: &str = "! ";
 }
 
@@ -20,6 +19,7 @@ pub mod ui {
     pub const SEPARATOR: &str = " · ";
     pub const ELLIPSIS: &str = "…";
     pub const QUOTE_GUTTER: &str = "▎ ";
+    pub const RULE: &str = "──────────";
     pub const HRULE: &str = "\u{1}hrule\u{1}";
     pub const MORE_ABOVE: &str = "↑";
     pub const MORE_BELOW: &str = "↓";

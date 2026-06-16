@@ -81,7 +81,8 @@ pub async fn ensure_session(
         }
         *slot = Some(launch().await?);
     }
-    Ok(slot.as_mut().expect("session was set above"))
+    slot.as_mut()
+        .ok_or_else(|| BrowserError::Message("browser session unavailable".to_owned()))
 }
 
 async fn launch() -> Result<BrowserSession, BrowserError> {
@@ -292,7 +293,7 @@ impl BrowserSession {
             }
             None => "undefined".to_owned(),
         };
-        Ok(cap(rendered, max_bytes))
+        Ok(goat_tool::truncate(rendered, max_bytes))
     }
 
     async fn screenshot(&self) -> Result<ToolImage, BrowserError> {
@@ -376,15 +377,6 @@ fn normalize_url(url: &str) -> Result<String, BrowserError> {
         )));
     }
     Ok(format!("https://{trimmed}"))
-}
-
-fn cap(mut text: String, max_bytes: usize) -> String {
-    if text.len() > max_bytes {
-        let boundary = text.floor_char_boundary(max_bytes);
-        text.truncate(boundary);
-        text.push_str("\n[output truncated]");
-    }
-    text
 }
 
 fn downscale_png(bytes: &[u8]) -> Option<Vec<u8>> {

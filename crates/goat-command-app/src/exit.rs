@@ -1,4 +1,4 @@
-use goat_command::{Command, CommandEffect};
+use goat_command::{Command, CommandEffect, CommandInvocation};
 
 pub struct Exit;
 
@@ -15,7 +15,7 @@ impl Command for Exit {
         "quit goat-code"
     }
 
-    fn run(&self, _args: &str) -> CommandEffect {
+    fn run(&self, _invocation: CommandInvocation) -> CommandEffect {
         CommandEffect::Quit
     }
 }

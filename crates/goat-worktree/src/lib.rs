@@ -1,20 +1,24 @@
+mod error;
+mod git;
+mod metadata;
+
 use std::{
-    ffi::OsString,
     fs,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use ignore::gitignore::GitignoreBuilder;
-use serde::{Deserialize, Serialize};
 
-use crate::cli::WorktreeCommand;
+pub use error::WorktreeError;
+use git::{
+    ExistingBase, GitWorktree, branch_exists, commit_oid, common_dir, git_output, git_path,
+    git_worktrees, is_dirty, os, repo_root, resolve_base_ref, validate_branch_name,
+};
+use metadata::{metadata_path, read_metadata, write_metadata_open};
 
 const GOAT_DIR: &str = ".goat";
 const WORKTREES_DIR: &str = "worktrees";
-const METADATA_DIR: &str = ".metadata";
 const BRANCH_PREFIX: &str = "worktree-";
 const EXCLUDE_ENTRY: &str = ".goat/worktrees/";
 
@@ -28,14 +32,7 @@ pub fn enter(label: &str) -> Result<PathBuf, WorktreeError> {
     Ok(launch.path)
 }
 
-pub fn run(command: WorktreeCommand) -> Result<(), WorktreeError> {
-    match command {
-        WorktreeCommand::List => list(),
-        WorktreeCommand::Remove { label } => remove(&label),
-    }
-}
-
-fn list() -> Result<(), WorktreeError> {
+pub fn list() -> Result<(), WorktreeError> {
     let cwd = std::env::current_dir().map_err(|source| WorktreeError::CurrentDir { source })?;
     let repo = Repo::discover(&cwd)?;
     let entries = managed_worktrees(&repo)?;
@@ -60,7 +57,7 @@ fn list() -> Result<(), WorktreeError> {
     Ok(())
 }
 
-fn remove(label: &str) -> Result<(), WorktreeError> {
+pub fn remove(label: &str) -> Result<(), WorktreeError> {
     let cwd = std::env::current_dir().map_err(|source| WorktreeError::CurrentDir { source })?;
     remove_from_cwd(label, &cwd)
 }
@@ -124,7 +121,7 @@ fn prepare_from_cwd(label: &str, cwd: &Path) -> Result<Launch, WorktreeError> {
 
     if path.exists() {
         verify_existing_worktree(&repo, &path)?;
-        write_metadata_open(&repo, label, &path, &branch, None)?;
+        write_metadata_open(&repo.bucket, label, &path, &branch, None)?;
         return Ok(Launch { path });
     }
 
@@ -177,9 +174,9 @@ fn prepare_from_cwd(label: &str, cwd: &Path) -> Result<Launch, WorktreeError> {
 
     copy_worktree_include(cwd, &path)?;
     match &base {
-        ExistingBase::Branch(_) => write_metadata_open(&repo, label, &path, &branch, None)?,
+        ExistingBase::Branch(_) => write_metadata_open(&repo.bucket, label, &path, &branch, None)?,
         ExistingBase::Ref(base_ref) => write_metadata_open(
-            &repo,
+            &repo.bucket,
             label,
             &path,
             &branch,
@@ -209,35 +206,6 @@ impl Repo {
             bucket,
         })
     }
-}
-
-#[derive(Clone)]
-struct GitWorktree {
-    path: PathBuf,
-    branch: Option<String>,
-}
-
-#[derive(Clone)]
-struct BaseRef {
-    name: String,
-    kind: String,
-    oid: String,
-}
-
-enum ExistingBase {
-    Branch(String),
-    Ref(BaseRef),
-}
-
-#[derive(Serialize, Deserialize)]
-struct Metadata {
-    label: String,
-    path: String,
-    branch: String,
-    created_base_ref_kind: Option<String>,
-    created_base_oid: Option<String>,
-    created_at_ms: u128,
-    last_opened_at_ms: u128,
 }
 
 struct ManagedWorktree {
@@ -294,44 +262,6 @@ fn branch_name(label: &str) -> String {
     format!("{BRANCH_PREFIX}{label}")
 }
 
-fn validate_branch_name(root: &Path, branch: &str) -> Result<(), WorktreeError> {
-    git_output(root, &[os("check-ref-format"), os("--branch"), os(branch)])?;
-    Ok(())
-}
-
-fn repo_root(cwd: &Path) -> Result<PathBuf, WorktreeError> {
-    let status = git_status(cwd, &[os("rev-parse"), os("--show-toplevel")])?;
-    if !status.status.success() {
-        return Err(WorktreeError::NotGitRepository);
-    }
-    let raw = status.stdout.trim();
-    if raw.is_empty() {
-        return Err(WorktreeError::NotGitRepository);
-    }
-    PathBuf::from(raw)
-        .canonicalize()
-        .map_err(|source| WorktreeError::Io {
-            path: PathBuf::from(raw),
-            source,
-        })
-}
-
-fn common_dir(root: &Path) -> Result<PathBuf, WorktreeError> {
-    let output = git_output(root, &[os("rev-parse"), os("--git-common-dir")])?;
-    let raw = output.stdout.trim();
-    if raw.is_empty() {
-        return Err(WorktreeError::NotGitRepository);
-    }
-    let path = PathBuf::from(raw);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    };
-    path.canonicalize()
-        .map_err(|source| WorktreeError::Io { path, source })
-}
-
 fn owner_root(current_root: &Path, worktrees: &[GitWorktree]) -> PathBuf {
     for worktree in worktrees {
         let bucket = worktree.path.join(GOAT_DIR).join(WORKTREES_DIR);
@@ -340,47 +270,6 @@ fn owner_root(current_root: &Path, worktrees: &[GitWorktree]) -> PathBuf {
         }
     }
     current_root.to_path_buf()
-}
-
-fn git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, WorktreeError> {
-    let output = git_output(root, &[os("worktree"), os("list"), os("--porcelain")])?;
-    Ok(parse_worktrees(&output.stdout))
-}
-
-fn parse_worktrees(input: &str) -> Vec<GitWorktree> {
-    let mut out = Vec::new();
-    let mut path: Option<PathBuf> = None;
-    let mut branch: Option<String> = None;
-    for line in input.lines() {
-        if line.is_empty() {
-            if let Some(path) = path.take() {
-                out.push(GitWorktree {
-                    path,
-                    branch: branch.take(),
-                });
-            }
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("worktree ") {
-            if let Some(path) = path.replace(PathBuf::from(value)) {
-                out.push(GitWorktree {
-                    path,
-                    branch: branch.take(),
-                });
-            }
-        } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
-            branch = Some(value.to_owned());
-        }
-    }
-    if let Some(path) = path {
-        out.push(GitWorktree { path, branch });
-    }
-    for worktree in &mut out {
-        if let Ok(canonical) = worktree.path.canonicalize() {
-            worktree.path = canonical;
-        }
-    }
-    out
 }
 
 fn verify_existing_worktree(repo: &Repo, path: &Path) -> Result<(), WorktreeError> {
@@ -398,89 +287,6 @@ fn verify_existing_worktree(repo: &Repo, path: &Path) -> Result<(), WorktreeErro
         });
     }
     Ok(())
-}
-
-fn branch_exists(root: &Path, branch: &str) -> Result<bool, WorktreeError> {
-    let status = git_status(
-        root,
-        &[
-            os("show-ref"),
-            os("--verify"),
-            os("--quiet"),
-            os(&format!("refs/heads/{branch}")),
-        ],
-    )?;
-    match status.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(WorktreeError::GitFailed {
-            command: status.command,
-            status: status.status.code(),
-            stdout: status.stdout,
-            stderr: status.stderr,
-        }),
-    }
-}
-
-fn resolve_base_ref(root: &Path) -> Result<BaseRef, WorktreeError> {
-    if commit_exists(root, "origin/HEAD")? {
-        return Ok(BaseRef {
-            name: "origin/HEAD".to_owned(),
-            kind: "origin_head".to_owned(),
-            oid: commit_oid(root, "origin/HEAD")?,
-        });
-    }
-    Ok(BaseRef {
-        name: "HEAD".to_owned(),
-        kind: "head".to_owned(),
-        oid: commit_oid(root, "HEAD")?,
-    })
-}
-
-fn commit_exists(root: &Path, reference: &str) -> Result<bool, WorktreeError> {
-    let status = git_status(
-        root,
-        &[
-            os("rev-parse"),
-            os("--verify"),
-            os("--quiet"),
-            os(&format!("{reference}^{{commit}}")),
-        ],
-    )?;
-    match status.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(WorktreeError::GitFailed {
-            command: status.command,
-            status: status.status.code(),
-            stdout: status.stdout,
-            stderr: status.stderr,
-        }),
-    }
-}
-
-fn commit_oid(root: &Path, reference: &str) -> Result<String, WorktreeError> {
-    let output = git_output(
-        root,
-        &[
-            os("rev-parse"),
-            os("--verify"),
-            os(&format!("{reference}^{{commit}}")),
-        ],
-    )?;
-    Ok(output.stdout.trim().to_owned())
-}
-
-fn is_dirty(path: &Path) -> Result<bool, WorktreeError> {
-    let output = git_output(
-        path,
-        &[
-            os("status"),
-            os("--porcelain=v1"),
-            os("--untracked-files=normal"),
-        ],
-    )?;
-    Ok(!output.stdout.trim().is_empty())
 }
 
 fn has_unique_commits(repo: &Repo, label: &str, branch: &str) -> Result<bool, WorktreeError> {
@@ -641,205 +447,12 @@ fn copy_worktree_include(invocation_cwd: &Path, target: &Path) -> Result<(), Wor
     Ok(())
 }
 
-fn write_metadata_open(
-    repo: &Repo,
-    label: &str,
-    path: &Path,
-    branch: &str,
-    base: Option<(String, String)>,
-) -> Result<(), WorktreeError> {
-    let now = now_ms();
-    let existing = read_metadata(&repo.bucket, label)?;
-    let (created_at_ms, created_base_ref_kind, created_base_oid) = match (existing, base) {
-        (Some(metadata), None) => (
-            metadata.created_at_ms,
-            metadata.created_base_ref_kind,
-            metadata.created_base_oid,
-        ),
-        (Some(metadata), Some((kind, oid))) => (
-            metadata.created_at_ms,
-            Some(kind).or(metadata.created_base_ref_kind),
-            Some(oid).or(metadata.created_base_oid),
-        ),
-        (None, Some((kind, oid))) => (now, Some(kind), Some(oid)),
-        (None, None) => (now, None, None),
-    };
-    let metadata = Metadata {
-        label: label.to_owned(),
-        path: path.display().to_string(),
-        branch: branch.to_owned(),
-        created_base_ref_kind,
-        created_base_oid,
-        created_at_ms,
-        last_opened_at_ms: now,
-    };
-    let metadata_path = metadata_path(&repo.bucket, label);
-    if let Some(parent) = metadata_path.parent() {
-        fs::create_dir_all(parent).map_err(|source| WorktreeError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    let body = serde_json::to_vec_pretty(&metadata).map_err(WorktreeError::Json)?;
-    fs::write(&metadata_path, body).map_err(|source| WorktreeError::Io {
-        path: metadata_path,
-        source,
-    })
-}
-
-fn read_metadata(bucket: &Path, label: &str) -> Result<Option<Metadata>, WorktreeError> {
-    let path = metadata_path(bucket, label);
-    let body = match fs::read(&path) {
-        Ok(body) => body,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(WorktreeError::Io { path, source }),
-    };
-    serde_json::from_slice(&body)
-        .map(Some)
-        .map_err(WorktreeError::Json)
-}
-
-fn metadata_path(bucket: &Path, label: &str) -> PathBuf {
-    bucket.join(METADATA_DIR).join(format!("{label}.json"))
-}
-
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis())
-}
-
-struct GitOutput {
-    stdout: String,
-}
-
-struct GitStatus {
-    command: String,
-    status: ExitStatus,
-    stdout: String,
-    stderr: String,
-}
-
-fn git_output(cwd: &Path, args: &[OsString]) -> Result<GitOutput, WorktreeError> {
-    let status = git_status(cwd, args)?;
-    if status.status.success() {
-        Ok(GitOutput {
-            stdout: status.stdout,
-        })
-    } else {
-        Err(WorktreeError::GitFailed {
-            command: status.command,
-            status: status.status.code(),
-            stdout: status.stdout,
-            stderr: status.stderr,
-        })
-    }
-}
-
-fn git_status(cwd: &Path, args: &[OsString]) -> Result<GitStatus, WorktreeError> {
-    let command = format_command(args);
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|source| {
-            if source.kind() == ErrorKind::NotFound {
-                WorktreeError::GitMissing
-            } else {
-                WorktreeError::Spawn { source }
-            }
-        })?;
-    Ok(GitStatus {
-        command,
-        status: output.status,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
-}
-
-fn format_command(args: &[OsString]) -> String {
-    let mut parts = vec!["git".to_owned()];
-    parts.extend(args.iter().map(|arg| arg.to_string_lossy().into_owned()));
-    parts.join(" ")
-}
-
-fn os(value: &str) -> OsString {
-    OsString::from(value)
-}
-
-#[cfg(windows)]
-fn git_path(path: &Path) -> OsString {
-    let value = path.to_string_lossy();
-    let value = if let Some(stripped) = value.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{stripped}")
-    } else if let Some(stripped) = value.strip_prefix(r"\\?\") {
-        stripped.to_owned()
-    } else {
-        value.into_owned()
-    };
-    value.replace('\\', "/").into()
-}
-
-#[cfg(not(windows))]
-fn git_path(path: &Path) -> OsString {
-    path.as_os_str().to_os_string()
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum WorktreeError {
-    #[error("git is required for --worktree but was not found")]
-    GitMissing,
-    #[error("--worktree requires running goat inside a git repository")]
-    NotGitRepository,
-    #[error("invalid worktree label '{label}': {reason}")]
-    InvalidLabel { label: String, reason: &'static str },
-    #[error("failed to get current directory: {source}")]
-    CurrentDir { source: std::io::Error },
-    #[error("failed to enter worktree {path}: {source}")]
-    Enter {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("io error on {path}: {source}")]
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("failed to spawn git: {source}")]
-    Spawn { source: std::io::Error },
-    #[error("git command failed ({command}) with status {status:?}: {stderr}{stdout}")]
-    GitFailed {
-        command: String,
-        status: Option<i32>,
-        stdout: String,
-        stderr: String,
-    },
-    #[error("worktree path already exists and is not a managed worktree: {path}")]
-    PathCollision { path: PathBuf },
-    #[error("worktree path belongs to a different git repository: {path}")]
-    WrongRepository { path: PathBuf },
-    #[error("branch {branch} is already checked out at {path}")]
-    BranchCheckedOut { branch: String, path: PathBuf },
-    #[error("unknown managed worktree: {label}")]
-    UnknownWorktree { label: String },
-    #[error("worktree {label} has uncommitted changes or untracked files")]
-    DirtyWorktree { label: String },
-    #[error("worktree {label} has commits only on {branch}")]
-    UniqueCommits { label: String, branch: String },
-    #[error("invalid .worktreeinclude at {path}: {message}")]
-    IgnorePattern { path: PathBuf, message: String },
-    #[error("invalid worktree metadata: {0}")]
-    Json(serde_json::Error),
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, process::Command};
+    use std::{fs, path::Path, process::Command, process::Stdio};
 
-    use super::*;
+    use super::{EXCLUDE_ENTRY, WorktreeError, prepare_from_cwd, remove_from_cwd, validate_label};
+    use crate::git::{branch_exists, parse_worktrees};
 
     fn git_available() -> bool {
         Command::new("git")

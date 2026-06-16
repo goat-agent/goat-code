@@ -9,13 +9,19 @@ pub struct Cli {
     #[arg(long, short = 'w', value_name = "NAME")]
     pub worktree: Option<String>,
 
+    #[arg(long, short = 'c')]
+    pub r#continue: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 pub enum Command {
-    Update,
+    Update {
+        #[arg(long)]
+        force: bool,
+    },
     #[command(subcommand)]
     Auth(AuthCommand),
     #[command(subcommand)]
@@ -71,6 +77,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_short_continue_flag() {
+        let cli = Cli::try_parse_from(["goat", "-c"]).unwrap();
+        assert!(cli.r#continue);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parses_long_continue_flag() {
+        let cli = Cli::try_parse_from(["goat", "--continue"]).unwrap();
+        assert!(cli.r#continue);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn continue_defaults_off() {
+        let cli = Cli::try_parse_from(["goat"]).unwrap();
+        assert!(!cli.r#continue);
+    }
+
+    #[test]
     fn parses_worktree_list() {
         let cli = Cli::try_parse_from(["goat", "worktree", "list"]).unwrap();
         assert!(matches!(
@@ -86,5 +112,20 @@ mod tests {
             cli.command,
             Some(Command::Worktree(WorktreeCommand::Remove { label })) if label == "plan"
         ));
+    }
+
+    #[test]
+    fn parses_update() {
+        let cli = Cli::try_parse_from(["goat", "update"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Update { force: false })
+        ));
+    }
+
+    #[test]
+    fn parses_update_force() {
+        let cli = Cli::try_parse_from(["goat", "update", "--force"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Update { force: true })));
     }
 }

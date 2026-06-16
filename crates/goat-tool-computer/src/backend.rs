@@ -132,11 +132,17 @@ mod desktop {
 
     const TARGET_WIDTH: u32 = 1366;
     const TARGET_HEIGHT: u32 = 768;
+    const MAX_WAIT_MS: u64 = 60_000;
+
+    fn clamp_wait(ms: u64) -> Duration {
+        Duration::from_millis(ms.min(MAX_WAIT_MS))
+    }
 
     pub struct DesktopBackendImpl {
         target_w: u32,
         target_h: u32,
         scale: f64,
+        enigo: std::sync::Mutex<Option<Enigo>>,
     }
 
     impl DesktopBackendImpl {
@@ -158,6 +164,7 @@ mod desktop {
                 target_w,
                 target_h,
                 scale,
+                enigo: std::sync::Mutex::new(None),
             })
         }
 
@@ -183,7 +190,7 @@ mod desktop {
             match action {
                 Action::Screenshot | Action::Zoom { .. } => Ok(()),
                 Action::Wait { duration_ms } => {
-                    sleep(Duration::from_millis(*duration_ms));
+                    sleep(clamp_wait(*duration_ms));
                     Ok(())
                 }
                 _ => self.execute_input(action),
@@ -225,7 +232,14 @@ mod desktop {
         }
 
         fn execute_input(&self, action: &Action) -> Result<(), ComputerError> {
-            let mut enigo = Enigo::new(&Settings::default())?;
+            let mut guard = self
+                .enigo
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let enigo = match guard.as_mut() {
+                Some(enigo) => enigo,
+                None => guard.insert(Enigo::new(&Settings::default())?),
+            };
             match action {
                 Action::Screenshot | Action::Zoom { .. } | Action::Wait { .. } => {}
 
@@ -235,19 +249,19 @@ mod desktop {
                 }
 
                 Action::LeftClick { x, y, modifiers } => {
-                    self.click(&mut enigo, Button::Left, *x, *y, modifiers, 1)?;
+                    self.click(&mut *enigo, Button::Left, *x, *y, modifiers, 1)?;
                 }
                 Action::RightClick { x, y, modifiers } => {
-                    self.click(&mut enigo, Button::Right, *x, *y, modifiers, 1)?;
+                    self.click(&mut *enigo, Button::Right, *x, *y, modifiers, 1)?;
                 }
                 Action::MiddleClick { x, y, modifiers } => {
-                    self.click(&mut enigo, Button::Middle, *x, *y, modifiers, 1)?;
+                    self.click(&mut *enigo, Button::Middle, *x, *y, modifiers, 1)?;
                 }
                 Action::DoubleClick { x, y, modifiers } => {
-                    self.click(&mut enigo, Button::Left, *x, *y, modifiers, 2)?;
+                    self.click(&mut *enigo, Button::Left, *x, *y, modifiers, 2)?;
                 }
                 Action::TripleClick { x, y, modifiers } => {
-                    self.click(&mut enigo, Button::Left, *x, *y, modifiers, 3)?;
+                    self.click(&mut *enigo, Button::Left, *x, *y, modifiers, 3)?;
                 }
 
                 Action::MouseDown { x, y } => {
@@ -265,7 +279,7 @@ mod desktop {
                     let Some(&(fx, fy)) = path.first() else {
                         return Ok(());
                     };
-                    press_modifiers(&mut enigo, modifiers)?;
+                    press_modifiers(&mut *enigo, modifiers)?;
                     let (sx, sy) = self.real_coord(fx, fy);
                     enigo.move_mouse(sx, sy, Coordinate::Abs)?;
                     enigo.button(Button::Left, Direction::Press)?;
@@ -274,7 +288,7 @@ mod desktop {
                         enigo.move_mouse(rx, ry, Coordinate::Abs)?;
                     }
                     enigo.button(Button::Left, Direction::Release)?;
-                    release_modifiers(&mut enigo, modifiers)?;
+                    release_modifiers(&mut *enigo, modifiers)?;
                 }
 
                 Action::Scroll {
@@ -285,7 +299,7 @@ mod desktop {
                     modifiers,
                 } => {
                     let (rx, ry) = self.real_coord(*x, *y);
-                    press_modifiers(&mut enigo, modifiers)?;
+                    press_modifiers(&mut *enigo, modifiers)?;
                     enigo.move_mouse(rx, ry, Coordinate::Abs)?;
                     if *dy != 0 {
                         enigo.scroll(*dy, Axis::Vertical)?;
@@ -293,18 +307,18 @@ mod desktop {
                     if *dx != 0 {
                         enigo.scroll(*dx, Axis::Horizontal)?;
                     }
-                    release_modifiers(&mut enigo, modifiers)?;
+                    release_modifiers(&mut *enigo, modifiers)?;
                 }
 
                 Action::Type { text } => enigo.text(text)?,
 
-                Action::Key { combo } => execute_key_combo(&mut enigo, combo)?,
+                Action::Key { combo } => execute_key_combo(&mut *enigo, combo)?,
 
                 Action::HoldKey { key, duration_ms } => {
                     let k = parse_key_name(key)
                         .ok_or_else(|| ComputerError::UnknownKey(key.clone()))?;
                     enigo.key(k, Direction::Press)?;
-                    sleep(Duration::from_millis(*duration_ms));
+                    sleep(clamp_wait(*duration_ms));
                     enigo.key(k, Direction::Release)?;
                 }
             }

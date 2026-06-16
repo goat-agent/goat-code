@@ -267,6 +267,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
             working: working.as_ref(),
             queued: &queued,
             hl: &app.highlighter,
+            picker: app.picker.as_ref(),
         },
     );
     if app.follow() {
@@ -377,7 +378,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 
 fn plan_desired_height(area_height: u16) -> u16 {
     let max = area_height.saturating_sub(3).max(9);
-    let preferred = area_height.div_ceil(2).max(9);
+    let preferred = (area_height / 3).max(9);
     preferred.min(max)
 }
 
@@ -388,11 +389,9 @@ fn render_plan_overlay(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme:
     let Some(inner) = overlay::overlay_frame(frame, outer, theme) else {
         return;
     };
-    let [title, _, preview, _, actions, hint] = Layout::vertical([
-        Constraint::Length(1),
+    let [title, preview, actions, hint] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
-        Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Length(1),
     ])
@@ -411,7 +410,7 @@ fn render_plan_overlay(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme:
 fn render_plan_title(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme: Theme) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" Plan ready", theme.base()),
+            Span::styled(" plan", theme.plan()),
             Span::styled(format!("  {}", plan.path), theme.muted()),
         ])),
         area,

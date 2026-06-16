@@ -227,3 +227,92 @@ pub fn parse(input: &str) -> Result<Action, ComputerError> {
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Action, Modifiers, parse};
+
+    #[test]
+    fn screenshot_parses() {
+        assert!(matches!(
+            parse(r#"{"action":"screenshot"}"#).unwrap(),
+            Action::Screenshot
+        ));
+    }
+
+    #[test]
+    fn click_routes_button() {
+        assert!(matches!(
+            parse(r#"{"action":"click","x":1,"y":2}"#).unwrap(),
+            Action::LeftClick { x: 1, y: 2, .. }
+        ));
+        assert!(matches!(
+            parse(r#"{"action":"click","x":1,"y":2,"button":"right"}"#).unwrap(),
+            Action::RightClick { .. }
+        ));
+        assert!(matches!(
+            parse(r#"{"action":"click","x":1,"y":2,"button":"middle"}"#).unwrap(),
+            Action::MiddleClick { .. }
+        ));
+    }
+
+    #[test]
+    fn key_prefers_keys_array_then_combo() {
+        let combo = match parse(r#"{"action":"key","keys":["ctrl","c"]}"#).unwrap() {
+            Action::Key { combo } => combo,
+            other => panic!("expected key, got {other:?}"),
+        };
+        assert_eq!(combo, "ctrl+c");
+        let combo = match parse(r#"{"action":"key","combo":"cmd+v"}"#).unwrap() {
+            Action::Key { combo } => combo,
+            other => panic!("expected key, got {other:?}"),
+        };
+        assert_eq!(combo, "cmd+v");
+    }
+
+    #[test]
+    fn missing_required_fields_error() {
+        assert!(parse(r#"{"action":"type"}"#).is_err());
+        assert!(parse(r#"{"action":"drag"}"#).is_err());
+        assert!(parse(r#"{"action":"hold_key"}"#).is_err());
+        assert!(parse(r#"{"action":"key"}"#).is_err());
+        assert!(parse("{}").is_err());
+        assert!(parse(r#"{"action":"nope"}"#).is_err());
+    }
+
+    #[test]
+    fn wait_and_hold_defaults() {
+        assert!(matches!(
+            parse(r#"{"action":"wait"}"#).unwrap(),
+            Action::Wait { duration_ms: 1000 }
+        ));
+        assert!(matches!(
+            parse(r#"{"action":"hold_key","key":"a"}"#).unwrap(),
+            Action::HoldKey {
+                duration_ms: 500,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn modifier_aliases_map_to_meta() {
+        let arr: Vec<serde_json::Value> = ["cmd", "super", "win", "command"]
+            .iter()
+            .map(|s| serde_json::Value::from(*s))
+            .collect();
+        let m = Modifiers::from_keys(&arr);
+        assert!(m.meta);
+        assert!(!m.ctrl);
+    }
+
+    #[test]
+    fn drag_collects_path_points() {
+        let path = match parse(r#"{"action":"drag","path":[{"x":1,"y":2},{"x":3,"y":4}]}"#).unwrap()
+        {
+            Action::Drag { path, .. } => path,
+            other => panic!("expected drag, got {other:?}"),
+        };
+        assert_eq!(path, vec![(1, 2), (3, 4)]);
+    }
+}

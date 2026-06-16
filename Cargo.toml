@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -14,6 +14,7 @@ authors = ["jbj338033"]
 goat-protocol = { path = "crates/goat-protocol" }
 goat-config = { path = "crates/goat-config" }
 goat-core = { path = "crates/goat-core" }
+goat-mcp = { path = "crates/goat-mcp" }
 goat-tui = { path = "crates/goat-tui" }
 goat-provider = { path = "crates/goat-provider" }
 goat-auth = { path = "crates/goat-auth" }
@@ -43,18 +44,22 @@ goat-command-conversation = { path = "crates/goat-command-conversation" }
 goat-command-help = { path = "crates/goat-command-help" }
 goat-command-app = { path = "crates/goat-command-app" }
 goat-commands = { path = "crates/goat-commands" }
+goat-update = { path = "crates/goat-update" }
+goat-worktree = { path = "crates/goat-worktree" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 
 ratatui = "0.30"
+ratatui-image = { version = "11.0.4", default-features = false, features = ["crossterm"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 
 clap = { version = "4", features = ["derive"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 ignore = "0.4"
 regex = "1"
 tempfile = "3"
@@ -68,12 +73,17 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 htmd = "0.5"
 eventsource-stream = "0.2"
 sha2 = "0.11"
+semver = "1"
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 base64 = "0.22"
+percent-encoding = "2"
 enigo = "0.6"
 xcap = "0.9"
 image = "0.25"
 chromiumoxide = "0.9"
 rand = "0.10"
+rmcp = { version = "1.7.0", default-features = false, features = ["client", "transport-child-process"] }
 open = "5"
 
 tracing = "0.1"
@@ -82,7 +92,6 @@ tracing-appender = "0.2"
 color-eyre = "0.6"
 thiserror = "2"
 
-axoupdater = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

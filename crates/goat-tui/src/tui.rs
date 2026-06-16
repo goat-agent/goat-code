@@ -9,9 +9,11 @@ use crossterm::{
     terminal::supports_keyboard_enhancement,
 };
 use ratatui::DefaultTerminal;
+use ratatui_image::picker::Picker;
 
-pub fn init(mouse_capture: bool) -> io::Result<DefaultTerminal> {
+pub fn init(mouse_capture: bool) -> io::Result<(DefaultTerminal, Option<Picker>)> {
     let terminal = ratatui::init();
+    let picker = crate::screenshot::query_picker();
     if supports_keyboard_enhancement().unwrap_or(false) {
         execute!(
             io::stdout(),
@@ -24,7 +26,7 @@ pub fn init(mouse_capture: bool) -> io::Result<DefaultTerminal> {
     if mouse_capture {
         execute!(io::stdout(), EnableMouseCapture)?;
     }
-    Ok(terminal)
+    Ok((terminal, picker))
 }
 
 pub fn set_mouse_capture(enabled: bool) {

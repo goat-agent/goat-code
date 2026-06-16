@@ -42,11 +42,13 @@ pub(crate) fn classify_http(
         (429, _) | (_, "rate_limit_error") => {
             StreamError::rate_limited(message, parse_retry_after(headers))
         }
-        (529, _) | (_, "overloaded_error" | "api_error") => StreamError::overloaded(message),
+        (529 | 408 | 504, _) | (_, "overloaded_error" | "api_error" | "timeout_error") => {
+            StreamError::overloaded(message)
+        }
         (401 | 403, _) | (_, "authentication_error" | "permission_error") => {
             StreamError::auth(message)
         }
-        (413, _) | (_, "request_too_large") => StreamError::context_overflow(message),
+        (413, _) => StreamError::context_overflow(message),
         (400, _) | (_, "invalid_request_error") => {
             if overflow_message(&message) {
                 StreamError::context_overflow(message)
@@ -69,9 +71,8 @@ pub(crate) fn classify_sse_error(data: &str) -> StreamError {
     };
     match parsed.kind.as_str() {
         "rate_limit_error" => StreamError::rate_limited(message, None),
-        "overloaded_error" | "api_error" => StreamError::overloaded(message),
+        "overloaded_error" | "api_error" | "timeout_error" => StreamError::overloaded(message),
         "authentication_error" | "permission_error" => StreamError::auth(message),
-        "request_too_large" => StreamError::context_overflow(message),
         "invalid_request_error" => {
             if overflow_message(&message) {
                 StreamError::context_overflow(message)
@@ -242,6 +243,14 @@ mod tests {
             r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
         );
         assert_eq!(error, StreamError::overloaded("Overloaded"));
+    }
+
+    #[test]
+    fn sse_timeout_is_retryable() {
+        let error = super::classify_sse_error(
+            r#"{"type":"error","error":{"type":"timeout_error","message":"timed out"}}"#,
+        );
+        assert!(matches!(error, StreamError::Overloaded { .. }));
     }
 
     #[test]

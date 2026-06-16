@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use goat_provider::{ContentBlock, Effort, MessageRole, Request, StreamEvent, ToolDefinition};
+use goat_provider::{
+    ContentBlock, Effort, MessageRole, Request, StreamEvent, ToolDefinition, Usage,
+};
 use serde_json::{Value, json};
 
 pub fn gemini_efforts(model: &str) -> Vec<Effort> {
@@ -19,11 +21,6 @@ fn is_25(model: &str) -> bool {
 fn is_25_pro(model: &str) -> bool {
     let id = model.to_ascii_lowercase();
     id.contains("2.5") && id.contains("pro")
-}
-
-fn is_3x_pro(model: &str) -> bool {
-    let id = model.to_ascii_lowercase();
-    (id.contains("3.") || id.starts_with("gemini-3")) && id.contains("pro")
 }
 
 pub fn generation_config(model: &str, effort: Option<Effort>) -> Option<Value> {
@@ -54,20 +51,11 @@ pub fn generation_config(model: &str, effort: Option<Effort>) -> Option<Value> {
             }
         }))
     } else {
-        let level = if is_3x_pro(model) {
-            match effort {
-                Effort::Off => "minimal",
-                Effort::Low => "low",
-                Effort::Medium => "medium",
-                Effort::High | Effort::Xhigh | Effort::Max => "high",
-            }
-        } else {
-            match effort {
-                Effort::Off => "minimal",
-                Effort::Low => "low",
-                Effort::Medium => "medium",
-                Effort::High | Effort::Xhigh | Effort::Max => "high",
-            }
+        let level = match effort {
+            Effort::Off => "MINIMAL",
+            Effort::Low => "LOW",
+            Effort::Medium => "MEDIUM",
+            Effort::High | Effort::Xhigh | Effort::Max => "HIGH",
         };
         Some(json!({ "thinkingConfig": { "thinkingLevel": level } }))
     }
@@ -132,11 +120,16 @@ fn content_block_to_part(
             (None, json!({ "thought": true, "thoughtSignature": data }))
         }
         ContentBlock::ToolUse { id, name, input } => {
+            let args = if input.is_object() {
+                input.clone()
+            } else {
+                json!({})
+            };
             let fc = if is_synthetic_id(id) {
                 *synthetic_counter += 1;
-                json!({ "functionCall": { "name": name, "args": input } })
+                json!({ "functionCall": { "name": name, "args": args } })
             } else {
-                json!({ "functionCall": { "name": name, "args": input, "id": id } })
+                json!({ "functionCall": { "name": name, "args": args, "id": id } })
             };
             (None, fc)
         }
@@ -395,6 +388,27 @@ pub fn extract_finish_reason(value: &Value, oauth: bool) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+pub fn parse_usage(value: &Value, oauth: bool) -> Option<Usage> {
+    let payload = if oauth {
+        value.get("response").unwrap_or(value)
+    } else {
+        value
+    };
+    let meta = payload.get("usageMetadata")?;
+    let count = |key: &str| -> u32 {
+        meta.get(key)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0)
+    };
+    Some(Usage {
+        input_tokens: count("promptTokenCount"),
+        output_tokens: count("candidatesTokenCount") + count("thoughtsTokenCount"),
+        cache_read_tokens: count("cachedContentTokenCount"),
+        cache_write_tokens: 0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use goat_provider::{ContentBlock, Effort, Message, MessageRole, Request, ToolDefinition};
@@ -402,6 +416,7 @@ mod tests {
 
     use super::{
         build_request, gemini_efforts, generation_config, inner_request_to_value, parse_chunk,
+        parse_usage,
     };
 
     fn make_request(messages: Vec<Message>) -> Request {
@@ -653,14 +668,14 @@ mod tests {
     #[test]
     fn generation_config_3x_flash_uses_level() {
         let cfg = generation_config("gemini-3.5-flash", Some(Effort::Medium)).unwrap();
-        assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "medium");
+        assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "MEDIUM");
         assert!(cfg["thinkingConfig"].get("thinkingBudget").is_none());
     }
 
     #[test]
     fn generation_config_3x_off_maps_to_minimal() {
         let cfg = generation_config("gemini-3.5-flash", Some(Effort::Off)).unwrap();
-        assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "minimal");
+        assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "MINIMAL");
     }
 
     #[test]
@@ -755,5 +770,38 @@ mod tests {
         let decl = &v["tools"][0]["functionDeclarations"][0];
         assert_eq!(decl["name"], "fn1");
         assert!(decl["parameters"].get("$schema").is_none());
+    }
+
+    #[test]
+    fn parse_usage_sums_candidates_and_thoughts() {
+        let chunk = json!({
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 40,
+                "thoughtsTokenCount": 25,
+                "cachedContentTokenCount": 10
+            }
+        });
+        let usage = parse_usage(&chunk, false).expect("usage");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 65);
+        assert_eq!(usage.cache_read_tokens, 10);
+        assert_eq!(usage.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn parse_usage_oauth_unwraps_response() {
+        let chunk = json!({
+            "response": { "usageMetadata": { "promptTokenCount": 7 } }
+        });
+        let usage = parse_usage(&chunk, true).expect("usage");
+        assert_eq!(usage.input_tokens, 7);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn parse_usage_absent_returns_none() {
+        let chunk = json!({ "candidates": [] });
+        assert!(parse_usage(&chunk, false).is_none());
     }
 }
