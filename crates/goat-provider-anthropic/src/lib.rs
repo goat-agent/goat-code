@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 
 use eventsource_stream::Eventsource;
+mod auth;
 mod error;
 use futures::StreamExt;
-use goat_auth::{
-    Credential, CredentialKey, CredentialStore, Pkce, TokenSet, ensure_valid, random_state,
-};
+use goat_auth::{CredentialKey, CredentialStore, TokenSet};
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
     ProviderId, RateLimitSnapshot, RateWindow, Request, SearchResult, StreamError, StreamEvent,
@@ -15,33 +14,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle};
 
+pub use auth::AnthropicAuthError;
+use auth::{Auth, current_auth, do_login};
+
 pub const PROVIDER_ID: &str = "anthropic";
 const BASE_URL: &str = "https://api.anthropic.com/v1";
-const ENV_VAR: &str = "ANTHROPIC_API_KEY";
+pub(crate) const ENV_VAR: &str = "ANTHROPIC_API_KEY";
 const VERSION: &str = "2023-06-01";
 const WEB_SEARCH_MODEL: &str = "claude-haiku-4-5-20251001";
 const MAX_TOKENS: u32 = 16384;
 
-const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const OAUTH_AUTHORIZE: &str = "https://claude.ai/oauth/authorize";
-const OAUTH_TOKEN: &str = "https://platform.claude.com/v1/oauth/token";
-const OAUTH_SCOPE: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+pub(crate) const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+pub(crate) const OAUTH_AUTHORIZE: &str = "https://claude.ai/oauth/authorize";
+pub(crate) const OAUTH_TOKEN: &str = "https://platform.claude.com/v1/oauth/token";
+pub(crate) const OAUTH_SCOPE: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const OAUTH_BETA: &str = "oauth-2025-04-20,claude-code-20250219";
 const OAUTH_USER_AGENT: &str = "claude-cli/2.1.119 (external, cli)";
-const OAUTH_TOKEN_UA: &str = "axios/1.13.6";
+pub(crate) const OAUTH_TOKEN_UA: &str = "axios/1.13.6";
 const CLAUDE_CODE_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-
-#[derive(Debug, thiserror::Error)]
-pub enum AnthropicAuthError {
-    #[error("http error: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("url error: {0}")]
-    Url(String),
-    #[error("token error: {0}")]
-    Token(String),
-    #[error("auth error: {0}")]
-    Auth(#[from] goat_auth::AuthError),
-}
 
 fn anthropic_context_window(model: &str) -> u32 {
     let id = model.to_ascii_lowercase();
@@ -97,136 +87,6 @@ pub fn build(store: &CredentialStore, account: &str) -> AnthropicProvider {
         account: account.to_owned(),
     };
     AnthropicProvider::new(store.clone(), key)
-}
-
-enum Auth {
-    ApiKey(String),
-    OAuth(String),
-}
-
-fn authorize_url(
-    challenge: &str,
-    state: &str,
-    redirect_uri: &str,
-) -> Result<String, AnthropicAuthError> {
-    reqwest::Url::parse_with_params(
-        OAUTH_AUTHORIZE,
-        &[
-            ("code", "true"),
-            ("client_id", OAUTH_CLIENT_ID),
-            ("response_type", "code"),
-            ("redirect_uri", redirect_uri),
-            ("scope", OAUTH_SCOPE),
-            ("code_challenge", challenge),
-            ("code_challenge_method", "S256"),
-            ("state", state),
-        ],
-    )
-    .map(|url| url.to_string())
-    .map_err(|err| AnthropicAuthError::Url(err.to_string()))
-}
-
-async fn do_login(status: &mpsc::Sender<String>) -> Result<TokenSet, AnthropicAuthError> {
-    let pkce = Pkce::generate();
-    let state = random_state();
-    let (listener, port) = goat_auth::bind_loopback().await?;
-    let redirect = format!("http://localhost:{port}/callback");
-    let url = authorize_url(&pkce.challenge, &state, &redirect)?;
-    let _ = status
-        .send(format!(
-            "opening browser to sign in\u{2026} if it does not open, visit:\n{url}"
-        ))
-        .await;
-    let _ = open::that(&url);
-    let code = goat_auth::capture_on(listener, &state).await?;
-    exchange_code(&code, &pkce.verifier, &state, &redirect).await
-}
-
-fn auth_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .expect("reqwest client")
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: Option<i64>,
-}
-
-async fn exchange_code(
-    code: &str,
-    verifier: &str,
-    state: &str,
-    redirect_uri: &str,
-) -> Result<TokenSet, AnthropicAuthError> {
-    let response = auth_client()
-        .post(OAUTH_TOKEN)
-        .header("Accept", "application/json, text/plain, */*")
-        .header("User-Agent", OAUTH_TOKEN_UA)
-        .json(&json!({
-            "grant_type": "authorization_code",
-            "code": code,
-            "state": state,
-            "client_id": OAUTH_CLIENT_ID,
-            "redirect_uri": redirect_uri,
-            "code_verifier": verifier,
-        }))
-        .send()
-        .await?;
-    parse_token_response(response)
-        .await
-        .map(|t| TokenSet::from_parts(t.access_token, t.refresh_token, t.expires_in, None))
-}
-
-async fn do_refresh(refresh_token: String) -> Result<TokenSet, String> {
-    let response = auth_client()
-        .post(OAUTH_TOKEN)
-        .header("Accept", "application/json, text/plain, */*")
-        .header("User-Agent", OAUTH_TOKEN_UA)
-        .json(&json!({
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": OAUTH_CLIENT_ID,
-        }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    parse_token_response(response)
-        .await
-        .map(|t| {
-            TokenSet::from_parts(
-                t.access_token,
-                t.refresh_token,
-                t.expires_in,
-                Some(&refresh_token),
-            )
-        })
-        .map_err(|e| e.to_string())
-}
-
-async fn parse_token_response(
-    response: reqwest::Response,
-) -> Result<TokenResponse, AnthropicAuthError> {
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(AnthropicAuthError::Token(format!("{status}: {body}")));
-    }
-    response.json().await.map_err(AnthropicAuthError::Http)
-}
-
-async fn current_auth(store: &CredentialStore, key: &CredentialKey) -> Option<Auth> {
-    match store.resolve(key, Some(ENV_VAR))? {
-        Credential::ApiKey(secret) => Some(Auth::ApiKey(secret.expose().to_owned())),
-        Credential::OAuth(tokens) => {
-            let tokens = ensure_valid(tokens, store, key, do_refresh).await?;
-            Some(Auth::OAuth(tokens.access_token.expose().to_owned()))
-        }
-    }
 }
 
 fn build_system(system: &str, oauth: bool) -> Option<serde_json::Value> {
@@ -1093,7 +953,8 @@ mod tests {
 
     #[test]
     fn authorize_url_carries_pkce_and_scope() {
-        let url = super::authorize_url("CHAL", "STATE", "http://localhost:1234/callback").unwrap();
+        let url =
+            crate::auth::authorize_url("CHAL", "STATE", "http://localhost:1234/callback").unwrap();
         assert!(url.contains("client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e"));
         assert!(url.contains("code_challenge=CHAL"));
         assert!(url.contains("code_challenge_method=S256"));
