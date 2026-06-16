@@ -1,3 +1,6 @@
+mod models;
+mod schema;
+
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -5,213 +8,13 @@ use std::{
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-const LATEST_VERSION: i64 = 5;
+use models::thread_from_row;
+use schema::migrate;
 
-const SCHEMA_V1: &str = "\
-CREATE TABLE threads (
-    id INTEGER PRIMARY KEY,
-    cwd TEXT NOT NULL,
-    title TEXT,
-    provider TEXT NOT NULL,
-    model TEXT NOT NULL,
-    account TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-CREATE TABLE turns (
-    id INTEGER PRIMARY KEY,
-    thread_id INTEGER NOT NULL,
-    task_id INTEGER NOT NULL,
-    provider TEXT NOT NULL,
-    model TEXT NOT NULL,
-    account TEXT NOT NULL,
-    status TEXT NOT NULL,
-    started_at INTEGER NOT NULL,
-    finished_at INTEGER
-);
-CREATE TABLE messages (
-    id INTEGER PRIMARY KEY,
-    thread_id INTEGER NOT NULL,
-    turn_id INTEGER,
-    role TEXT NOT NULL,
-    body TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-);
-CREATE TABLE tool_calls (
-    id INTEGER PRIMARY KEY,
-    thread_id INTEGER NOT NULL,
-    turn_id INTEGER NOT NULL,
-    call_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    input TEXT NOT NULL,
-    status TEXT NOT NULL,
-    summary TEXT,
-    started_at INTEGER NOT NULL,
-    finished_at INTEGER
-);";
-
-const SCHEMA_V2: &str = "\
-ALTER TABLE threads ADD COLUMN effort TEXT;
-ALTER TABLE turns ADD COLUMN effort TEXT;";
-
-const SCHEMA_V3: &str = "\
-CREATE INDEX idx_messages_thread ON messages(thread_id);
-CREATE INDEX idx_tool_calls_thread ON tool_calls(thread_id);
-CREATE INDEX idx_threads_cwd ON threads(cwd);";
-
-const SCHEMA_V4: &str = "\
-CREATE TABLE compactions (
-    id INTEGER PRIMARY KEY,
-    thread_id INTEGER NOT NULL,
-    summary TEXT NOT NULL,
-    after_message_id INTEGER NOT NULL,
-    tail_from_message_id INTEGER,
-    preserved_message_ids TEXT NOT NULL,
-    tokens_before INTEGER NOT NULL,
-    tokens_after INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
-);
-CREATE INDEX idx_compactions_thread ON compactions(thread_id);";
-
-const SCHEMA_V5: &str = "ALTER TABLE threads ADD COLUMN mode TEXT;";
-
-fn migrate(conn: &Connection) -> Result<(), StoreError> {
-    let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version > LATEST_VERSION {
-        return Err(StoreError::UnknownVersion(version));
-    }
-    while version < LATEST_VERSION {
-        match version {
-            0 => conn.execute_batch(SCHEMA_V1)?,
-            1 => conn.execute_batch(SCHEMA_V2)?,
-            2 => conn.execute_batch(SCHEMA_V3)?,
-            3 => conn.execute_batch(SCHEMA_V4)?,
-            4 => conn.execute_batch(SCHEMA_V5)?,
-            _ => return Err(StoreError::UnknownVersion(version)),
-        }
-        version += 1;
-        conn.execute_batch(&format!("PRAGMA user_version = {version};"))?;
-    }
-    Ok(())
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum StoreError {
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    #[error("database version {0} is newer than this binary supports")]
-    UnknownVersion(i64),
-    #[error("store task failed: {0}")]
-    BlockingTask(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewThread {
-    pub cwd: String,
-    pub title: Option<String>,
-    pub provider: String,
-    pub model: String,
-    pub account: String,
-    pub effort: Option<String>,
-    pub mode: Option<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Thread {
-    pub id: i64,
-    pub cwd: String,
-    pub title: Option<String>,
-    pub provider: String,
-    pub model: String,
-    pub account: String,
-    pub effort: Option<String>,
-    pub mode: Option<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewTurn {
-    pub thread_id: i64,
-    pub task_id: i64,
-    pub provider: String,
-    pub model: String,
-    pub account: String,
-    pub effort: Option<String>,
-    pub status: String,
-    pub started_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewMessage {
-    pub thread_id: i64,
-    pub turn_id: Option<i64>,
-    pub role: String,
-    pub body: String,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredMessage {
-    pub id: i64,
-    pub turn_id: Option<i64>,
-    pub role: String,
-    pub body: String,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewCompaction {
-    pub thread_id: i64,
-    pub summary: String,
-    pub after_message_id: i64,
-    pub tail_from_message_id: Option<i64>,
-    pub preserved_message_ids: Vec<i64>,
-    pub tokens_before: i64,
-    pub tokens_after: i64,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Compaction {
-    pub id: i64,
-    pub thread_id: i64,
-    pub summary: String,
-    pub after_message_id: i64,
-    pub tail_from_message_id: Option<i64>,
-    pub preserved_message_ids: Vec<i64>,
-    pub tokens_before: i64,
-    pub tokens_after: i64,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewToolCall {
-    pub thread_id: i64,
-    pub turn_id: i64,
-    pub call_id: String,
-    pub name: String,
-    pub input: String,
-    pub status: String,
-    pub started_at: i64,
-}
-
-fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
-    Ok(Thread {
-        id: row.get(0)?,
-        cwd: row.get(1)?,
-        title: row.get(2)?,
-        provider: row.get(3)?,
-        model: row.get(4)?,
-        account: row.get(5)?,
-        effort: row.get(6)?,
-        mode: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
-    })
-}
+pub use models::{
+    Compaction, NewCompaction, NewMessage, NewThread, NewToolCall, NewTurn, StoreError,
+    StoredMessage, Thread,
+};
 
 #[derive(Clone)]
 pub struct Store {
@@ -549,6 +352,7 @@ impl Store {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
 
@@ -808,9 +612,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute_batch(super::SCHEMA_V1).unwrap();
-            conn.execute_batch(super::SCHEMA_V2).unwrap();
-            conn.execute_batch(super::SCHEMA_V3).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V1).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V2).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V3).unwrap();
             conn.execute_batch("PRAGMA user_version = 3;").unwrap();
         }
         let store = Store::open(&path).unwrap();
