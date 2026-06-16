@@ -130,6 +130,15 @@ pub(crate) enum Flow {
     Shutdown,
 }
 
+pub(crate) struct SessionState {
+    pub(crate) target: Option<ModelTarget>,
+    pub(crate) conversation: conversation::Conversation,
+    pub(crate) tracker: compaction::ContextTracker,
+    pub(crate) thread_id: Option<i64>,
+    pub(crate) mode: Mode,
+    pub(crate) plan_path: Option<PathBuf>,
+}
+
 pub(crate) struct TurnIds {
     pub(crate) stored_thread: Option<i64>,
     pub(crate) turn_db_id: Option<i64>,
@@ -213,19 +222,22 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
         tools,
         store,
         credentials,
-        mut target,
+        target,
         mcp,
     } = agent;
-    let mut conversation = conversation::Conversation::new();
-    let mut tracker = compaction::ContextTracker::new();
-    let mut thread_id: Option<i64> = None;
-    let mut mode = Mode::Normal;
-    let mut plan_path: Option<PathBuf> = None;
+    let mut state = SessionState {
+        target,
+        conversation: conversation::Conversation::new(),
+        tracker: compaction::ContextTracker::new(),
+        thread_id: None,
+        mode: Mode::Normal,
+        plan_path: None,
+    };
 
-    if target.is_none() {
-        target = accounts::restore_target(&store, &credentials).await;
+    if state.target.is_none() {
+        state.target = accounts::restore_target(&store, &credentials).await;
     }
-    accounts::announce_startup(&events, &registry, &credentials, target.as_ref()).await;
+    accounts::announce_startup(&events, &registry, &credentials, state.target.as_ref()).await;
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let skills = prompt::load_skill_infos(&cwd);
@@ -266,41 +278,36 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     let account_registries: std::sync::Mutex<HashMap<String, Arc<Registry>>> =
         std::sync::Mutex::new(HashMap::new());
 
+    macro_rules! ctx {
+        () => {
+            Ctx {
+                registry: &registry,
+                account_registries: &account_registries,
+                credentials: &credentials,
+                tools: &tools,
+                agents: &agents,
+                store: &store,
+                events: &events,
+                skills: &skills,
+                instructions: project_instructions.as_deref(),
+                semaphore: &semaphore,
+                child_ids: &child_ids,
+                asks: &asks,
+                plans: &plans,
+                engine_ids: &engine_ids,
+                plan_shell,
+                rl_cache: &rl_cache,
+                rl_path: rl_path.as_deref(),
+            }
+        };
+    }
+
     while let Some(op) = ops.recv().await {
         match op {
             Op::SubmitMessage { id, text } => {
-                let ctx = Ctx {
-                    registry: &registry,
-                    account_registries: &account_registries,
-                    credentials: &credentials,
-                    tools: &tools,
-                    agents: &agents,
-                    store: &store,
-                    events: &events,
-                    skills: &skills,
-                    instructions: project_instructions.as_deref(),
-                    semaphore: &semaphore,
-                    child_ids: &child_ids,
-                    asks: &asks,
-                    plans: &plans,
-                    engine_ids: &engine_ids,
-                    plan_shell,
-                    rl_cache: &rl_cache,
-                    rl_path: rl_path.as_deref(),
-                };
-                if let Flow::Shutdown = turn::handle_turn(
-                    &ctx,
-                    id,
-                    text,
-                    &mut target,
-                    &mut conversation,
-                    &mut tracker,
-                    &mut thread_id,
-                    &mut mode,
-                    &mut plan_path,
-                    &mut ops,
-                )
-                .await
+                let ctx = ctx!();
+                if let Flow::Shutdown =
+                    turn::handle_turn(&ctx, id, text, &mut state, &mut ops).await
                 {
                     break;
                 }
@@ -310,107 +317,52 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
             | Op::DequeueMessage { .. }
             | Op::ResolvePlan { .. } => {}
             Op::SetMode { mode: requested } => {
-                mode = requested;
+                state.mode = requested;
                 if requested == Mode::Normal {
-                    plan_path = None;
+                    state.plan_path = None;
                 }
-                if let Some(tid) = thread_id
+                if let Some(tid) = state.thread_id
                     && let Err(err) = store
-                        .update_thread_mode(tid, mode_string(mode), persist::now_ms())
+                        .update_thread_mode(tid, mode_string(state.mode), persist::now_ms())
                         .await
                 {
                     tracing::warn!(%err, "failed to persist thread mode");
                 }
                 let _ = events
                     .send(Event::ModeChanged {
-                        mode,
-                        plan_path: plan_path.as_ref().map(|path| path.display().to_string()),
+                        mode: state.mode,
+                        plan_path: state
+                            .plan_path
+                            .as_ref()
+                            .map(|path| path.display().to_string()),
                     })
                     .await;
             }
             Op::Compact { id, instructions } => {
-                let ctx = Ctx {
-                    registry: &registry,
-                    account_registries: &account_registries,
-                    credentials: &credentials,
-                    tools: &tools,
-                    agents: &agents,
-                    store: &store,
-                    events: &events,
-                    skills: &skills,
-                    instructions: project_instructions.as_deref(),
-                    semaphore: &semaphore,
-                    child_ids: &child_ids,
-                    asks: &asks,
-                    plans: &plans,
-                    engine_ids: &engine_ids,
-                    plan_shell,
-                    rl_cache: &rl_cache,
-                    rl_path: rl_path.as_deref(),
-                };
-                if let Flow::Shutdown = turn::handle_compact(
-                    &ctx,
-                    id,
-                    instructions,
-                    &mut target,
-                    &mut conversation,
-                    &mut tracker,
-                    &mut thread_id,
-                    &mut mode,
-                    &mut plan_path,
-                    &mut ops,
-                )
-                .await
+                let ctx = ctx!();
+                if let Flow::Shutdown =
+                    turn::handle_compact(&ctx, id, instructions, &mut state, &mut ops).await
                 {
                     break;
                 }
             }
             Op::SubmitShell { id, command } => {
-                let ctx = Ctx {
-                    registry: &registry,
-                    account_registries: &account_registries,
-                    credentials: &credentials,
-                    tools: &tools,
-                    agents: &agents,
-                    store: &store,
-                    events: &events,
-                    skills: &skills,
-                    instructions: project_instructions.as_deref(),
-                    semaphore: &semaphore,
-                    child_ids: &child_ids,
-                    asks: &asks,
-                    plans: &plans,
-                    engine_ids: &engine_ids,
-                    plan_shell,
-                    rl_cache: &rl_cache,
-                    rl_path: rl_path.as_deref(),
-                };
-                if let Flow::Shutdown = turn::handle_shell(
-                    &ctx,
-                    id,
-                    &command,
-                    &mut target,
-                    &mut conversation,
-                    &mut tracker,
-                    &mut thread_id,
-                    &mut mode,
-                    &mut plan_path,
-                    &mut ops,
-                )
-                .await
+                let ctx = ctx!();
+                if let Flow::Shutdown =
+                    turn::handle_shell(&ctx, id, &command, &mut state, &mut ops).await
                 {
                     break;
                 }
             }
             Op::Clear => {
-                conversation.clear();
-                tracker.invalidate();
-                thread_id = None;
-                mode = Mode::Normal;
-                plan_path = None;
+                state.conversation.clear();
+                state.tracker.invalidate();
+                state.thread_id = None;
+                state.mode = Mode::Normal;
+                state.plan_path = None;
             }
             Op::SelectModel { .. } => {
-                turn::handle_idle_op(op, &store, thread_id, &mut target, &events).await;
+                turn::handle_idle_op(op, &store, state.thread_id, &mut state.target, &events).await;
             }
             Op::Login {
                 provider,
@@ -465,18 +417,13 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     &tools,
                     project_instructions.as_deref(),
                     tid,
-                    &mut target,
-                    &mut conversation,
-                    &mut tracker,
-                    &mut thread_id,
-                    &mut mode,
-                    &mut plan_path,
+                    &mut state,
                     &events,
                 )
                 .await;
             }
             Op::RenameThread { title } => {
-                threads::handle_rename(&store, thread_id, title, &events).await;
+                threads::handle_rename(&store, state.thread_id, title, &events).await;
             }
             Op::Shutdown => break,
         }

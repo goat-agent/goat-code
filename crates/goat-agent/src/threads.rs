@@ -9,8 +9,6 @@ use tokio::sync::mpsc;
 
 use crate::{
     Ctx,
-    compaction::ContextTracker,
-    conversation::Conversation,
     prompt::build_system_prompt,
     tools_exec::{call_display, summarize_line},
 };
@@ -109,19 +107,13 @@ pub(crate) async fn handle_rename(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_resume(
     store: &Store,
     skills: &[SkillInfo],
     tools: &ToolRegistry,
     instructions: Option<&str>,
     tid: i64,
-    target: &mut Option<ModelTarget>,
-    conversation: &mut Conversation,
-    tracker: &mut ContextTracker,
-    thread_id: &mut Option<i64>,
-    mode: &mut goat_protocol::Mode,
-    plan_path: &mut Option<std::path::PathBuf>,
+    state: &mut crate::SessionState,
     events: &mpsc::Sender<Event>,
 ) {
     let thread = match store.get_thread(tid).await {
@@ -148,8 +140,8 @@ pub(crate) async fn handle_resume(
         }
     };
     let restored_mode = crate::mode_from_string(thread.mode.as_deref());
-    *mode = restored_mode;
-    *plan_path = if restored_mode.is_plan() {
+    state.mode = restored_mode;
+    state.plan_path = if restored_mode.is_plan() {
         crate::plan::resolve_plan_path(Some(tid), "")
     } else {
         None
@@ -300,11 +292,11 @@ pub(crate) async fn handle_resume(
             new_history.push((Message { role, content }, Some(id)));
         }
     }
-    conversation.replace(new_history);
-    tracker.invalidate();
-    let context_tokens = Some(tracker.estimate(conversation.messages(), &[]));
-    *thread_id = Some(tid);
-    *target = Some(new_target.clone());
+    state.conversation.replace(new_history);
+    state.tracker.invalidate();
+    let context_tokens = Some(state.tracker.estimate(state.conversation.messages(), &[]));
+    state.thread_id = Some(tid);
+    state.target = Some(new_target.clone());
     let _ = events
         .send(Event::ConversationRestored {
             target: new_target,
