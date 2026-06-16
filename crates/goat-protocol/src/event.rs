@@ -173,4 +173,37 @@ pub struct AskQuestion {
     pub question: String,
     #[serde(default)]
     pub options: Vec<AskOption>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multiple: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AskQuestion;
+
+    #[test]
+    fn multiple_defaults_to_false_when_absent() {
+        let q: AskQuestion = serde_json::from_str(r#"{"question":"Pick?"}"#).unwrap();
+        assert!(!q.multiple);
+    }
+
+    #[test]
+    fn multiple_false_is_omitted_from_serialization() {
+        let q = AskQuestion {
+            question: "Pick?".to_owned(),
+            options: Vec::new(),
+            multiple: false,
+        };
+        let json = serde_json::to_string(&q).unwrap();
+        assert!(!json.contains("multiple"));
+    }
+
+    #[test]
+    fn multiple_true_round_trips() {
+        let q: AskQuestion =
+            serde_json::from_str(r#"{"question":"Pick?","multiple":true}"#).unwrap();
+        assert!(q.multiple);
+        let json = serde_json::to_string(&q).unwrap();
+        assert!(json.contains("\"multiple\":true"));
+    }
 }

@@ -2014,6 +2014,7 @@ mod tests {
             questions: vec![AskQuestion {
                 question: "ok?".to_owned(),
                 options: Vec::new(),
+                multiple: false,
             }],
         });
         assert!(matches!(app.overlay, Overlay::Help));

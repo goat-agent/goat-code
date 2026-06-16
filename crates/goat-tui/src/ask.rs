@@ -35,6 +35,7 @@ pub struct AskPicker {
     pub cursor: usize,
     current_q: usize,
     answers: Vec<Option<String>>,
+    selected: Vec<bool>,
     typing: bool,
     input: String,
     confirming: bool,
@@ -43,15 +44,64 @@ pub struct AskPicker {
 impl AskPicker {
     pub fn new(questions: Vec<AskQuestion>) -> Self {
         let count = questions.len();
+        let first_options = questions.first().map_or(0, |q| q.options.len());
         Self {
             questions,
             cursor: 0,
             current_q: 0,
             answers: vec![None; count],
+            selected: vec![false; first_options],
             typing: false,
             input: String::new(),
             confirming: false,
         }
+    }
+
+    fn is_multi(&self) -> bool {
+        self.questions[self.current_q].multiple
+    }
+
+    pub fn toggle(&mut self) {
+        if self.confirming || !self.is_multi() {
+            return;
+        }
+        if self.cursor < self.questions[self.current_q].options.len()
+            && let Some(slot) = self.selected.get_mut(self.cursor)
+        {
+            *slot = !*slot;
+        }
+    }
+
+    fn join_selection(&self) -> String {
+        let mut parts: Vec<String> = self.questions[self.current_q]
+            .options
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.selected.get(*i).copied().unwrap_or(false))
+            .map(|(_, opt)| opt.label.clone())
+            .collect();
+        let trimmed = self.input.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_owned());
+        }
+        parts.join(", ")
+    }
+
+    fn reset_selection(&mut self, q_idx: usize) {
+        let len = self.questions[q_idx].options.len();
+        self.selected = vec![false; len];
+    }
+
+    fn restore_selection(&mut self, q_idx: usize, saved: &str) {
+        let len = self.questions[q_idx].options.len();
+        let mut selection = vec![false; len];
+        let tokens: Vec<&str> = saved.split(',').map(str::trim).collect();
+        for (i, opt) in self.questions[q_idx].options.iter().enumerate() {
+            if tokens.iter().any(|t| *t == opt.label) {
+                selection[i] = true;
+            }
+        }
+        self.selected = selection;
     }
 
     pub fn is_confirming(&self) -> bool {
@@ -60,6 +110,13 @@ impl AskPicker {
 
     pub fn is_typing(&self) -> bool {
         self.typing
+    }
+
+    pub fn wants_toggle(&self) -> bool {
+        !self.confirming
+            && !self.typing
+            && self.is_multi()
+            && self.cursor < self.questions[self.current_q].options.len()
     }
 
     pub fn insert_str(&mut self, text: &str) {
@@ -117,6 +174,19 @@ impl AskPicker {
             return self.finish();
         }
         let type_own_idx = self.questions[self.current_q].options.len();
+        if self.is_multi() {
+            if self.cursor < type_own_idx {
+                self.toggle();
+                return AskOutcome::Pending;
+            }
+            if !self.input.is_empty() {
+                self.typing = false;
+            }
+            let answer = self.join_selection();
+            self.input.clear();
+            self.cursor = 0;
+            return self.record_answer(answer);
+        }
         if self.cursor == type_own_idx {
             if !self.input.is_empty() {
                 let answer = std::mem::take(&mut self.input);
@@ -198,17 +268,25 @@ impl AskPicker {
         self.typing = false;
         self.input.clear();
         self.cursor = 0;
-        if let Some(Some(saved)) = self.answers.get(q_idx).cloned() {
-            let pos = self.questions[q_idx]
-                .options
-                .iter()
-                .position(|o| o.label == saved);
-            if let Some(pos) = pos {
-                self.cursor = pos;
-            } else {
-                self.input = saved;
-                self.cursor = self.questions[q_idx].options.len();
-            }
+        self.reset_selection(q_idx);
+        let saved = self.answers.get(q_idx).cloned().flatten();
+        let Some(saved) = saved else {
+            return;
+        };
+        if self.questions[q_idx].multiple {
+            self.restore_selection(q_idx, &saved);
+            self.cursor = self.questions[q_idx].options.len();
+            return;
+        }
+        let pos = self.questions[q_idx]
+            .options
+            .iter()
+            .position(|o| o.label == saved);
+        if let Some(pos) = pos {
+            self.cursor = pos;
+        } else {
+            self.input = saved;
+            self.cursor = self.questions[q_idx].options.len();
         }
     }
 
@@ -223,6 +301,7 @@ impl AskPicker {
             self.cursor = 0;
             self.typing = false;
             self.input.clear();
+            self.reset_selection(self.current_q);
             AskOutcome::Pending
         } else if self.questions.len() > 1 {
             self.confirming = true;
@@ -300,6 +379,7 @@ impl AskPicker {
 
     fn render_list(&self, frame: &mut Frame, area: Rect, theme: Theme) {
         let q = &self.questions[self.current_q];
+        let multi = q.multiple;
         let width = usize::from(area.width);
         let type_own_idx = q.options.len();
         let mut lines: Vec<Line> = Vec::new();
@@ -309,13 +389,17 @@ impl AskPicker {
                 .description
                 .as_deref()
                 .map(|d| Span::styled(d.to_owned(), theme.muted()));
-            lines.push(Self::ask_row(
-                selected,
-                width,
-                vec![Span::styled(opt.label.clone(), theme.text())],
-                right,
-                theme,
-            ));
+            let mut left: Vec<Span> = Vec::new();
+            if multi {
+                let glyph = if self.selected.get(i).copied().unwrap_or(false) {
+                    symbols::ui::DOT_FULL
+                } else {
+                    symbols::ui::DOT_EMPTY
+                };
+                left.push(Span::styled(format!("{glyph} "), theme.accent()));
+            }
+            left.push(Span::styled(opt.label.clone(), theme.text()));
+            lines.push(Self::ask_row(selected, width, left, right, theme));
         }
         let input_selected = self.cursor == type_own_idx;
         let input_content = if self.typing || !self.input.is_empty() {
@@ -421,6 +505,17 @@ impl AskPicker {
                 ],
                 theme,
             )
+        } else if q.multiple {
+            let submit = if total > 1 { "next" } else { "submit" };
+            hint_line(
+                &[
+                    (symbols::key::ARROWS_UPDOWN, "move"),
+                    ("space", "toggle"),
+                    (symbols::key::ENTER, submit),
+                    (symbols::key::ESC, "cancel"),
+                ],
+                theme,
+            )
         } else if total > 1 {
             hint_line(
                 &[
@@ -477,6 +572,15 @@ mod tests {
         AskQuestion {
             question: text.to_owned(),
             options,
+            multiple: false,
+        }
+    }
+
+    fn multi_question(text: &str, options: Vec<AskOption>) -> AskQuestion {
+        AskQuestion {
+            question: text.to_owned(),
+            options,
+            multiple: true,
         }
     }
 
@@ -598,5 +702,91 @@ mod tests {
         assert!(all.contains("production"));
         assert!(all.contains("Run migrations now?"));
         assert!(all.contains("submit"));
+    }
+
+    #[test]
+    fn multi_select_joins_toggled_labels() {
+        let mut picker = AskPicker::new(vec![multi_question(
+            "Colors?",
+            vec![option("red", ""), option("green", ""), option("blue", "")],
+        )]);
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        picker.move_down();
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        picker.move_down();
+        picker.move_down();
+        match picker.choose() {
+            AskOutcome::Submit(answers) => assert_eq!(answers, vec!["red, green"]),
+            AskOutcome::NoOp | AskOutcome::Pending => panic!("expected submit"),
+        }
+    }
+
+    #[test]
+    fn multi_select_allows_empty_submit() {
+        let mut picker = AskPicker::new(vec![multi_question(
+            "Colors?",
+            vec![option("red", ""), option("green", "")],
+        )]);
+        picker.move_down();
+        picker.move_down();
+        match picker.choose() {
+            AskOutcome::Submit(answers) => assert_eq!(answers, vec![""]),
+            AskOutcome::NoOp | AskOutcome::Pending => panic!("expected submit"),
+        }
+    }
+
+    #[test]
+    fn multi_select_toggle_off_removes_label() {
+        let mut picker = AskPicker::new(vec![multi_question(
+            "Colors?",
+            vec![option("red", ""), option("green", "")],
+        )]);
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        picker.move_down();
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        picker.move_up();
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        picker.move_down();
+        picker.move_down();
+        match picker.choose() {
+            AskOutcome::Submit(answers) => assert_eq!(answers, vec!["green"]),
+            AskOutcome::NoOp | AskOutcome::Pending => panic!("expected submit"),
+        }
+    }
+
+    #[test]
+    fn multi_select_appends_custom_input() {
+        let mut picker = AskPicker::new(vec![multi_question(
+            "Colors?",
+            vec![option("red", ""), option("green", "")],
+        )]);
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        picker.move_down();
+        picker.move_down();
+        picker.insert_str("teal");
+        match picker.choose() {
+            AskOutcome::Submit(answers) => assert_eq!(answers, vec!["red, teal"]),
+            AskOutcome::NoOp | AskOutcome::Pending => panic!("expected submit"),
+        }
+    }
+
+    #[test]
+    fn renders_multi_select_checkboxes() {
+        let mut picker = AskPicker::new(vec![multi_question(
+            "Colors?",
+            vec![option("red", ""), option("green", "")],
+        )]);
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        let mut terminal = Terminal::new(TestBackend::new(64, 12)).unwrap();
+        terminal
+            .draw(|frame| picker.render(frame, Rect::new(0, 0, 64, 12), Theme::dark()))
+            .unwrap();
+        let all = (0..12)
+            .map(|y| row(&terminal, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains(super::symbols::ui::DOT_FULL));
+        assert!(all.contains(super::symbols::ui::DOT_EMPTY));
+        assert!(all.contains("toggle"));
     }
 }

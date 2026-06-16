@@ -23,6 +23,10 @@ pub(crate) fn ask_tool_def() -> ToolDefinition {
                         "type": "object",
                         "properties": {
                             "question": { "type": "string" },
+                            "multiple": {
+                                "type": "boolean",
+                                "description": "If true, the user may select several options for this question; selected labels are returned joined by ', '. Defaults to single-select."
+                            },
                             "options": {
                                 "type": "array",
                                 "items": {
@@ -182,6 +186,7 @@ mod tests {
         AskQuestion {
             question: text.to_owned(),
             options: Vec::new(),
+            multiple: false,
         }
     }
 

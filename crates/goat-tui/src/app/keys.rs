@@ -475,7 +475,11 @@ impl App {
             KeyCode::Enter => return self.ask_enter(),
             KeyCode::Char(c) => {
                 if let Overlay::Ask(ref mut picker, _) = self.overlay {
-                    picker.on_char(c);
+                    if c == ' ' && picker.wants_toggle() {
+                        picker.toggle();
+                    } else {
+                        picker.on_char(c);
+                    }
                 }
             }
             _ => {}
