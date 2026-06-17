@@ -87,6 +87,7 @@ pub(crate) enum AppEvent {
     Tick,
     Engine(EngineEvent),
     EngineClosed,
+    Presence(usize),
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -97,6 +98,7 @@ pub struct App {
     pub(crate) highlighter: SyntectHighlighter,
     pub(crate) cwd: String,
     pub(crate) next_task: u64,
+    pub(crate) window_count: usize,
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
     pub(crate) clear_arm: Option<u16>,
@@ -174,6 +176,7 @@ impl App {
             highlighter: SyntectHighlighter::new(),
             cwd,
             next_task: 1,
+            window_count: 1,
             spinner: 0,
             quit_arm: None,
             clear_arm: None,
@@ -298,6 +301,13 @@ impl App {
             }
             AppEvent::EngineClosed => {
                 self.should_quit = true;
+                Vec::new()
+            }
+            AppEvent::Presence(count) => {
+                if self.window_count != count {
+                    self.window_count = count;
+                    self.dirty = true;
+                }
                 Vec::new()
             }
         }
@@ -1022,13 +1032,22 @@ fn shorten_home(path: &Path) -> String {
 pub async fn run(
     ops: Sender<Op>,
     mut events: Receiver<EngineEvent>,
+    mut presence: Receiver<usize>,
     theme: Theme,
     initial_ops: Vec<Op>,
 ) -> color_eyre::Result<()> {
     let mut app = App::new(theme);
     let (mut terminal, picker) = tui::init(app.mouse_capture)?;
     app.picker = picker;
-    let result = event_loop(&mut terminal, &ops, &mut events, app, initial_ops).await;
+    let result = event_loop(
+        &mut terminal,
+        &ops,
+        &mut events,
+        &mut presence,
+        app,
+        initial_ops,
+    )
+    .await;
     tui::restore();
     let _ = ops.send(Op::Shutdown).await;
     result
@@ -1038,6 +1057,7 @@ async fn event_loop(
     terminal: &mut DefaultTerminal,
     ops: &Sender<Op>,
     events: &mut Receiver<EngineEvent>,
+    presence: &mut Receiver<usize>,
     mut app: App,
     initial_ops: Vec<Op>,
 ) -> color_eyre::Result<()> {
@@ -1062,6 +1082,7 @@ async fn event_loop(
                 Some(ev) => AppEvent::Engine(ev),
                 None => AppEvent::EngineClosed,
             },
+            Some(count) = presence.recv() => AppEvent::Presence(count),
         };
 
         for op in app.update(event) {
@@ -2091,5 +2112,28 @@ mod tests {
             Some(128_000)
         );
         assert!(app.current_context_window().is_none());
+    }
+
+    #[test]
+    fn presence_updates_window_count_and_marks_dirty() {
+        let mut app = App::new(Theme::dark());
+        app.take_dirty();
+        assert_eq!(app.window_count, 1);
+
+        let ops = app.update(super::AppEvent::Presence(3));
+        assert!(ops.is_empty());
+        assert_eq!(app.window_count, 3);
+        assert!(app.take_dirty());
+    }
+
+    #[test]
+    fn presence_with_same_count_is_not_dirty() {
+        let mut app = App::new(Theme::dark());
+        app.update(super::AppEvent::Presence(2));
+        app.take_dirty();
+
+        let ops = app.update(super::AppEvent::Presence(2));
+        assert!(ops.is_empty());
+        assert!(!app.take_dirty());
     }
 }

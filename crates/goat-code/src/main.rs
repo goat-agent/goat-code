@@ -90,9 +90,15 @@ async fn run_tui(worktree_label: Option<String>, r#continue: bool) -> color_eyre
     };
 
     let attachment = goat_client::connect(&socket_path, &daemon_exe, cwd, resume).await?;
-    let goat_client::Attachment { ops, events, pump } = attachment;
+    let goat_client::Attachment {
+        ops,
+        events,
+        presence,
+        pump,
+        ..
+    } = attachment;
 
-    goat_tui::run(ops, events, theme, Vec::new()).await?;
+    goat_tui::run(ops, events, presence, theme, Vec::new()).await?;
     pump.abort();
     Ok(())
 }
