@@ -12,7 +12,7 @@ use goat_wire::{ClientId, ResumeMode, ServerFrame, SessionId, SessionInfo};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use crate::session::{LiveSession, SessionInner, SessionTable, Subscriber};
+use crate::session::{LiveSession, SessionInner, SessionTable};
 
 #[derive(Clone)]
 pub(crate) struct Manager {
@@ -51,21 +51,41 @@ impl Manager {
             .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
     }
 
-    pub(crate) async fn find_live_by_cwd(&self, cwd: &std::path::Path) -> Option<SessionId> {
-        let target = cwd.display().to_string();
-        let table = self.inner.sessions.lock().await;
-        for (id, live) in table.iter() {
-            let inner = live.inner.lock().await;
-            if inner.cwd == target {
+    fn normalize_cwd(cwd: &std::path::Path) -> String {
+        std::fs::canonicalize(cwd)
+            .unwrap_or_else(|_| cwd.to_path_buf())
+            .display()
+            .to_string()
+    }
+
+    fn find_live_by_cwd_locked(table: &SessionTable, cwd: &str) -> Option<SessionId> {
+        for (id, live) in table {
+            if live.cwd == cwd {
                 return Some(*id);
             }
         }
         None
     }
 
-    pub(crate) async fn open_session(
+    pub(crate) async fn open_or_attach(
         &self,
         cwd: PathBuf,
+        resume: ResumeMode,
+    ) -> Result<SessionId, String> {
+        let normalized = Self::normalize_cwd(&cwd);
+        if matches!(resume, ResumeMode::Latest) {
+            let table = self.inner.sessions.lock().await;
+            if let Some(id) = Self::find_live_by_cwd_locked(&table, &normalized) {
+                return Ok(id);
+            }
+        }
+        self.open_session(cwd, normalized, resume).await
+    }
+
+    async fn open_session(
+        &self,
+        cwd: PathBuf,
+        normalized: String,
         resume: ResumeMode,
     ) -> Result<SessionId, String> {
         let credentials = CredentialStore::new(self.inner.auth_path.clone());
@@ -79,10 +99,10 @@ impl Manager {
         let id = SessionId(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
         let inner = Arc::new(Mutex::new(SessionInner {
             id,
-            cwd: cwd.display().to_string(),
+            cwd: normalized.clone(),
             created_at: Self::now_ms(),
             ops: ops.clone(),
-            log: Vec::new(),
+            log: std::collections::VecDeque::new(),
             next_seq: 0,
             next_task: 1,
             subscribers: Vec::new(),
@@ -93,14 +113,26 @@ impl Manager {
             thread_id: None,
             resurrected: std::collections::HashSet::new(),
         }));
-        self.inner.sessions.lock().await.insert(
-            id,
-            LiveSession {
-                inner: inner.clone(),
-            },
-        );
 
-        spawn_pump(inner.clone(), events, handle, store_for_pump);
+        let id = {
+            let mut table = self.inner.sessions.lock().await;
+            if matches!(resume, ResumeMode::Latest)
+                && let Some(existing) = Self::find_live_by_cwd_locked(&table, &normalized)
+            {
+                let _ = ops.send(Op::Shutdown).await;
+                return Ok(existing);
+            }
+            table.insert(
+                id,
+                LiveSession {
+                    cwd: normalized,
+                    inner: inner.clone(),
+                },
+            );
+            id
+        };
+
+        spawn_pump(self.clone(), id, inner, events, handle, store_for_pump);
 
         match resume {
             ResumeMode::New => {}
@@ -120,8 +152,11 @@ impl Manager {
         client: ClientId,
         sender: mpsc::Sender<ServerFrame>,
     ) -> Result<(), String> {
-        let table = self.inner.sessions.lock().await;
-        let live = table.get(&session).ok_or("unknown session")?;
+        let live = {
+            let table = self.inner.sessions.lock().await;
+            table.get(&session).cloned()
+        };
+        let live = live.ok_or("unknown session")?;
         let mut inner = live.inner.lock().await;
         if let Some(snap) = inner.snapshot.clone() {
             let _ = sender
@@ -150,23 +185,24 @@ impl Manager {
                 })
                 .await;
         }
-        inner.subscribers.push(Subscriber { client, sender });
+        crate::session::subscriber_upsert(&mut inner.subscribers, client, sender);
         let clients = inner.presence();
         broadcast_presence(&mut inner, clients);
         Ok(())
     }
 
     pub(crate) async fn unsubscribe(&self, session: SessionId, client: ClientId) {
-        let mut evict = false;
-        {
+        let live = {
             let table = self.inner.sessions.lock().await;
-            if let Some(live) = table.get(&session) {
-                let mut inner = live.inner.lock().await;
-                crate::session::subscriber_map_remove(&mut inner.subscribers, client);
-                let clients = inner.presence();
-                broadcast_presence(&mut inner, clients);
-                evict = inner.evictable();
-            }
+            table.get(&session).cloned()
+        };
+        let mut evict = false;
+        if let Some(live) = live {
+            let mut inner = live.inner.lock().await;
+            crate::session::subscriber_map_remove(&mut inner.subscribers, client);
+            let clients = inner.presence();
+            broadcast_presence(&mut inner, clients);
+            evict = inner.evictable();
         }
         if evict {
             self.evict_if_idle(session).await;
@@ -174,17 +210,18 @@ impl Manager {
     }
 
     pub(crate) async fn drop_client(&self, client: ClientId) {
-        let mut candidates = Vec::new();
-        {
+        let lives: Vec<(SessionId, LiveSession)> = {
             let table = self.inner.sessions.lock().await;
-            for (id, live) in table.iter() {
-                let mut inner = live.inner.lock().await;
-                crate::session::subscriber_map_remove(&mut inner.subscribers, client);
-                let clients = inner.presence();
-                broadcast_presence(&mut inner, clients);
-                if inner.evictable() {
-                    candidates.push(*id);
-                }
+            table.iter().map(|(id, live)| (*id, live.clone())).collect()
+        };
+        let mut candidates = Vec::new();
+        for (id, live) in lives {
+            let mut inner = live.inner.lock().await;
+            crate::session::subscriber_map_remove(&mut inner.subscribers, client);
+            let clients = inner.presence();
+            broadcast_presence(&mut inner, clients);
+            if inner.evictable() {
+                candidates.push(id);
             }
         }
         for id in candidates {
@@ -193,16 +230,22 @@ impl Manager {
     }
 
     async fn evict_if_idle(&self, session: SessionId) {
-        let mut table = self.inner.sessions.lock().await;
-        let remove = match table.get(&session) {
-            Some(live) => live.inner.lock().await.evictable(),
-            None => false,
+        let ops = {
+            let mut table = self.inner.sessions.lock().await;
+            let Some(live) = table.get(&session) else {
+                return;
+            };
+            let inner = live.inner.lock().await;
+            if !inner.evictable() {
+                return;
+            }
+            let ops = inner.ops.clone();
+            drop(inner);
+            table.remove(&session);
+            ops
         };
-        if remove && let Some(live) = table.remove(&session) {
-            let ops = live.inner.lock().await.ops.clone();
-            let _ = ops.send(Op::Shutdown).await;
-            tracing::info!(session = session.0, "evicted idle session with no windows");
-        }
+        let _ = ops.send(Op::Shutdown).await;
+        tracing::info!(session = session.0, "evicted idle session with no windows");
     }
 
     pub(crate) async fn submit(
@@ -212,8 +255,11 @@ impl Manager {
         correlation: u64,
         mut op: Op,
     ) -> Result<(), String> {
-        let table = self.inner.sessions.lock().await;
-        let live = table.get(&session).ok_or("unknown session")?;
+        let live = {
+            let table = self.inner.sessions.lock().await;
+            table.get(&session).cloned()
+        };
+        let live = live.ok_or("unknown session")?;
         let (ops, task) = {
             let mut inner = live.inner.lock().await;
             let task = inner.allocate_task();
@@ -236,8 +282,11 @@ impl Manager {
     }
 
     pub(crate) async fn control(&self, session: SessionId, op: Op) -> Result<(), String> {
-        let table = self.inner.sessions.lock().await;
-        let live = table.get(&session).ok_or("unknown session")?;
+        let live = {
+            let table = self.inner.sessions.lock().await;
+            table.get(&session).cloned()
+        };
+        let live = live.ok_or("unknown session")?;
         let (ops, thread_id, rewritten) = {
             let mut inner = live.inner.lock().await;
             let rewritten = rewrite_resurrected_answer(&mut inner, &op);
@@ -260,10 +309,13 @@ impl Manager {
     }
 
     pub(crate) async fn list_sessions(&self) -> Vec<SessionInfo> {
-        let table = self.inner.sessions.lock().await;
+        let lives: Vec<LiveSession> = {
+            let table = self.inner.sessions.lock().await;
+            table.values().cloned().collect()
+        };
         let mut out = Vec::new();
         let now = Self::now_ms();
-        for live in table.values() {
+        for live in lives {
             let inner = live.inner.lock().await;
             out.push(SessionInfo {
                 session: inner.id,
@@ -278,11 +330,22 @@ impl Manager {
     }
 
     pub(crate) async fn kill_session(&self, session: SessionId) -> Result<(), String> {
-        let mut table = self.inner.sessions.lock().await;
-        let live = table.remove(&session).ok_or("unknown session")?;
-        let inner = live.inner.lock().await;
-        let _ = inner.ops.send(Op::Shutdown).await;
+        let live = {
+            let mut table = self.inner.sessions.lock().await;
+            table.remove(&session)
+        };
+        let live = live.ok_or("unknown session")?;
+        let ops = {
+            let inner = live.inner.lock().await;
+            inner.ops.clone()
+        };
+        let _ = ops.send(Op::Shutdown).await;
         Ok(())
+    }
+
+    async fn remove_session(&self, session: SessionId) {
+        let mut table = self.inner.sessions.lock().await;
+        table.remove(&session);
     }
 }
 
@@ -311,6 +374,8 @@ fn broadcast_presence(inner: &mut SessionInner, clients: Vec<ClientId>) {
 }
 
 fn spawn_pump(
+    manager: Manager,
+    session: SessionId,
     inner: Arc<Mutex<SessionInner>>,
     mut events: mpsc::Receiver<goat_protocol::Event>,
     handle: tokio::task::JoinHandle<()>,
@@ -359,6 +424,16 @@ fn spawn_pump(
                 }
             }
         }
+        {
+            let mut guard = inner.lock().await;
+            let frame = ServerFrame::Error {
+                message: "session engine stopped".to_owned(),
+            };
+            guard
+                .subscribers
+                .retain(|sub| sub.sender.try_send(frame.clone()).is_ok());
+        }
+        manager.remove_session(session).await;
         handle.abort();
     });
 }
