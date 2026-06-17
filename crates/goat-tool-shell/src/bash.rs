@@ -126,6 +126,7 @@ impl Tool for BashTool {
             };
             let mut stdout_pipe = guard.child.stdout.take();
             let mut stderr_pipe = guard.child.stderr.take();
+            let read_cap = ctx.max_output_bytes.saturating_mul(4).max(1);
 
             let result = time::timeout(timeout_dur, async {
                 let mut stdout = Vec::new();
@@ -133,16 +134,16 @@ impl Tool for BashTool {
                 let (stdout_result, stderr_result) = tokio::join!(
                     async {
                         if let Some(pipe) = stdout_pipe.as_mut() {
-                            pipe.read_to_end(&mut stdout).await
+                            read_capped(pipe, &mut stdout, read_cap).await
                         } else {
-                            Ok(0)
+                            Ok(())
                         }
                     },
                     async {
                         if let Some(pipe) = stderr_pipe.as_mut() {
-                            pipe.read_to_end(&mut stderr).await
+                            read_capped(pipe, &mut stderr, read_cap).await
                         } else {
-                            Ok(0)
+                            Ok(())
                         }
                     }
                 );
@@ -177,6 +178,23 @@ impl Tool for BashTool {
 }
 
 const SUMMARY_LINE_THRESHOLD: usize = 5;
+
+async fn read_capped<R>(reader: &mut R, buf: &mut Vec<u8>, cap: usize) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut chunk = vec![0u8; 8192];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        if buf.len() < cap {
+            let take = (cap - buf.len()).min(n);
+            buf.extend_from_slice(&chunk[..take]);
+        }
+    }
+}
 
 const DENIAL_MARKERS: [&str; 3] = [
     "Operation not permitted",
@@ -306,6 +324,24 @@ mod tests {
             .run(r#"{"command":"sleep 999","timeout_ms":100}"#, &ctx())
             .await;
         assert!(matches!(result, Err(ToolError::Timeout { .. })));
+    }
+
+    #[tokio::test]
+    async fn high_volume_output_is_capped_not_hung() {
+        let mut c = ctx();
+        c.max_output_bytes = 4096;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            BashTool.run(
+                r#"{"command":"head -c 50000000 /dev/zero | tr '\\0' 'a'"}"#,
+                &c,
+            ),
+        )
+        .await
+        .expect("command should finish without hanging")
+        .unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.len() < 4096 * 8, "output should be truncated");
     }
 
     #[cfg(target_os = "macos")]
