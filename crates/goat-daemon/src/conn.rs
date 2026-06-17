@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use futures::{SinkExt, StreamExt};
-use goat_wire::transport::Stream;
+use futures::{Sink, SinkExt, Stream, StreamExt};
+use goat_wire::transport::Stream as LocalStream;
 use goat_wire::{ClientFrame, PROTOCOL_VERSION, ServerConn, ServerFrame};
 use tokio::sync::mpsc;
 
@@ -9,34 +9,75 @@ use crate::manager::Manager;
 
 const CLIENT_QUEUE: usize = 1024;
 
+#[derive(Debug, Clone)]
+pub(crate) enum ClientOrigin {
+    Local,
+    Remote { device: String },
+}
+
+impl ClientOrigin {
+    fn is_local(&self) -> bool {
+        matches!(self, ClientOrigin::Local)
+    }
+}
+
 pub(crate) async fn handle_connection(
-    stream: Stream,
+    stream: LocalStream,
     manager: Manager,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
-    let mut conn: ServerConn<Stream> = ServerConn::new(stream);
+    let conn: ServerConn<LocalStream> = ServerConn::new(stream);
+    let (sink, source) = conn.split();
+    serve_connection(
+        sink,
+        source,
+        manager,
+        shutdown,
+        ClientOrigin::Local,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+}
 
-    if let Ok(ClientFrame::Hello { version }) = conn.recv().await {
-        if version != PROTOCOL_VERSION {
-            let _ = conn
-                .send(&ServerFrame::VersionMismatch {
+pub(crate) async fn serve_connection<Si, St>(
+    sink: Si,
+    mut source: St,
+    manager: Manager,
+    shutdown: tokio_util::sync::CancellationToken,
+    origin: ClientOrigin,
+    disconnect: tokio_util::sync::CancellationToken,
+) where
+    Si: Sink<ServerFrame> + Send + 'static,
+    St: Stream<Item = Result<ClientFrame, goat_wire::WireError>> + Unpin,
+{
+    let mut sink = Box::pin(sink);
+
+    match source.next().await {
+        Some(Ok(ClientFrame::Hello { version })) if version == PROTOCOL_VERSION => {}
+        Some(Ok(ClientFrame::Hello { .. })) => {
+            let _ = sink
+                .send(ServerFrame::VersionMismatch {
                     daemon_version: PROTOCOL_VERSION,
                 })
                 .await;
             return;
         }
-    } else {
-        let _ = conn
-            .send(&ServerFrame::Error {
-                message: "expected Hello".to_owned(),
-            })
-            .await;
-        return;
+        _ => {
+            let _ = sink
+                .send(ServerFrame::Error {
+                    message: "expected Hello".to_owned(),
+                })
+                .await;
+            return;
+        }
     }
 
     let client_id = manager.next_client_id();
-    if conn
-        .send(&ServerFrame::Welcome {
+    if let ClientOrigin::Remote { device } = &origin {
+        tracing::info!(client = client_id.0, device = %device, "remote client connected");
+    }
+    if sink
+        .send(ServerFrame::Welcome {
             version: PROTOCOL_VERSION,
             client_id,
         })
@@ -48,9 +89,6 @@ pub(crate) async fn handle_connection(
 
     let (out_tx, mut out_rx) = mpsc::channel::<ServerFrame>(CLIENT_QUEUE);
 
-    let (sink, mut source) = conn.split();
-    let mut sink = Box::pin(sink);
-
     let writer = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
             if sink.send(frame).await.is_err() {
@@ -60,12 +98,18 @@ pub(crate) async fn handle_connection(
     });
 
     let mut graceful = false;
-    while let Some(Ok(frame)) = source.next().await {
-        match dispatch(&manager, client_id, &out_tx, &shutdown, frame).await {
-            Disposition::Continue => {}
-            Disposition::Closed => {
-                graceful = true;
-                break;
+    loop {
+        tokio::select! {
+            () = disconnect.cancelled() => break,
+            next = source.next() => {
+                let Some(Ok(frame)) = next else { break };
+                match dispatch(&manager, client_id, &out_tx, &shutdown, &origin, frame).await {
+                    Disposition::Continue => {}
+                    Disposition::Closed => {
+                        graceful = true;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -89,6 +133,7 @@ async fn dispatch(
     client_id: goat_wire::ClientId,
     out_tx: &mpsc::Sender<ServerFrame>,
     shutdown: &tokio_util::sync::CancellationToken,
+    origin: &ClientOrigin,
     frame: ClientFrame,
 ) -> Disposition {
     match frame {
@@ -130,7 +175,18 @@ async fn dispatch(
         }
         ClientFrame::ListSessions => {
             let sessions = manager.list_sessions().await;
-            let _ = out_tx.send(ServerFrame::SessionList { sessions }).await;
+            let _ = out_tx.send(ServerFrame::Sessions { sessions }).await;
+            Disposition::Continue
+        }
+        ClientFrame::ListDirectory { path } => {
+            match Manager::list_directory(&path) {
+                Ok(children) => {
+                    let _ = out_tx.send(ServerFrame::Directory { path, children }).await;
+                }
+                Err(message) => {
+                    let _ = out_tx.send(ServerFrame::Error { message }).await;
+                }
+            }
             Disposition::Continue
         }
         ClientFrame::KillSession { session } => {
@@ -139,10 +195,84 @@ async fn dispatch(
             }
             Disposition::Continue
         }
+        ClientFrame::PairDevice { label } => {
+            if origin.is_local() {
+                match manager.pair_device(label).await {
+                    Ok((code, server_fingerprint, advertised)) => {
+                        let _ = out_tx
+                            .send(ServerFrame::PairingCode {
+                                code,
+                                server_fingerprint,
+                                advertised,
+                            })
+                            .await;
+                    }
+                    Err(message) => {
+                        let _ = out_tx.send(ServerFrame::Error { message }).await;
+                    }
+                }
+            } else {
+                let _ = out_tx
+                    .send(ServerFrame::Error {
+                        message: "pairing is local-only".to_owned(),
+                    })
+                    .await;
+            }
+            Disposition::Continue
+        }
+        ClientFrame::ListDevices => {
+            match manager.list_devices().await {
+                Ok(devices) => {
+                    let _ = out_tx.send(ServerFrame::Devices { devices }).await;
+                }
+                Err(message) => {
+                    let _ = out_tx.send(ServerFrame::Error { message }).await;
+                }
+            }
+            Disposition::Continue
+        }
+        ClientFrame::RevokeDevice { device } => {
+            match manager.revoke_device(&device).await {
+                Ok(ok) => {
+                    let _ = out_tx.send(ServerFrame::DeviceRevoked { ok }).await;
+                }
+                Err(message) => {
+                    let _ = out_tx.send(ServerFrame::Error { message }).await;
+                }
+            }
+            Disposition::Continue
+        }
         ClientFrame::StopDaemon => {
-            shutdown.cancel();
-            Disposition::Closed
+            if origin.is_local() {
+                shutdown.cancel();
+                Disposition::Closed
+            } else {
+                let _ = out_tx
+                    .send(ServerFrame::Error {
+                        message: "StopDaemon is local-only".to_owned(),
+                    })
+                    .await;
+                Disposition::Continue
+            }
         }
         ClientFrame::Goodbye => Disposition::Closed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClientOrigin;
+
+    #[test]
+    fn local_origin_is_local() {
+        assert!(ClientOrigin::Local.is_local());
+    }
+
+    #[test]
+    fn remote_origin_is_not_local() {
+        let origin = ClientOrigin::Remote {
+            device: "abc".to_owned(),
+        };
+        assert!(!origin.is_local());
     }
 }

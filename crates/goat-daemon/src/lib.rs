@@ -1,5 +1,6 @@
 mod conn;
 mod manager;
+mod remote;
 mod session;
 
 use std::path::{Path, PathBuf};
@@ -14,12 +15,21 @@ pub enum DaemonError {
     Io(#[from] std::io::Error),
     #[error("a daemon is already running at {0}")]
     AlreadyRunning(PathBuf),
+    #[error("remote error: {0}")]
+    Remote(#[from] goat_remote::RemoteError),
 }
 
 pub struct DaemonConfig {
     pub socket_path: PathBuf,
     pub auth_path: PathBuf,
     pub db_path: PathBuf,
+    pub remote: Option<RemoteSettings>,
+}
+
+pub struct RemoteSettings {
+    pub remote_dir: PathBuf,
+    pub bind: std::net::SocketAddr,
+    pub advertised: Vec<String>,
 }
 
 pub async fn serve(config: DaemonConfig) -> Result<(), DaemonError> {
@@ -28,6 +38,10 @@ pub async fn serve(config: DaemonConfig) -> Result<(), DaemonError> {
     let manager = Manager::new(config.auth_path, config.db_path);
     let shutdown = tokio_util::sync::CancellationToken::new();
     tracing::info!(socket = %config.socket_path.display(), "daemon listening");
+
+    if let Some(remote_settings) = config.remote {
+        spawn_remote(&manager, &shutdown, remote_settings)?;
+    }
 
     loop {
         tokio::select! {
@@ -49,6 +63,35 @@ pub async fn serve(config: DaemonConfig) -> Result<(), DaemonError> {
     }
 
     transport::cleanup(&config.socket_path);
+    Ok(())
+}
+
+fn spawn_remote(
+    manager: &Manager,
+    shutdown: &tokio_util::sync::CancellationToken,
+    settings: RemoteSettings,
+) -> Result<(), DaemonError> {
+    let devices_path = settings.remote_dir.join("devices.json");
+    let devices = goat_remote::Devices::load(devices_path)?;
+    let config = goat_remote::RemoteConfig {
+        remote_dir: settings.remote_dir,
+        bind: settings.bind,
+        advertised: settings.advertised,
+    };
+    let server = goat_remote::RemoteServer::new(config, devices.clone())?;
+    manager.set_remote(
+        server.pairing(),
+        server.devices(),
+        server.server_fingerprint().to_owned(),
+        server.advertised().to_vec(),
+    );
+    let handler = remote::handler(manager.clone(), devices, shutdown.clone());
+    let shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(err) = server.run(handler, shutdown).await {
+            tracing::warn!(%err, "remote server stopped");
+        }
+    });
     Ok(())
 }
 

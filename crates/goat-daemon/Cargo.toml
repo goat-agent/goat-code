@@ -12,6 +12,7 @@ goat-protocol = { workspace = true }
 goat-core = { workspace = true }
 goat-config = { workspace = true }
 goat-wire = { workspace = true }
+goat-remote = { workspace = true }
 goat-agent = { workspace = true }
 goat-auth = { workspace = true }
 goat-store = { workspace = true }
@@ -25,6 +26,14 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+goat-remote = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rcgen = { workspace = true }
+tokio-tungstenite = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
 
 [lints]
 workspace = true
