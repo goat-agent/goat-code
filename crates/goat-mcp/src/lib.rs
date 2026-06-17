@@ -154,6 +154,7 @@ impl McpManager {
 
 struct McpSession {
     server_name: String,
+    pid: Option<u32>,
     client: Mutex<RunningService<RoleClient, ()>>,
 }
 
@@ -172,8 +173,13 @@ impl McpSession {
             cmd.stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            #[cfg(unix)]
+            {
+                cmd.process_group(0);
+            }
         }))
         .spawn()?;
+        let pid = transport.id();
         if let Some(stderr) = stderr {
             spawn_stderr_logger(server_name.clone(), stderr);
         }
@@ -192,6 +198,7 @@ impl McpSession {
         Ok((
             Self {
                 server_name,
+                pid,
                 client: Mutex::new(client),
             },
             tools,
@@ -230,6 +237,20 @@ impl McpSession {
         let mut client = self.client.lock().await;
         if let Err(err) = client.close_with_timeout(SHUTDOWN_TIMEOUT).await {
             tracing::warn!(%err, server = %self.server_name, "failed to close mcp session");
+        }
+    }
+}
+
+impl Drop for McpSession {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            let _ = std::process::Command::new("kill")
+                .arg("-KILL")
+                .arg(format!("-{pid}"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
     }
 }

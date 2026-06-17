@@ -95,13 +95,20 @@ pub(crate) async fn run_round_with_retry(
     ctx: &Ctx<'_>,
     run: &Run<'_>,
     env: &LoopEnv<'_>,
-    request: &Request,
+    messages: &[goat_provider::Message],
     token: &CancellationToken,
 ) -> RoundResult {
     let started = Instant::now();
     let mut attempt = 1u32;
     loop {
-        let result = run_round(ctx, run, env.provider, request.clone(), token).await;
+        let request = Request {
+            model: env.target.model.clone(),
+            messages: messages.to_vec(),
+            tools: env.tool_defs.to_vec(),
+            effort: env.target.effort,
+            tool_choice: goat_provider::ToolChoice::Auto,
+        };
+        let result = run_round(ctx, run, env.provider, request, token).await;
         let RoundEnd::Failed(error) = &result.end else {
             return result;
         };

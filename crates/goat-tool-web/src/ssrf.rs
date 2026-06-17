@@ -28,11 +28,42 @@ fn is_blocked_v4(v4: Ipv4Addr) -> bool {
 }
 
 fn is_blocked_v6(v6: Ipv6Addr) -> bool {
+    if let Some(v4) = embedded_v4(v6) {
+        return is_blocked_v4(v4);
+    }
     v6.is_loopback()
         || v6.is_unspecified()
         || v6.is_multicast()
         || v6.is_unique_local()
         || v6.is_unicast_link_local()
+}
+
+fn embedded_v4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = v6.segments();
+    if segments[0] == 0x2002 {
+        return Some(Ipv4Addr::new(
+            (segments[1] >> 8) as u8,
+            segments[1] as u8,
+            (segments[2] >> 8) as u8,
+            segments[2] as u8,
+        ));
+    }
+    if segments[0] == 0x2001 && segments[1] == 0x0000 {
+        let teredo = (u32::from(segments[6]) << 16) | u32::from(segments[7]);
+        return Some(Ipv4Addr::from(!teredo));
+    }
+    if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2..6] == [0, 0, 0, 0] {
+        return Some(Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        ));
+    }
+    if segments[..6] == [0, 0, 0, 0, 0, 0] {
+        return v6.to_ipv4().filter(|v4| !v4.is_unspecified());
+    }
+    None
 }
 
 pub struct GuardedResolver;
@@ -76,6 +107,20 @@ mod tests {
         assert!(is_blocked(ip("fc00::1")));
         assert!(is_blocked(ip("fe80::1")));
         assert!(is_blocked(ip("::ffff:127.0.0.1")));
+    }
+
+    #[test]
+    fn blocks_ipv6_transition_ranges() {
+        assert!(is_blocked(ip("2002:7f00:1::")));
+        assert!(is_blocked(ip("2002:a00:5::")));
+        assert!(is_blocked(ip("2002:c0a8:101::")));
+        assert!(is_blocked(ip("64:ff9b::7f00:1")));
+        assert!(is_blocked(ip("64:ff9b::a00:5")));
+    }
+
+    #[test]
+    fn allows_public_6to4() {
+        assert!(!is_blocked(ip("2002:808:808::")));
     }
 
     #[test]

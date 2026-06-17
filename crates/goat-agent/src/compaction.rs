@@ -11,6 +11,7 @@ struct Measured {
 #[derive(Default)]
 pub(crate) struct ContextTracker {
     measured: Option<Measured>,
+    tool_def_cache: std::cell::Cell<Option<(usize, usize, usize, u32)>>,
 }
 
 impl ContextTracker {
@@ -29,12 +30,30 @@ impl ContextTracker {
         self.measured = None;
     }
 
+    fn tool_def_tokens(&self, tool_defs: &[ToolDefinition]) -> u32 {
+        let fingerprint: usize = tool_defs
+            .iter()
+            .map(|def| def.name.len().wrapping_add(def.description.len()))
+            .fold(0usize, usize::wrapping_add);
+        let key = (tool_defs.as_ptr() as usize, tool_defs.len(), fingerprint);
+        if let Some((ptr, len, fp, tokens)) = self.tool_def_cache.get()
+            && (ptr, len, fp) == key
+        {
+            return tokens;
+        }
+        let tokens = estimate_tool_defs(tool_defs);
+        self.tool_def_cache.set(Some((key.0, key.1, key.2, tokens)));
+        tokens
+    }
+
     pub(crate) fn estimate(&self, messages: &[Message], tool_defs: &[ToolDefinition]) -> u32 {
         match &self.measured {
             Some(measured) if measured.history_len <= messages.len() => measured
                 .tokens
                 .saturating_add(estimate_messages(&messages[measured.history_len..])),
-            _ => estimate_tool_defs(tool_defs).saturating_add(estimate_messages(messages)),
+            _ => self
+                .tool_def_tokens(tool_defs)
+                .saturating_add(estimate_messages(messages)),
         }
     }
 }
@@ -514,6 +533,22 @@ mod tests {
         let messages = vec![Message::text(MessageRole::User, "a".repeat(400))];
         let estimate = tracker.estimate(&messages, &[]);
         assert!((100..=120).contains(&estimate), "got {estimate}");
+    }
+
+    #[test]
+    fn tool_def_estimate_is_cached_and_consistent() {
+        use goat_provider::ToolDefinition;
+        let tracker = ContextTracker::new();
+        let tool_defs = vec![ToolDefinition {
+            name: "Read".to_owned(),
+            description: "read a file".to_owned(),
+            input_schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }];
+        let messages = vec![Message::text(MessageRole::User, "hi")];
+        let first = tracker.estimate(&messages, &tool_defs);
+        let second = tracker.estimate(&messages, &tool_defs);
+        assert_eq!(first, second);
+        assert!(first > tracker.estimate(&messages, &[]));
     }
 
     #[test]

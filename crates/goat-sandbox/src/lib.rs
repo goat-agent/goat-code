@@ -52,13 +52,24 @@ mod backend {
 
     const PROFILE_NET: &str = "(allow network*)\n";
 
-    const SECRET_SUBPATHS: [&str; 6] = [
+    const SECRET_SUBDIRS: [&str; 9] = [
         ".ssh",
         ".goat-code",
         ".aws",
         ".gnupg",
         ".config/gcloud",
         ".config/goat-code",
+        ".config/gh",
+        ".kube",
+        ".docker",
+    ];
+
+    const SECRET_FILES: [&str; 5] = [
+        ".netrc",
+        ".git-credentials",
+        ".npmrc",
+        ".pgpass",
+        ".config/git/credentials",
     ];
 
     fn secret_read_denies() -> String {
@@ -68,13 +79,17 @@ mod backend {
         };
         let home = Path::new(&home);
         let mut out = String::new();
-        for sub in SECRET_SUBPATHS {
-            let path = home.join(sub);
-            let Some(path) = path.to_str() else {
-                continue;
-            };
-            let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
-            let _ = writeln!(out, "(deny file-read* (subpath \"{escaped}\"))");
+        for sub in SECRET_SUBDIRS {
+            if let Some(path) = home.join(sub).to_str() {
+                let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+                let _ = writeln!(out, "(deny file-read* (subpath \"{escaped}\"))");
+            }
+        }
+        for sub in SECRET_FILES {
+            if let Some(path) = home.join(sub).to_str() {
+                let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+                let _ = writeln!(out, "(deny file-read* (literal \"{escaped}\"))");
+            }
         }
         out
     }
@@ -120,13 +135,24 @@ mod backend {
     use super::SandboxedCommand;
     use std::{ffi::OsString, path::Path, sync::OnceLock};
 
-    const SECRET_SUBPATHS: [&str; 6] = [
+    const SECRET_SUBDIRS: [&str; 9] = [
         ".ssh",
         ".goat-code",
         ".aws",
         ".gnupg",
         ".config/gcloud",
         ".config/goat-code",
+        ".config/gh",
+        ".kube",
+        ".docker",
+    ];
+
+    const SECRET_FILES: [&str; 5] = [
+        ".netrc",
+        ".git-credentials",
+        ".npmrc",
+        ".pgpass",
+        ".config/git/credentials",
     ];
 
     fn bwrap_path() -> Option<&'static Path> {
@@ -171,11 +197,21 @@ mod backend {
             OsString::from("--unshare-cgroup-try"),
             OsString::from("--die-with-parent"),
         ];
-        for sub in SECRET_SUBPATHS {
+        for sub in SECRET_SUBDIRS {
             if let Some(home) = std::env::var_os("HOME") {
                 let path = Path::new(&home).join(sub);
                 if path.exists() {
                     args.push(OsString::from("--tmpfs"));
+                    args.push(path.into());
+                }
+            }
+        }
+        for sub in SECRET_FILES {
+            if let Some(home) = std::env::var_os("HOME") {
+                let path = Path::new(&home).join(sub);
+                if path.exists() {
+                    args.push(OsString::from("--ro-bind"));
+                    args.push(OsString::from("/dev/null"));
                     args.push(path.into());
                 }
             }
@@ -235,6 +271,7 @@ mod tests {
         assert!(profile.contains(&format!(
             "(deny file-read* (subpath \"{home}/.goat-code\"))"
         )));
+        assert!(profile.contains(&format!("(deny file-read* (literal \"{home}/.netrc\"))")));
         assert!(!profile.contains("/work"));
     }
 }

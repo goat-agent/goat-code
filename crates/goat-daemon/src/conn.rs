@@ -80,16 +80,7 @@ async fn dispatch(
         ClientFrame::Hello { .. } => true,
         ClientFrame::OpenSession { cwd, resume } => {
             let cwd_path = PathBuf::from(&cwd);
-            let existing = if matches!(resume, goat_wire::ResumeMode::Latest) {
-                manager.find_live_by_cwd(&cwd_path).await
-            } else {
-                None
-            };
-            let opened = match existing {
-                Some(session) => Ok(session),
-                None => manager.open_session(cwd_path, resume).await,
-            };
-            match opened {
+            match manager.open_or_attach(cwd_path, resume).await {
                 Ok(session) => {
                     let _ = out_tx
                         .send(ServerFrame::SessionOpened {

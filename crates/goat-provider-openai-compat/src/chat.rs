@@ -222,6 +222,13 @@ fn drain_tool_calls(tool_calls: &mut ToolAccumulator) -> Vec<StreamEvent> {
         .collect()
 }
 
+fn data_has_error(data: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(data)
+        .ok()
+        .and_then(|value| value.get("error").map(|_| ()))
+        .is_some()
+}
+
 async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<StreamEvent>) {
     let mut stream = response.bytes_stream().eventsource();
     let mut tool_calls: ToolAccumulator = HashMap::new();
@@ -231,6 +238,14 @@ async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<StreamEv
             Ok(event) => {
                 if event.data == "[DONE]" {
                     break;
+                }
+                if event.event == "error" || data_has_error(&event.data) {
+                    let _ = events
+                        .send(StreamEvent::Failed {
+                            error: common::classify_stream_error(&event.data),
+                        })
+                        .await;
+                    return;
                 }
                 let Ok(chunk) = serde_json::from_str::<ChatChunk>(&event.data) else {
                     continue;
@@ -373,7 +388,8 @@ impl Provider for OpenAiCompatProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatChunk, ToolAccumulator, accumulate_tool_calls, drain_tool_calls, to_chat_messages,
+        ChatChunk, ToolAccumulator, accumulate_tool_calls, data_has_error, drain_tool_calls,
+        to_chat_messages,
     };
     use goat_provider::{ContentBlock, Message, MessageRole, StreamEvent};
     use serde_json::json;
@@ -381,6 +397,17 @@ mod tests {
     fn chunk_tool_calls(data: &str) -> Vec<super::ToolCallChunk> {
         let chunk: ChatChunk = serde_json::from_str(data).unwrap();
         chunk.choices.into_iter().next().unwrap().delta.tool_calls
+    }
+
+    #[test]
+    fn error_chunk_is_detected() {
+        assert!(data_has_error(
+            r#"{"error":{"message":"bad","type":"invalid_request_error"}}"#
+        ));
+        assert!(!data_has_error(
+            r#"{"choices":[{"delta":{"content":"hi"}}]}"#
+        ));
+        assert!(!data_has_error("not json"));
     }
 
     #[test]

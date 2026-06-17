@@ -289,20 +289,20 @@ fn coalesce_user_text_contents(contents: Vec<Value>) -> Vec<Value> {
     out
 }
 
-pub fn inner_request_to_value(inner: &InnerRequest) -> Value {
+pub fn inner_request_to_value(inner: InnerRequest) -> Value {
     let mut obj = serde_json::Map::new();
-    obj.insert("contents".to_owned(), Value::Array(inner.contents.clone()));
-    if let Some(si) = &inner.system_instruction {
-        obj.insert("systemInstruction".to_owned(), si.clone());
+    obj.insert("contents".to_owned(), Value::Array(inner.contents));
+    if let Some(si) = inner.system_instruction {
+        obj.insert("systemInstruction".to_owned(), si);
     }
-    if let Some(tools) = &inner.tools {
-        obj.insert("tools".to_owned(), tools.clone());
+    if let Some(tools) = inner.tools {
+        obj.insert("tools".to_owned(), tools);
     }
-    if let Some(tool_config) = &inner.tool_config {
-        obj.insert("toolConfig".to_owned(), tool_config.clone());
+    if let Some(tool_config) = inner.tool_config {
+        obj.insert("toolConfig".to_owned(), tool_config);
     }
-    if let Some(gc) = &inner.generation_config {
-        obj.insert("generationConfig".to_owned(), gc.clone());
+    if let Some(gc) = inner.generation_config {
+        obj.insert("generationConfig".to_owned(), gc);
     }
     Value::Object(obj)
 }
@@ -438,7 +438,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         assert_eq!(v["contents"][0]["role"], "user");
         assert_eq!(v["contents"][0]["parts"][0]["text"], "hello");
     }
@@ -452,7 +452,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         assert!(v.get("systemInstruction").is_some());
         assert_eq!(v["systemInstruction"]["parts"][0]["text"], "be helpful");
         assert!(v["contents"].as_array().is_none_or(Vec::is_empty));
@@ -467,7 +467,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         assert_eq!(v["contents"][0]["role"], "model");
     }
 
@@ -481,7 +481,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let part = &v["contents"][0]["parts"][0];
         assert_eq!(part["thought"], true);
         assert_eq!(part["text"], "ponder");
@@ -498,7 +498,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let part = &v["contents"][0]["parts"][0];
         assert!(part.get("thoughtSignature").is_none());
     }
@@ -514,7 +514,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let fc = &v["contents"][0]["parts"][0]["functionCall"];
         assert_eq!(fc["name"], "my_tool");
         assert_eq!(fc["id"], "real-id-123");
@@ -531,7 +531,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let fc = &v["contents"][0]["parts"][0]["functionCall"];
         assert!(fc.get("id").is_none());
         assert_eq!(fc["name"], "my_tool");
@@ -554,7 +554,7 @@ mod tests {
             },
         ]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         assert_eq!(v["contents"].as_array().unwrap().len(), 1);
         assert_eq!(v["contents"][0]["role"], "user");
         assert_eq!(v["contents"][0]["parts"][0]["text"], "first");
@@ -580,7 +580,7 @@ mod tests {
             },
         ]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         assert_eq!(v["contents"].as_array().unwrap().len(), 2);
         assert!(
             v["contents"][1]["parts"][0]
@@ -610,7 +610,7 @@ mod tests {
             },
         ]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let fr = &v["contents"][1]["parts"][0]["functionResponse"];
         assert_eq!(fr["name"], "read_file");
         assert_eq!(fr["id"], "real-id-1");
@@ -634,7 +634,7 @@ mod tests {
             },
         ]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let fr = &v["contents"][1]["parts"][0]["functionResponse"];
         assert!(fr.get("id").is_none());
         assert_eq!(fr["name"], "write_file");
@@ -766,7 +766,7 @@ mod tests {
             effort: None,
         };
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let decl = &v["tools"][0]["functionDeclarations"][0];
         assert_eq!(decl["name"], "fn1");
         assert!(decl["parameters"].get("$schema").is_none());

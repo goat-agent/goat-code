@@ -1,6 +1,6 @@
 use goat_protocol::Event;
 use goat_provider::{
-    ContentBlock, Message, MessageRole, Provider, Request, StreamError, StreamEvent, ToolChoice,
+    ContentBlock, Message, MessageRole, Provider, Request, StreamError, StreamEvent,
 };
 use goat_tool::ToolContext;
 use tokio::sync::mpsc;
@@ -430,14 +430,8 @@ pub(crate) async fn core_loop(
                 }
             }
         }
-        let request = Request {
-            model: env.target.model.clone(),
-            messages: conversation.messages().to_vec(),
-            tools: env.tool_defs.to_vec(),
-            effort: env.target.effort,
-            tool_choice: ToolChoice::Auto,
-        };
-        let round = crate::retry::run_round_with_retry(ctx, run, env, &request, token).await;
+        let round =
+            crate::retry::run_round_with_retry(ctx, run, env, conversation.messages(), token).await;
         match &round.end {
             RoundEnd::Cancelled => return LoopOutcome::Cancelled,
             RoundEnd::Failed(StreamError::ContextOverflow { .. }) if !compacted_for_overflow => {

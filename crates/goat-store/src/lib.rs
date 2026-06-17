@@ -2,7 +2,7 @@ mod models;
 mod schema;
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -16,29 +16,77 @@ pub use models::{
     StoredMessage, Thread,
 };
 
+const READER_POOL_MAX: usize = 4;
+
+struct ReaderPool {
+    path: Option<PathBuf>,
+    idle: Mutex<Vec<Connection>>,
+}
+
+impl ReaderPool {
+    fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            path,
+            idle: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn checkout(&self) -> Result<Connection, StoreError> {
+        if let Some(conn) = self
+            .idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
+        {
+            return Ok(conn);
+        }
+        let path = self
+            .path
+            .as_ref()
+            .expect("checkout is only called for file-backed stores");
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "query_only", "ON")?;
+        Ok(conn)
+    }
+
+    fn checkin(&self, conn: Connection) {
+        let mut idle = self
+            .idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if idle.len() < READER_POOL_MAX {
+            idle.push(conn);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
-    conn: Arc<Mutex<Connection>>,
+    write: Arc<Mutex<Connection>>,
+    readers: Arc<ReaderPool>,
 }
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        migrate(&conn)?;
+        migrate(&mut conn)?;
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            write: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(ReaderPool::new(Some(path.to_path_buf()))),
         })
     }
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
-        let conn = Connection::open_in_memory()?;
-        migrate(&conn)?;
+        let mut conn = Connection::open_in_memory()?;
+        migrate(&mut conn)?;
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            write: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(ReaderPool::new(None)),
         })
     }
 
@@ -47,12 +95,38 @@ impl Store {
         F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
         T: Send + 'static,
     {
-        let conn = Arc::clone(&self.conn);
+        let conn = Arc::clone(&self.write);
         match tokio::task::spawn_blocking(move || {
             let guard = conn
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&guard)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(err) => Err(StoreError::BlockingTask(err.to_string())),
+        }
+    }
+
+    async fn run_read<T, F>(&self, f: F) -> Result<T, StoreError>
+    where
+        F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let write = Arc::clone(&self.write);
+        let readers = Arc::clone(&self.readers);
+        match tokio::task::spawn_blocking(move || {
+            if readers.path.is_none() {
+                let guard = write
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                return f(&guard);
+            }
+            let conn = readers.checkout()?;
+            let result = f(&conn);
+            readers.checkin(conn);
+            result
         })
         .await
         {
@@ -84,7 +158,7 @@ impl Store {
     }
 
     pub async fn get_thread(&self, id: i64) -> Result<Option<Thread>, StoreError> {
-        self.run(move |conn| {
+        self.run_read(move |conn| {
             conn.query_row(
                 "SELECT id, cwd, title, provider, model, account, effort, mode, created_at, updated_at
                  FROM threads WHERE id = ?1",
@@ -98,7 +172,7 @@ impl Store {
     }
 
     pub async fn latest_thread_in(&self, cwd: String) -> Result<Option<Thread>, StoreError> {
-        self.run(move |conn| {
+        self.run_read(move |conn| {
             conn.query_row(
                 "SELECT id, cwd, title, provider, model, account, effort, mode, created_at, updated_at
                  FROM threads WHERE cwd = ?1 ORDER BY updated_at DESC, id DESC LIMIT 1",
@@ -116,7 +190,7 @@ impl Store {
         cwd: String,
         limit: i64,
     ) -> Result<Vec<Thread>, StoreError> {
-        self.run(move |conn| {
+        self.run_read(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, cwd, title, provider, model, account, effort, mode, created_at, updated_at
                  FROM threads WHERE cwd = ?1 ORDER BY updated_at DESC, id DESC LIMIT ?2",
@@ -132,7 +206,7 @@ impl Store {
     }
 
     pub async fn last_turn_interrupted(&self, thread_id: i64) -> Result<bool, StoreError> {
-        self.run(move |conn| {
+        self.run_read(move |conn| {
             let status: Option<String> = conn
                 .query_row(
                     "SELECT status FROM turns WHERE thread_id = ?1
@@ -169,7 +243,7 @@ impl Store {
     }
 
     pub async fn session_events(&self, thread_id: i64) -> Result<Vec<(u64, String)>, StoreError> {
-        self.run(move |conn| {
+        self.run_read(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT seq, body FROM session_events
                  WHERE thread_id = ?1 ORDER BY seq ASC",
@@ -226,7 +300,7 @@ impl Store {
     }
 
     pub async fn open_prompts(&self, thread_id: i64) -> Result<Vec<OpenPrompt>, StoreError> {
-        self.run(move |conn| {
+        self.run_read(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT call_id, kind, payload, task_id FROM open_prompts
                  WHERE thread_id = ?1 ORDER BY created_at ASC",
@@ -250,7 +324,7 @@ impl Store {
     }
 
     pub async fn get_messages(&self, thread_id: i64) -> Result<Vec<StoredMessage>, StoreError> {
-        self.run(move |conn| {
+        self.run_read(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, turn_id, role, body, created_at
                  FROM messages WHERE thread_id = ?1 ORDER BY id ASC",
@@ -454,7 +528,7 @@ impl Store {
         &self,
         thread_id: i64,
     ) -> Result<Vec<Compaction>, StoreError> {
-        self.run(move |conn| {
+        self.run_read(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, summary, after_message_id, tail_from_message_id, preserved_message_ids, tokens_before, tokens_after, created_at
                  FROM compactions WHERE thread_id = ?1 ORDER BY id ASC",
@@ -832,6 +906,55 @@ mod tests {
             store.compactions_for_thread(thread_id).await.unwrap().len(),
             1
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn migrates_v5_database_adds_turns_index() {
+        let path = std::env::temp_dir().join("goat-store-v5-migration-test.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V1).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V2).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V3).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V4).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V5).unwrap();
+            conn.execute_batch("PRAGMA user_version = 5;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let has_index = store
+            .run(|conn| {
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_turns_thread'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+                Ok((count, version))
+            })
+            .await
+            .unwrap();
+        assert_eq!(has_index, (1, 7));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn reader_pool_sees_committed_writes() {
+        let path = std::env::temp_dir().join("goat-store-readerpool-test.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        let id = store.create_thread(sample_thread()).await.unwrap();
+        for _ in 0..6 {
+            let got = store.get_thread(id).await.unwrap();
+            assert!(got.is_some());
+        }
+        store
+            .update_thread_title(id, "renamed".to_owned())
+            .await
+            .unwrap();
+        let after = store.get_thread(id).await.unwrap().unwrap();
+        assert_eq!(after.title.as_deref(), Some("renamed"));
         let _ = std::fs::remove_file(&path);
     }
 

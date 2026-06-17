@@ -60,8 +60,46 @@ pub fn resolve_with_policy(
                 path: raw.to_owned(),
             });
         }
+    } else {
+        let real = real_ancestor_path(&normalized).ok_or_else(|| ToolError::PathEscape {
+            path: raw.to_owned(),
+        })?;
+        let real_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        let real_extra = extra.map(|e| e.canonicalize().unwrap_or_else(|_| e.to_path_buf()));
+        if !within(&real_cwd, real_extra.as_deref(), &real) {
+            return Err(ToolError::PathEscape {
+                path: raw.to_owned(),
+            });
+        }
+        let real_blocked: Vec<PathBuf> = blocked
+            .iter()
+            .map(|b| b.canonicalize().unwrap_or_else(|_| b.clone()))
+            .collect();
+        if blocked_path(&real_blocked, &real) {
+            return Err(ToolError::PathBlocked {
+                path: raw.to_owned(),
+            });
+        }
     }
     Ok(normalized)
+}
+
+fn real_ancestor_path(normalized: &Path) -> Option<PathBuf> {
+    let mut ancestor = normalized;
+    let mut remaining: Vec<Component> = Vec::new();
+    loop {
+        if std::fs::symlink_metadata(ancestor).is_ok() {
+            break;
+        }
+        let component = ancestor.components().next_back()?;
+        remaining.push(component);
+        ancestor = ancestor.parent()?;
+    }
+    let mut real = ancestor.canonicalize().ok()?;
+    for component in remaining.into_iter().rev() {
+        real.push(component);
+    }
+    Some(lexical_normalize(&real))
 }
 
 pub fn blocked_path(blocked: &[PathBuf], path: &Path) -> bool {
@@ -152,6 +190,47 @@ mod tests {
         symlink("/etc", cwd.join("link")).unwrap();
         let result = resolve_in_cwd(&cwd, "link/passwd");
         assert!(matches!(result, Err(ToolError::PathEscape { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_through_symlinked_parent_to_outside_rejected() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside = outside.path().canonicalize().unwrap();
+        symlink(&outside, cwd.join("link")).unwrap();
+        let result = resolve_in_cwd(&cwd, "link/newfile.txt");
+        assert!(matches!(result, Err(ToolError::PathEscape { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_target_rejected() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        symlink("/etc/nonexistent-goat-target", cwd.join("dl")).unwrap();
+        let result = resolve_in_cwd(&cwd, "dl");
+        assert!(matches!(result, Err(ToolError::PathEscape { .. })));
+    }
+
+    #[test]
+    fn new_file_under_existing_dir_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(cwd.join("sub")).unwrap();
+        let resolved = resolve_in_cwd(&cwd, "sub/new.txt").unwrap();
+        assert_eq!(resolved, cwd.join("sub").join("new.txt"));
+    }
+
+    #[test]
+    fn new_file_under_missing_dirs_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let resolved = resolve_in_cwd(&cwd, "a/b/c.txt").unwrap();
+        assert_eq!(resolved, cwd.join("a").join("b").join("c.txt"));
     }
 
     #[test]

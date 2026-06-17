@@ -96,14 +96,11 @@ pub struct App {
     pub(crate) composer: Composer,
     pub(crate) highlighter: SyntectHighlighter,
     pub(crate) cwd: String,
-    pub(crate) active: Option<TaskId>,
-    pub(crate) active_shell: bool,
     pub(crate) next_task: u64,
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
     pub(crate) clear_arm: Option<u16>,
     pub(crate) queued: Vec<(TaskId, String)>,
-    pub(crate) thinking: bool,
     pub(crate) should_quit: bool,
     pub(crate) dirty: bool,
     pub(crate) scroll: usize,
@@ -112,30 +109,48 @@ pub struct App {
     pub(crate) models: Vec<ModelEntry>,
     pub(crate) model: Option<ModelTarget>,
     pub(crate) overlay: Overlay,
-    pub(crate) pending_ask: Option<(AskPicker, ToolCallId)>,
-    pub(crate) pending_resume: Option<ResumeIntent>,
+    pub(crate) pending: PendingState,
     pub(crate) account_entries: Vec<AccountEntry>,
     pub(crate) mouse_capture: bool,
     pub(crate) computer_use: bool,
     pub(crate) browser: bool,
     pub(crate) commands: CommandRegistry,
-    pub(crate) task_start: Option<std::time::Instant>,
     pub(crate) toasts: Vec<crate::toast::Toast>,
     pub(crate) agent_runs: Vec<AgentRunView>,
     pub(crate) main_view: MainView,
-    pub(crate) usage_last: HashMap<(String, String), Usage>,
-    pub(crate) usage_total: HashMap<(String, String), (u64, u64)>,
-    pub(crate) rate_limits: HashMap<(String, String), (RateLimitSnapshot, i64)>,
-    pub(crate) usage_scroll: usize,
+    pub(crate) turn: TurnStatus,
+    pub(crate) usage: UsageState,
     pub(crate) context_window: HashMap<(String, String), u32>,
     pub(crate) compaction_threshold: Option<u32>,
-    pub(crate) retry: Option<RetryState>,
-    pub(crate) compacting: bool,
-    pub(crate) turn_tokens: u64,
     pub(crate) focused: bool,
     pub(crate) bell_pending: bool,
     pub(crate) mode: goat_protocol::Mode,
     pub(crate) picker: Option<ratatui_image::picker::Picker>,
+}
+
+#[derive(Default)]
+pub(crate) struct UsageState {
+    pub(crate) last: HashMap<(String, String), Usage>,
+    pub(crate) total: HashMap<(String, String), (u64, u64)>,
+    pub(crate) rate_limits: HashMap<(String, String), (RateLimitSnapshot, i64)>,
+    pub(crate) scroll: usize,
+    pub(crate) turn_tokens: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingState {
+    pub(crate) ask: Option<(AskPicker, ToolCallId)>,
+    pub(crate) resume: Option<ResumeIntent>,
+}
+
+#[derive(Default)]
+pub(crate) struct TurnStatus {
+    pub(crate) active: Option<TaskId>,
+    pub(crate) active_shell: bool,
+    pub(crate) thinking: bool,
+    pub(crate) task_start: Option<std::time::Instant>,
+    pub(crate) retry: Option<RetryState>,
+    pub(crate) compacting: bool,
 }
 
 pub(crate) struct RetryState {
@@ -158,14 +173,11 @@ impl App {
             composer: Composer::default(),
             highlighter: SyntectHighlighter::new(),
             cwd,
-            active: None,
-            active_shell: false,
             next_task: 1,
             spinner: 0,
             quit_arm: None,
             clear_arm: None,
             queued: Vec::new(),
-            thinking: false,
             should_quit: false,
             dirty: true,
             scroll: 0,
@@ -174,26 +186,19 @@ impl App {
             models: Vec::new(),
             model: None,
             overlay: Overlay::None,
-            pending_ask: None,
-            pending_resume: None,
+            pending: PendingState::default(),
             account_entries: Vec::new(),
             mouse_capture: cfg.mouse_capture_enabled,
             computer_use: cfg.computer_use_enabled,
             browser: cfg.browser_enabled,
             commands: CommandRegistry::builtin(),
-            task_start: None,
             toasts: Vec::new(),
             agent_runs: Vec::new(),
             main_view: MainView::Live,
-            usage_last: HashMap::new(),
-            usage_total: HashMap::new(),
-            rate_limits: HashMap::new(),
-            usage_scroll: 0,
+            turn: TurnStatus::default(),
+            usage: UsageState::default(),
             context_window: HashMap::new(),
             compaction_threshold: None,
-            retry: None,
-            compacting: false,
-            turn_tokens: 0,
             focused: true,
             bell_pending: false,
             mode: goat_protocol::Mode::Normal,
@@ -204,7 +209,7 @@ impl App {
     pub(crate) fn update(&mut self, event: AppEvent) -> Vec<Op> {
         match event {
             AppEvent::Tick => {
-                if self.active.is_some() {
+                if self.turn.active.is_some() {
                     self.spinner = self.spinner.wrapping_add(1);
                     self.dirty = true;
                 }
@@ -344,25 +349,25 @@ impl App {
                 self.apply_effort(effort)
             }
             CommandEffect::OpenThreadPicker => {
-                if self.active.is_some() {
+                if self.turn.active.is_some() {
                     self.push_toast(
                         NotifyKind::Info,
                         "finish the current task before resuming".to_owned(),
                     );
                     return Vec::new();
                 }
-                self.pending_resume = Some(ResumeIntent::Picker);
+                self.pending.resume = Some(ResumeIntent::Picker);
                 vec![Op::ListThreads]
             }
             CommandEffect::ResumeIndex(index) => {
-                if self.active.is_some() {
+                if self.turn.active.is_some() {
                     self.push_toast(
                         NotifyKind::Info,
                         "finish the current task before resuming".to_owned(),
                     );
                     return Vec::new();
                 }
-                self.pending_resume = Some(ResumeIntent::Index(index));
+                self.pending.resume = Some(ResumeIntent::Index(index));
                 vec![Op::ListThreads]
             }
             CommandEffect::OpenConfig => {
@@ -381,7 +386,7 @@ impl App {
             }
             CommandEffect::RenameConversation(title) => vec![Op::RenameThread { title }],
             CommandEffect::ClearConversation => {
-                if self.active.is_some() {
+                if self.turn.active.is_some() {
                     self.push_toast(
                         NotifyKind::Info,
                         "finish the current task before clearing".to_owned(),
@@ -398,7 +403,7 @@ impl App {
             CommandEffect::CompactConversation(instructions) => {
                 let id = TaskId(self.next_task);
                 self.next_task += 1;
-                if self.active.is_some() {
+                if self.turn.active.is_some() {
                     self.push_toast(
                         NotifyKind::Info,
                         "will compact after the current task".to_owned(),
@@ -417,7 +422,7 @@ impl App {
             }
             CommandEffect::OpenUsage => {
                 self.overlay = Overlay::Usage;
-                self.usage_scroll = 0;
+                self.usage.scroll = 0;
                 self.dirty = true;
                 Vec::new()
             }
@@ -437,7 +442,7 @@ impl App {
             goat_protocol::Mode::Normal
         };
         let mut ops = vec![Op::SetMode { mode: target }];
-        if self.active.is_some() {
+        if self.turn.active.is_some() {
             self.push_toast(
                 NotifyKind::Info,
                 format!("{} mode starts after this turn", mode_label(target)),
@@ -558,7 +563,7 @@ impl App {
             if self.composer.text().trim().is_empty() {
                 return Vec::new();
             }
-            if self.active.is_some() {
+            if self.turn.active.is_some() {
                 self.push_toast(
                     NotifyKind::Info,
                     "finish or interrupt the task before running a shell command".to_owned(),
@@ -585,8 +590,8 @@ impl App {
     pub(crate) fn submit_shell(&mut self, command: String) -> Vec<Op> {
         let id = TaskId(self.next_task);
         self.next_task += 1;
-        self.active = Some(id);
-        self.active_shell = true;
+        self.turn.active = Some(id);
+        self.turn.active_shell = true;
         self.transcript.push_shell(id, command.clone());
         self.follow = true;
         vec![Op::SubmitShell { id, command }]
@@ -597,11 +602,11 @@ impl App {
         self.next_task += 1;
         self.follow = true;
         self.dirty = true;
-        if self.active.is_some() {
+        if self.turn.active.is_some() {
             self.queued.push((id, text.clone()));
             return vec![Op::SubmitMessage { id, text }];
         }
-        self.active = Some(id);
+        self.turn.active = Some(id);
         self.reset_agents();
         self.transcript.push_user(text.clone());
         vec![Op::SubmitMessage { id, text }]
@@ -766,22 +771,22 @@ impl App {
     }
 
     pub(crate) fn elapsed_secs(&self) -> Option<u64> {
-        self.task_start.map(|t| t.elapsed().as_secs())
+        self.turn.task_start.map(|t| t.elapsed().as_secs())
     }
     pub(crate) fn is_busy(&self) -> bool {
-        self.active.is_some()
+        self.turn.active.is_some()
     }
     pub(crate) fn reset_active_state(&mut self) {
-        self.active = None;
-        self.active_shell = false;
-        self.task_start = None;
-        self.thinking = false;
-        self.retry = None;
-        self.compacting = false;
+        self.turn.active = None;
+        self.turn.active_shell = false;
+        self.turn.task_start = None;
+        self.turn.thinking = false;
+        self.turn.retry = None;
+        self.turn.compacting = false;
     }
     pub(crate) fn promote_pending_ask(&mut self) {
         if matches!(self.overlay, Overlay::None | Overlay::Commands(_))
-            && let Some((picker, call)) = self.pending_ask.take()
+            && let Some((picker, call)) = self.pending.ask.take()
         {
             self.overlay = Overlay::Ask(picker, call);
             self.dirty = true;
@@ -815,7 +820,7 @@ impl App {
     pub(crate) fn clear_ctx_indicator(&mut self) {
         if let Some(model) = &self.model {
             let key = (model.provider.clone(), model.account.clone());
-            self.usage_last.remove(&key);
+            self.usage.last.remove(&key);
         }
     }
     pub(crate) fn spinner_frame(&self) -> &'static str {
@@ -823,7 +828,7 @@ impl App {
     }
 
     pub(crate) fn working_state(&self) -> Option<crate::transcript::Working> {
-        if self.active_shell {
+        if self.turn.active_shell {
             return None;
         }
         self.is_busy().then(|| crate::transcript::Working {
@@ -832,8 +837,8 @@ impl App {
                 .retry_status()
                 .or_else(|| self.compacting_status())
                 .or_else(|| self.agent_status()),
-            thinking: self.thinking,
-            tokens: (self.turn_tokens > 0).then_some(self.turn_tokens),
+            thinking: self.turn.thinking,
+            tokens: (self.usage.turn_tokens > 0).then_some(self.usage.turn_tokens),
         })
     }
 
@@ -842,12 +847,13 @@ impl App {
     }
 
     pub(crate) fn compacting_status(&self) -> Option<String> {
-        self.compacting
+        self.turn
+            .compacting
             .then(|| format!("compacting context{}", symbols::ui::ELLIPSIS))
     }
 
     pub(crate) fn retry_status(&self) -> Option<String> {
-        let retry = self.retry.as_ref()?;
+        let retry = self.turn.retry.as_ref()?;
         let remaining = retry
             .until
             .saturating_duration_since(std::time::Instant::now())
@@ -968,12 +974,12 @@ impl App {
     pub(crate) fn build_usage_view(&self) -> UsageView<'_> {
         UsageView::new(
             &self.account_entries,
-            &self.usage_last,
-            &self.usage_total,
-            &self.rate_limits,
+            &self.usage.last,
+            &self.usage.total,
+            &self.usage.rate_limits,
             self.current_context_window(),
             self.model.as_ref(),
-            self.usage_scroll,
+            self.usage.scroll,
         )
     }
 
@@ -981,7 +987,7 @@ impl App {
         let model = self.model.as_ref()?;
         let window = self.current_context_window()?;
         let key = (model.provider.clone(), model.account.clone());
-        let usage = self.usage_last.get(&key)?;
+        let usage = self.usage.last.get(&key)?;
         let used = u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
         #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
         let pct = (used as f64 / f64::from(window) * 100.0).min(100.0) as f32;
@@ -1195,7 +1201,7 @@ mod tests {
     fn plan_overlay_esc_dismisses() {
         use goat_protocol::ToolCallId;
         let mut app = App::new(Theme::dark());
-        app.active = Some(TaskId(7));
+        app.turn.active = Some(TaskId(7));
         app.on_engine(EngineEvent::PlanProposed {
             id: TaskId(7),
             call: ToolCallId(3),
@@ -1382,8 +1388,8 @@ mod tests {
         assert!(
             matches!(ops.as_slice(), [Op::SubmitShell { command, .. }] if command == "echo hi")
         );
-        assert!(app.active.is_some());
-        assert!(app.active_shell);
+        assert!(app.turn.active.is_some());
+        assert!(app.turn.active_shell);
         assert!(matches!(
             app.transcript.items.last(),
             Some(crate::transcript::Item::Shell { .. })
@@ -1453,8 +1459,8 @@ mod tests {
             id: *id,
             interrupted: false,
         });
-        assert!(app.active.is_none());
-        assert!(!app.active_shell);
+        assert!(app.turn.active.is_none());
+        assert!(!app.turn.active_shell);
         assert!(matches!(
             app.transcript.items.last(),
             Some(crate::transcript::Item::Shell {
@@ -1637,7 +1643,7 @@ mod tests {
     #[test]
     fn clear_command_ignored_while_active() {
         let mut app = App::new(Theme::dark());
-        app.active = Some(TaskId(1));
+        app.turn.active = Some(TaskId(1));
         app.transcript.push_user("in flight");
         let ops = app.dispatch_slash_command("/clear");
         assert!(ops.is_empty());
@@ -1711,7 +1717,7 @@ mod tests {
         app.composer.insert_str("/bogus");
         let ops = app.submit();
         assert!(matches!(ops.as_slice(), [Op::SubmitMessage { text, .. }] if text == "/bogus"));
-        assert!(app.active.is_some());
+        assert!(app.turn.active.is_some());
         assert!(app.toasts.is_empty());
     }
 
@@ -1723,7 +1729,7 @@ mod tests {
         assert!(
             matches!(ops.as_slice(), [Op::SubmitMessage { text, .. }] if text == "/var/folders/image.png")
         );
-        assert!(app.active.is_some());
+        assert!(app.turn.active.is_some());
         assert!(app.toasts.is_empty());
     }
 
@@ -1733,7 +1739,7 @@ mod tests {
         app.composer.insert_str("/help");
         let ops = app.submit();
         assert!(ops.is_empty());
-        assert!(app.active.is_none());
+        assert!(app.turn.active.is_none());
         assert!(matches!(app.overlay, Overlay::Help));
         assert!(app.transcript.items.is_empty());
     }
@@ -1751,7 +1757,7 @@ mod tests {
         app.composer.insert_str("/demo");
         let ops = app.submit();
         assert!(matches!(ops.as_slice(), [Op::SubmitMessage { .. }]));
-        assert!(app.active.is_some());
+        assert!(app.turn.active.is_some());
     }
 
     #[test]
@@ -1760,7 +1766,7 @@ mod tests {
         app.composer.insert_str("/demo");
         let ops = app.submit();
         assert!(matches!(ops.as_slice(), [Op::SubmitMessage { text, .. }] if text == "/demo"));
-        assert!(app.active.is_some());
+        assert!(app.turn.active.is_some());
         assert!(app.toasts.is_empty());
     }
 
@@ -1953,7 +1959,7 @@ mod tests {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("go");
         app.submit();
-        let top = app.active.unwrap();
+        let top = app.turn.active.unwrap();
         app.on_engine(EngineEvent::ToolStarted {
             id: top,
             call: ToolCall {
@@ -2036,12 +2042,12 @@ mod tests {
             }],
         });
         assert!(matches!(app.overlay, Overlay::Help));
-        assert!(app.pending_ask.is_some());
+        assert!(app.pending.ask.is_some());
 
         app.overlay = Overlay::None;
         app.promote_pending_ask();
         assert!(matches!(app.overlay, Overlay::Ask(..)));
-        assert!(app.pending_ask.is_none());
+        assert!(app.pending.ask.is_none());
     }
 
     #[test]
@@ -2068,12 +2074,14 @@ mod tests {
             compaction_threshold: None,
         });
         let openai = app
-            .usage_total
+            .usage
+            .total
             .get(&("openai".to_owned(), "work".to_owned()))
             .copied();
         assert_eq!(openai, Some((10, 5)));
         assert!(
-            !app.usage_total
+            !app.usage
+                .total
                 .contains_key(&("anthropic".to_owned(), "default".to_owned()))
         );
         assert_eq!(
