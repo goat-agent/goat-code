@@ -19,10 +19,10 @@ impl App {
                     self.transcript.push_user(text);
                     self.follow = true;
                 }
-                self.active = Some(id);
-                self.task_start = Some(std::time::Instant::now());
-                self.thinking = false;
-                self.turn_tokens = 0;
+                self.turn.active = Some(id);
+                self.turn.task_start = Some(std::time::Instant::now());
+                self.turn.thinking = false;
+                self.usage.turn_tokens = 0;
             }
             EngineEvent::ModelListChanged { entries } => {
                 if let Overlay::Model(picker) = &mut self.overlay {
@@ -31,7 +31,7 @@ impl App {
                 self.models = entries;
             }
             EngineEvent::ModelSelected { target } => self.model = Some(target),
-            EngineEvent::ThreadsListed { threads } => match self.pending_resume.take() {
+            EngineEvent::ThreadsListed { threads } => match self.pending.resume.take() {
                 Some(ResumeIntent::Picker) => {
                     self.overlay = Overlay::Thread(ThreadPicker::new(threads));
                 }
@@ -89,7 +89,7 @@ impl App {
                 self.compaction_threshold = compaction_threshold;
                 if let Some(tokens) = context_tokens {
                     let key = (target.provider.clone(), target.account.clone());
-                    self.usage_last.insert(
+                    self.usage.last.insert(
                         key,
                         goat_protocol::Usage {
                             input_tokens: tokens,
@@ -100,12 +100,12 @@ impl App {
                 self.model = Some(target);
             }
             EngineEvent::ThinkingDelta { .. } => {
-                self.thinking = true;
+                self.turn.thinking = true;
             }
             EngineEvent::LoginProviders { .. } | EngineEvent::ThreadBound { .. } => {}
             EngineEvent::CompactionStarted { id } => {
                 if self.agent_index(id).is_none() {
-                    self.compacting = true;
+                    self.turn.compacting = true;
                 }
                 self.dirty = true;
             }
@@ -123,17 +123,17 @@ impl App {
                             .push_compaction(tokens_before, tokens_after);
                     }
                 } else {
-                    self.compacting = false;
+                    self.turn.compacting = false;
                     if ok {
-                        self.turn_tokens +=
+                        self.usage.turn_tokens +=
                             u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
                         self.transcript.push_compaction(tokens_before, tokens_after);
                         if let Some(model) = &self.model {
                             let key = (model.provider.clone(), model.account.clone());
-                            let total = self.usage_total.entry(key.clone()).or_default();
+                            let total = self.usage.total.entry(key.clone()).or_default();
                             total.0 += u64::from(usage.input_tokens);
                             total.1 += u64::from(usage.output_tokens);
-                            self.usage_last.insert(
+                            self.usage.last.insert(
                                 key,
                                 goat_protocol::Usage {
                                     input_tokens: tokens_after,
@@ -180,12 +180,12 @@ impl App {
                 delay_ms,
                 reason,
             } => {
-                self.thinking = false;
+                self.turn.thinking = false;
                 if let Some(i) = self.agent_index(id) {
                     self.agent_runs[i].transcript.discard_stream();
                 } else {
                     self.transcript.discard_stream();
-                    self.retry = Some(super::RetryState {
+                    self.turn.retry = Some(super::RetryState {
                         attempt,
                         max_attempts,
                         reason,
@@ -216,9 +216,9 @@ impl App {
                 }
             }
             EngineEvent::TextDelta { id, chunk } => {
-                self.thinking = false;
+                self.turn.thinking = false;
                 if self.agent_index(id).is_none() {
-                    self.retry = None;
+                    self.turn.retry = None;
                 }
                 if let Some(i) = self.agent_index(id) {
                     self.agent_runs[i].transcript.push_delta(&chunk);
@@ -234,9 +234,9 @@ impl App {
                 }
             }
             EngineEvent::ToolStarted { id, call } => {
-                self.thinking = false;
+                self.turn.thinking = false;
                 if self.agent_index(id).is_none() {
-                    self.retry = None;
+                    self.turn.retry = None;
                 }
                 if let Some(i) = self.agent_index(id) {
                     self.agent_runs[i].transcript.push_tool(call);
@@ -306,7 +306,7 @@ impl App {
                 if matches!(self.overlay, Overlay::None | Overlay::Commands(_)) {
                     self.overlay = Overlay::Ask(picker, call);
                 } else {
-                    self.pending_ask = Some((picker, call));
+                    self.pending.ask = Some((picker, call));
                 }
                 self.dirty = true;
             }
@@ -315,8 +315,8 @@ impl App {
                     self.overlay = Overlay::None;
                     self.dirty = true;
                 }
-                if matches!(&self.pending_ask, Some((_, c)) if *c == call) {
-                    self.pending_ask = None;
+                if matches!(&self.pending.ask, Some((_, c)) if *c == call) {
+                    self.pending.ask = None;
                     self.dirty = true;
                 }
             }
@@ -328,15 +328,16 @@ impl App {
                 context_window,
                 compaction_threshold,
             } => {
-                self.turn_tokens += u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
+                self.usage.turn_tokens +=
+                    u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
                 let key = (provider, account);
-                let total = self.usage_total.entry(key.clone()).or_default();
+                let total = self.usage.total.entry(key.clone()).or_default();
                 total.0 += u64::from(usage.input_tokens);
                 total.1 += u64::from(usage.output_tokens);
                 if let Some(w) = context_window {
                     self.context_window.insert(key.clone(), w);
                 }
-                self.usage_last.insert(key, usage);
+                self.usage.last.insert(key, usage);
                 if compaction_threshold.is_some() {
                     self.compaction_threshold = compaction_threshold;
                 }
@@ -348,7 +349,8 @@ impl App {
                 snapshot,
                 cached_at,
             } => {
-                self.rate_limits
+                self.usage
+                    .rate_limits
                     .insert((provider, account), (snapshot, cached_at));
                 self.dirty = true;
             }

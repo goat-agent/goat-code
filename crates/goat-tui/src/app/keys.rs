@@ -255,7 +255,7 @@ impl App {
             }
             KeyCode::Esc => {
                 self.dirty = true;
-                if let Some(id) = self.active {
+                if let Some(id) = self.turn.active {
                     self.clear_arm = None;
                     return vec![Op::Interrupt { id }];
                 }
@@ -468,7 +468,7 @@ impl App {
         if let Some(ch) = keymap::ctrl_key(&key) {
             if ch == 'c' {
                 self.overlay = Overlay::None;
-                if let Some(id) = self.active {
+                if let Some(id) = self.turn.active {
                     return vec![Op::Interrupt { id }];
                 }
             }
@@ -502,7 +502,7 @@ impl App {
                 };
                 if let Some((call, answers)) = outcome {
                     self.overlay = Overlay::None;
-                    if let Some(id) = self.active {
+                    if let Some(id) = self.turn.active {
                         return vec![Op::Answer { id, call, answers }];
                     }
                 }
@@ -540,7 +540,7 @@ impl App {
             return Vec::new();
         }
         self.overlay = Overlay::None;
-        if let Some(id) = self.active {
+        if let Some(id) = self.turn.active {
             return vec![Op::Interrupt { id }];
         }
         Vec::new()
@@ -557,7 +557,7 @@ impl App {
         };
         if let Some((call, answers)) = submit {
             self.overlay = Overlay::None;
-            if let Some(id) = self.active {
+            if let Some(id) = self.turn.active {
                 return vec![Op::Answer { id, call, answers }];
             }
         }
@@ -721,8 +721,8 @@ impl App {
     pub(crate) fn on_ctrl_c(&mut self) -> Vec<Op> {
         self.dirty = true;
         self.clear_arm = None;
-        if self.active_shell
-            && let Some(id) = self.active
+        if self.turn.active_shell
+            && let Some(id) = self.turn.active
         {
             return vec![Op::Interrupt { id }];
         }
@@ -771,19 +771,19 @@ impl App {
                 self.dirty = true;
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.usage_scroll = self.usage_scroll.saturating_sub(1);
+                self.usage.scroll = self.usage.scroll.saturating_sub(1);
                 self.dirty = true;
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.usage_scroll = self.usage_scroll.saturating_add(1);
+                self.usage.scroll = self.usage.scroll.saturating_add(1);
                 self.dirty = true;
             }
             KeyCode::PageUp => {
-                self.usage_scroll = self.usage_scroll.saturating_sub(8);
+                self.usage.scroll = self.usage.scroll.saturating_sub(8);
                 self.dirty = true;
             }
             KeyCode::PageDown => {
-                self.usage_scroll = self.usage_scroll.saturating_add(8);
+                self.usage.scroll = self.usage.scroll.saturating_add(8);
                 self.dirty = true;
             }
             _ => {}
