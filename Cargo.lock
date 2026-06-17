@@ -1868,21 +1868,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "goat-client"
+version = "0.1.4"
+dependencies = [
+ "futures",
+ "goat-protocol",
+ "goat-wire",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "goat-code"
 version = "0.1.4"
 dependencies = [
  "clap",
  "color-eyre",
  "flate2",
- "goat-agent",
  "goat-auth",
+ "goat-client",
  "goat-config",
- "goat-core",
+ "goat-daemon",
  "goat-protocol",
  "goat-provider",
  "goat-providers",
- "goat-store",
  "goat-tui",
+ "goat-wire",
  "goat-worktree",
  "reqwest 0.12.28",
  "semver",
@@ -1955,6 +1967,27 @@ version = "0.1.4"
 dependencies = [
  "goat-protocol",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "goat-daemon"
+version = "0.1.4"
+dependencies = [
+ "futures",
+ "goat-agent",
+ "goat-auth",
+ "goat-config",
+ "goat-core",
+ "goat-protocol",
+ "goat-providers",
+ "goat-store",
+ "goat-wire",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -2272,6 +2305,20 @@ dependencies = [
  "clap",
  "color-eyre",
  "tempfile",
+]
+
+[[package]]
+name = "goat-wire"
+version = "0.1.4"
+dependencies = [
+ "bytes",
+ "futures",
+ "goat-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

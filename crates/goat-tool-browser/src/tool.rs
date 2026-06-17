@@ -26,7 +26,7 @@ impl Tool for BrowserTool {
     }
 
     fn description(&self) -> &'static str {
-        "Drive a real Chrome window to browse the web. The first action opens a visible Chrome window with a persistent profile, so logins survive across sessions: if a page shows a login wall, ask the user to sign in manually in that window, then continue. There is a single shared browser window with one active page - refs and page state are global, so re-snapshot whenever the page may have changed. Most actions return a fresh accessibility snapshot of the page - an indented tree of interactive elements, each tagged with a ref like e12. Refer to elements by that ref. Refs are only valid until the next snapshot or navigation. Use the screenshot action when you need to see the page visually."
+        "Drive a real Chrome to browse the web. The first action opens a Chrome window with an isolated browser context for this session, so concurrent sessions never collide. There is one active page per session - refs and page state are per session, so re-snapshot whenever the page may have changed. Most actions return a fresh accessibility snapshot of the page - an indented tree of interactive elements, each tagged with a ref like e12. Refer to elements by that ref. Refs are only valid until the next snapshot or navigation. Use the screenshot action when you need to see the page visually."
     }
 
     fn parameters(&self) -> serde_json::Value {

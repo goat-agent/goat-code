@@ -102,7 +102,7 @@ impl App {
             EngineEvent::ThinkingDelta { .. } => {
                 self.thinking = true;
             }
-            EngineEvent::LoginProviders { .. } => {}
+            EngineEvent::LoginProviders { .. } | EngineEvent::ThreadBound { .. } => {}
             EngineEvent::CompactionStarted { id } => {
                 if self.agent_index(id).is_none() {
                     self.compacting = true;

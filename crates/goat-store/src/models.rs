@@ -91,6 +91,14 @@ pub struct Compaction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPrompt {
+    pub call_id: String,
+    pub kind: String,
+    pub payload: String,
+    pub task_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewToolCall {
     pub thread_id: i64,
     pub turn_id: i64,

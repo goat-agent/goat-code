@@ -77,7 +77,7 @@ impl McpConfig {
     }
 }
 
-pub async fn load_manager(path: Option<&Path>) -> Arc<McpManager> {
+pub async fn load_manager(path: Option<&Path>, cwd: &Path) -> Arc<McpManager> {
     let Some(path) = path else {
         return Arc::new(McpManager::default());
     };
@@ -85,7 +85,7 @@ pub async fn load_manager(path: Option<&Path>) -> Arc<McpManager> {
         return Arc::new(McpManager::default());
     }
     match McpConfig::load(path) {
-        Ok(config) => McpManager::start(config).await,
+        Ok(config) => McpManager::start(config, cwd).await,
         Err(err) => {
             tracing::warn!(%err, path = %path.display(), "failed to load mcp config");
             Arc::new(McpManager::default())
@@ -100,14 +100,14 @@ pub struct McpManager {
 }
 
 impl McpManager {
-    pub async fn start(config: McpConfig) -> Arc<Self> {
+    pub async fn start(config: McpConfig, cwd: &Path) -> Arc<Self> {
         let mut tools = Vec::new();
         let mut sessions = Vec::new();
         let mut used_names = HashSet::new();
         let mut servers: Vec<_> = config.mcp_servers.into_iter().collect();
         servers.sort_by(|a, b| a.0.cmp(&b.0));
         for (server_name, server_config) in servers {
-            match McpSession::start(server_name.clone(), server_config).await {
+            match McpSession::start(server_name.clone(), server_config, cwd).await {
                 Ok((session, discovered)) => {
                     let session = Arc::new(session);
                     for tool in discovered {
@@ -161,9 +161,13 @@ impl McpSession {
     async fn start(
         server_name: String,
         config: ServerConfig,
+        cwd: &Path,
     ) -> Result<(Self, Vec<McpTool>), McpError> {
         let mut command = Command::new(&config.command);
-        command.args(&config.args).envs(&config.env);
+        command
+            .args(&config.args)
+            .envs(&config.env)
+            .current_dir(cwd);
         let (transport, stderr) = TokioChildProcess::builder(command.configure(|cmd| {
             cmd.stdin(Stdio::piped())
                 .stdout(Stdio::piped())

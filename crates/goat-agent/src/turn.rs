@@ -132,6 +132,7 @@ pub(crate) async fn emit_task_error(ctx: &Ctx<'_>, id: TaskId, message: String) 
 pub(crate) async fn handle_idle_op(
     op: Op,
     store: &Store,
+    cwd: &std::path::Path,
     thread_id: Option<i64>,
     target: &mut Option<ModelTarget>,
     events: &mpsc::Sender<Event>,
@@ -159,7 +160,7 @@ pub(crate) async fn handle_idle_op(
             crate::threads::handle_rename(store, thread_id, title, events).await;
         }
         Op::ListThreads => {
-            crate::threads::handle_list_threads(store, events).await;
+            crate::threads::handle_list_threads(store, cwd, events).await;
         }
         _ => {}
     }
@@ -242,6 +243,7 @@ async fn drain_deferred(
                 handle_idle_op(
                     other,
                     ctx.store,
+                    ctx.cwd,
                     state.thread_id,
                     &mut state.target,
                     ctx.events,
@@ -267,6 +269,7 @@ pub(crate) async fn handle_shell(
         Some(resolved) => {
             ensure_thread(
                 ctx.store,
+                ctx.cwd,
                 &mut state.thread_id,
                 resolved,
                 thread_title(&format!("! {command}")),
@@ -655,11 +658,19 @@ async fn run_one_turn(
                     Some(Op::Answer { call, answers, .. }) => {
                         if let Some(tx) = ctx.asks.lock().await.remove(&call) {
                             let _ = tx.send(answers);
+                            let _ = ctx
+                                .events
+                                .send(Event::AskDismissed { id, call })
+                                .await;
                         }
                     }
                     Some(Op::ResolvePlan { call, decision, .. }) => {
                         if let Some(tx) = ctx.plans.lock().await.remove(&call) {
                             let _ = tx.send(decision);
+                            let _ = ctx
+                                .events
+                                .send(Event::PlanDismissed { id, call })
+                                .await;
                         }
                     }
                     Some(Op::SubmitMessage { id: msg_id, text: msg_text }) => {

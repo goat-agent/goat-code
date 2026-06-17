@@ -48,6 +48,8 @@ pub async fn run(force: bool) -> color_eyre::Result<()> {
         return Ok(());
     }
 
+    drain_daemon(force).await?;
+
     let archive_name = format!("goat-code-{target}.tar.gz");
     let archive_url = asset_url(&release, &archive_name)?;
     let checksums_url = asset_url(&release, "SHA256SUMS")?;
@@ -65,6 +67,35 @@ pub async fn run(force: bool) -> color_eyre::Result<()> {
     let paths = install_paths()?;
     println!("Installing goat {latest}...");
     run_helper(&staged_dir, &paths, &latest)?;
+    Ok(())
+}
+
+async fn drain_daemon(force: bool) -> color_eyre::Result<()> {
+    let Some(socket) = goat_config::socket_path() else {
+        return Ok(());
+    };
+    if !socket.exists() {
+        return Ok(());
+    }
+    let Ok(sessions) = goat_client::status(&socket).await else {
+        return Ok(());
+    };
+    let active = sessions
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.state,
+                goat_wire::SessionLiveState::Active | goat_wire::SessionLiveState::WaitingOnAsk
+            )
+        })
+        .count();
+    if active > 0 && !force {
+        return Err(eyre!(
+            "{active} session(s) are still running in the daemon. Finish them or run `goat daemon stop`, then retry (or use `goat update --force`)."
+        ));
+    }
+    println!("Stopping the running daemon before update...");
+    let _ = goat_client::stop(&socket).await;
     Ok(())
 }
 

@@ -34,19 +34,17 @@ pub(crate) async fn resolve_thread_cwd(
             .flatten()
             .map(|thread| thread.cwd)
             .filter(|cwd| !cwd.is_empty())
-            .map_or_else(
-                || std::env::current_dir().unwrap_or_default(),
-                std::path::PathBuf::from,
-            ),
-        None => std::env::current_dir().unwrap_or_default(),
+            .map_or_else(|| ctx.cwd.to_path_buf(), std::path::PathBuf::from),
+        None => ctx.cwd.to_path_buf(),
     }
 }
 
-pub(crate) async fn handle_list_threads(store: &Store, events: &mpsc::Sender<Event>) {
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
+pub(crate) async fn handle_list_threads(
+    store: &Store,
+    cwd: &std::path::Path,
+    events: &mpsc::Sender<Event>,
+) {
+    let cwd = cwd.display().to_string();
     let threads = match store.list_threads_in(cwd, 50).await {
         Ok(threads) => threads,
         Err(err) => {
@@ -297,6 +295,7 @@ pub(crate) async fn handle_resume(
     let context_tokens = Some(state.tracker.estimate(state.conversation.messages(), &[]));
     state.thread_id = Some(tid);
     state.target = Some(new_target.clone());
+    let _ = events.send(Event::ThreadBound { thread_id: tid }).await;
     let _ = events
         .send(Event::ConversationRestored {
             target: new_target,
@@ -306,6 +305,14 @@ pub(crate) async fn handle_resume(
             mode: restored_mode,
         })
         .await;
+    if store.last_turn_interrupted(tid).await.unwrap_or(false) {
+        let _ = events
+            .send(Event::Notify {
+                kind: NotifyKind::Info,
+                message: "⚠ the previous turn was interrupted (daemon restarted)".to_owned(),
+            })
+            .await;
+    }
 }
 
 pub(crate) async fn handle_resume_latest(
@@ -313,13 +320,11 @@ pub(crate) async fn handle_resume_latest(
     skills: &[SkillInfo],
     tools: &ToolRegistry,
     instructions: Option<&str>,
+    cwd: &std::path::Path,
     state: &mut crate::SessionState,
     events: &mpsc::Sender<Event>,
 ) {
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
+    let cwd = cwd.display().to_string();
     match store.latest_thread_in(cwd).await {
         Ok(Some(thread)) => {
             handle_resume(store, skills, tools, instructions, thread.id, state, events).await;

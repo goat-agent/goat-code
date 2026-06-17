@@ -26,6 +26,19 @@ pub enum Command {
     Auth(AuthCommand),
     #[command(subcommand)]
     Worktree(WorktreeCommand),
+    #[command(subcommand)]
+    Daemon(DaemonCommand),
+}
+
+#[derive(Subcommand)]
+pub enum DaemonCommand {
+    Serve,
+    #[command(visible_alias = "ls")]
+    Status,
+    Stop,
+    Kill {
+        session: u64,
+    },
 }
 
 #[derive(Subcommand)]
