@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::StoreError;
 
-pub(crate) const LATEST_VERSION: i64 = 6;
+pub(crate) const LATEST_VERSION: i64 = 7;
 
 pub(crate) const SCHEMA_V1: &str = "\
 CREATE TABLE threads (
@@ -90,23 +90,30 @@ CREATE TABLE open_prompts (
     PRIMARY KEY (thread_id, call_id)
 );";
 
-pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
+pub(crate) const SCHEMA_V7: &str = "CREATE INDEX idx_turns_thread ON turns(thread_id);";
+
+pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > LATEST_VERSION {
         return Err(StoreError::UnknownVersion(version));
     }
     while version < LATEST_VERSION {
-        match version {
-            0 => conn.execute_batch(SCHEMA_V1)?,
-            1 => conn.execute_batch(SCHEMA_V2)?,
-            2 => conn.execute_batch(SCHEMA_V3)?,
-            3 => conn.execute_batch(SCHEMA_V4)?,
-            4 => conn.execute_batch(SCHEMA_V5)?,
-            5 => conn.execute_batch(SCHEMA_V6)?,
+        let schema = match version {
+            0 => SCHEMA_V1,
+            1 => SCHEMA_V2,
+            2 => SCHEMA_V3,
+            3 => SCHEMA_V4,
+            4 => SCHEMA_V5,
+            5 => SCHEMA_V6,
+            6 => SCHEMA_V7,
             _ => return Err(StoreError::UnknownVersion(version)),
-        }
-        version += 1;
-        conn.execute_batch(&format!("PRAGMA user_version = {version};"))?;
+        };
+        let next = version + 1;
+        let tx = conn.transaction()?;
+        tx.execute_batch(schema)?;
+        tx.execute_batch(&format!("PRAGMA user_version = {next};"))?;
+        tx.commit()?;
+        version = next;
     }
     Ok(())
 }
