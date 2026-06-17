@@ -32,8 +32,18 @@ pub enum ClientFrame {
         op: Op,
     },
     ListSessions,
+    ListDirectory {
+        path: String,
+    },
     KillSession {
         session: SessionId,
+    },
+    PairDevice {
+        label: String,
+    },
+    ListDevices,
+    RevokeDevice {
+        device: String,
     },
     StopDaemon,
     Goodbye,
@@ -59,7 +69,7 @@ pub enum ServerFrame {
         session: SessionId,
         watermark: u64,
         target: Option<ModelTarget>,
-        entries: Vec<TranscriptEntry>,
+        transcript: Vec<TranscriptEntry>,
         context_tokens: Option<u32>,
         compaction_threshold: Option<u32>,
         mode: goat_protocol::Mode,
@@ -69,8 +79,12 @@ pub enum ServerFrame {
         seq: u64,
         event: Event,
     },
-    SessionList {
+    Sessions {
         sessions: Vec<SessionInfo>,
+    },
+    Directory {
+        path: String,
+        children: Vec<DirEntry>,
     },
     CorrelationAssigned {
         session: SessionId,
@@ -81,12 +95,30 @@ pub enum ServerFrame {
         session: SessionId,
         clients: Vec<ClientId>,
     },
+    PairingCode {
+        code: String,
+        server_fingerprint: String,
+        advertised: Vec<String>,
+    },
+    Devices {
+        devices: Vec<DeviceInfo>,
+    },
+    DeviceRevoked {
+        ok: bool,
+    },
     Error {
         message: String,
     },
     VersionMismatch {
         daemon_version: u32,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub label: String,
+    pub paired_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,4 +136,17 @@ pub enum SessionLiveState {
     Idle,
     Active,
     WaitingOnAsk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub kind: DirEntryKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DirEntryKind {
+    Directory,
+    File,
+    Symlink,
 }
