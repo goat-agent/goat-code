@@ -174,15 +174,24 @@ pub(super) fn working_rows(
     )
 }
 
+pub(super) struct ItemMemo {
+    pub(super) sig: u64,
+    pub(super) rows: Vec<Line<'static>>,
+}
+
 pub(super) fn build_static_lines(
     items: &[Item],
     theme: Theme,
     width: u16,
     hl: &dyn Highlighter,
+    memo: &mut Vec<ItemMemo>,
 ) -> (Vec<Line<'static>>, Vec<usize>, Vec<ImagePlacement>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut spinner_lines: Vec<usize> = Vec::new();
     let mut images: Vec<ImagePlacement> = Vec::new();
+    if memo.len() > items.len() {
+        memo.truncate(items.len());
+    }
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
             let prev_is_tool = matches!(items.get(i - 1), Some(Item::Tool { .. }));
@@ -203,7 +212,24 @@ pub(super) fn build_static_lines(
         ) {
             spinner_lines.push(lines.len());
         }
-        lines.extend(item_rows(item, theme, width, hl));
+        let sig = item_signature(item);
+        let rows = match memo.get(i) {
+            Some(cached) if cached.sig == sig => cached.rows.clone(),
+            _ => {
+                let rows = item_rows(item, theme, width, hl);
+                let entry = ItemMemo {
+                    sig,
+                    rows: rows.clone(),
+                };
+                if i < memo.len() {
+                    memo[i] = entry;
+                } else {
+                    memo.push(entry);
+                }
+                rows
+            }
+        };
+        lines.extend(rows);
         if let Item::Tool {
             image: Some(img), ..
         } = item
@@ -222,6 +248,70 @@ pub(super) fn build_static_lines(
         }
     }
     (lines, spinner_lines, images)
+}
+
+pub(super) fn item_signature(item: &Item) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match item {
+        Item::User(text) => {
+            0u8.hash(&mut hasher);
+            text.hash(&mut hasher);
+        }
+        Item::Agent(text) => {
+            1u8.hash(&mut hasher);
+            text.hash(&mut hasher);
+        }
+        Item::Shell {
+            command, status, ..
+        } => {
+            2u8.hash(&mut hasher);
+            command.hash(&mut hasher);
+            match status {
+                ShellStatus::Running => 0u8.hash(&mut hasher),
+                ShellStatus::Done(output) => {
+                    1u8.hash(&mut hasher);
+                    output.hash(&mut hasher);
+                }
+            }
+        }
+        Item::Error(text) => {
+            3u8.hash(&mut hasher);
+            text.hash(&mut hasher);
+        }
+        Item::Notice(text) => {
+            4u8.hash(&mut hasher);
+            text.hash(&mut hasher);
+        }
+        Item::Compaction {
+            tokens_before,
+            tokens_after,
+        } => {
+            5u8.hash(&mut hasher);
+            tokens_before.hash(&mut hasher);
+            tokens_after.hash(&mut hasher);
+        }
+        Item::Tool {
+            name,
+            display,
+            status,
+            ..
+        } => {
+            6u8.hash(&mut hasher);
+            name.hash(&mut hasher);
+            display.primary.hash(&mut hasher);
+            display.detail.hash(&mut hasher);
+            match status {
+                ToolStatus::Running => 0u8.hash(&mut hasher),
+                ToolStatus::Done(outcome) => {
+                    1u8.hash(&mut hasher);
+                    outcome.ok.hash(&mut hasher);
+                    outcome.summary.hash(&mut hasher);
+                }
+            }
+        }
+    }
+    hasher.finish()
 }
 
 pub(super) fn item_rows(

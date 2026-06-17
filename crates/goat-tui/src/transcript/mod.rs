@@ -53,6 +53,13 @@ pub struct Transcript {
     version: u64,
     cache: RefCell<Option<RenderCache>>,
     stream_cache: RefCell<Option<StreamCache>>,
+    item_memo: RefCell<ItemMemoCache>,
+}
+
+#[derive(Default)]
+struct ItemMemoCache {
+    width: u16,
+    entries: Vec<render::ItemMemo>,
 }
 
 impl Transcript {
@@ -64,10 +71,12 @@ impl Transcript {
 
     pub fn invalidate(&mut self) {
         self.bump_version();
+        self.item_memo.borrow_mut().entries.clear();
     }
 
     pub fn clear(&mut self) {
         self.bump_version();
+        self.item_memo.borrow_mut().entries.clear();
         self.items.clear();
         self.streaming = None;
     }
@@ -210,7 +219,13 @@ impl Transcript {
         if valid {
             return;
         }
-        let (lines, spinner_lines, images) = build_static_lines(&self.items, theme, width, hl);
+        let mut memo = self.item_memo.borrow_mut();
+        if memo.width != width {
+            memo.width = width;
+            memo.entries.clear();
+        }
+        let (lines, spinner_lines, images) =
+            build_static_lines(&self.items, theme, width, hl, &mut memo.entries);
         *self.cache.borrow_mut() = Some(RenderCache {
             width,
             version: self.version,
@@ -434,8 +449,10 @@ mod tests {
         let dark = Theme::dark();
         let light = Theme::light();
         let items = vec![Item::Agent("plain body".to_owned())];
-        let (dark_lines, _, _) = build_static_lines(&items, dark, 80, &PlainHighlighter);
-        let (light_lines, _, _) = build_static_lines(&items, light, 80, &PlainHighlighter);
+        let (dark_lines, _, _) =
+            build_static_lines(&items, dark, 80, &PlainHighlighter, &mut Vec::new());
+        let (light_lines, _, _) =
+            build_static_lines(&items, light, 80, &PlainHighlighter, &mut Vec::new());
         let body_fg = |lines: &[Line<'static>]| {
             lines
                 .iter()
@@ -445,6 +462,44 @@ mod tests {
         };
         assert_eq!(body_fg(&dark_lines), Some(Some(dark.fg_color())));
         assert_eq!(body_fg(&light_lines), Some(Some(light.fg_color())));
+    }
+
+    #[test]
+    fn memoized_rebuild_matches_fresh_rebuild() {
+        let theme = Theme::dark();
+        let mut items = vec![
+            Item::User("hello".to_owned()),
+            Item::Agent("# title\n\nbody text".to_owned()),
+            Item::Tool {
+                id: ToolCallId(1),
+                name: "Read".to_owned(),
+                display: goat_protocol::ToolDisplay::primary("a.txt"),
+                status: ToolStatus::Running,
+                image: None,
+            },
+        ];
+        let mut memo = Vec::new();
+        let _ = build_static_lines(&items, theme, 80, &PlainHighlighter, &mut memo);
+        if let Item::Tool { status, .. } = &mut items[2] {
+            *status = ToolStatus::Done(ok());
+        }
+        items.push(Item::Agent("second answer".to_owned()));
+        let (memo_lines, _, _) =
+            build_static_lines(&items, theme, 80, &PlainHighlighter, &mut memo);
+        let (fresh_lines, _, _) =
+            build_static_lines(&items, theme, 80, &PlainHighlighter, &mut Vec::new());
+        let render = |lines: &[Line<'static>]| {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.clone())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(render(&memo_lines), render(&fresh_lines));
     }
 
     fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
