@@ -33,11 +33,14 @@ pub enum ClientError {
 pub struct Attachment {
     pub ops: mpsc::Sender<Op>,
     pub events: mpsc::Receiver<Event>,
+    pub presence: mpsc::Receiver<usize>,
+    pub client_id: u64,
     pub pump: JoinHandle<()>,
 }
 
 const OPS_CAPACITY: usize = 32;
 const EVENTS_CAPACITY: usize = 512;
+const PRESENCE_CAPACITY: usize = 16;
 
 pub async fn connect(
     socket_path: &Path,
@@ -52,17 +55,18 @@ pub async fn connect(
         version: PROTOCOL_VERSION,
     })
     .await?;
-    match conn.recv().await? {
-        ServerFrame::Welcome { version, .. } => {
+    let client_id = match conn.recv().await? {
+        ServerFrame::Welcome { version, client_id } => {
             if version != PROTOCOL_VERSION {
                 return Err(ClientError::VersionMismatch(version));
             }
+            client_id.0
         }
         ServerFrame::VersionMismatch { daemon_version } => {
             return Err(ClientError::VersionMismatch(daemon_version));
         }
         _ => return Err(ClientError::Handshake),
-    }
+    };
 
     conn.send(&ClientFrame::OpenSession {
         cwd: cwd.display().to_string(),
@@ -75,12 +79,13 @@ pub async fn connect(
         _ => return Err(ClientError::Handshake),
     };
 
-    Ok(spawn_pumps(conn, session))
+    Ok(spawn_pumps(conn, session, client_id))
 }
 
-fn spawn_pumps(conn: ClientConn<Stream>, session: SessionId) -> Attachment {
+fn spawn_pumps(conn: ClientConn<Stream>, session: SessionId, client_id: u64) -> Attachment {
     let (ops_tx, mut ops_rx) = mpsc::channel::<Op>(OPS_CAPACITY);
     let (events_tx, events_rx) = mpsc::channel::<Event>(EVENTS_CAPACITY);
+    let (presence_tx, presence_rx) = mpsc::channel::<usize>(PRESENCE_CAPACITY);
 
     let (sink, mut source) = conn.split();
     let mut sink = Box::pin(sink);
@@ -140,6 +145,10 @@ fn spawn_pumps(conn: ClientConn<Stream>, session: SessionId) -> Attachment {
                 idmap.lock().await.record_correlation(*correlation, *task);
                 continue;
             }
+            if let ServerFrame::Presence { clients, .. } = &frame {
+                let _ = presence_tx.try_send(clients.len());
+                continue;
+            }
             if let ServerFrame::Snapshot { watermark, .. } = &frame {
                 expected_seq = Some(*watermark);
             }
@@ -165,6 +174,8 @@ fn spawn_pumps(conn: ClientConn<Stream>, session: SessionId) -> Attachment {
     Attachment {
         ops: ops_tx,
         events: events_rx,
+        presence: presence_rx,
+        client_id,
         pump,
     }
 }

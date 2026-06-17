@@ -191,24 +191,6 @@ impl Manager {
         Ok(())
     }
 
-    pub(crate) async fn unsubscribe(&self, session: SessionId, client: ClientId) {
-        let live = {
-            let table = self.inner.sessions.lock().await;
-            table.get(&session).cloned()
-        };
-        let mut evict = false;
-        if let Some(live) = live {
-            let mut inner = live.inner.lock().await;
-            crate::session::subscriber_map_remove(&mut inner.subscribers, client);
-            let clients = inner.presence();
-            broadcast_presence(&mut inner, clients);
-            evict = inner.evictable();
-        }
-        if evict {
-            self.evict_if_idle(session).await;
-        }
-    }
-
     pub(crate) async fn drop_client(&self, client: ClientId) {
         let lives: Vec<(SessionId, LiveSession)> = {
             let table = self.inner.sessions.lock().await;

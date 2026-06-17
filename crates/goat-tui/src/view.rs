@@ -344,6 +344,10 @@ fn ctx_label(app: &App) -> Option<(String, f32)> {
         .map(|(pct, _, _)| (format!("ctx {pct:.0}%"), pct))
 }
 
+pub(crate) fn window_label(window_count: usize) -> Option<String> {
+    (window_count > 1).then(|| format!("\u{29c9} {window_count}"))
+}
+
 fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let row = Rect { height: 1, ..area }.inner(Margin {
         horizontal: PAD_X,
@@ -353,10 +357,15 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 
     let model = model_label(app);
     let ctx = ctx_label(app);
+    let windows = window_label(app.window_count);
     let model_w = model.as_ref().map_or(0, |label| label.width());
     let ctx_w = ctx.as_ref().map_or(0, |(label, _)| label.width());
-    let status_gap = usize::from(model.is_some()) * 2 + usize::from(ctx.is_some()) * 2;
-    let status_w = model_w + ctx_w + status_gap;
+    let windows_w = windows.as_ref().map_or(0, |label| label.width());
+    let status_gap = (usize::from(model.is_some())
+        + usize::from(ctx.is_some())
+        + usize::from(windows.is_some()))
+        * 2;
+    let status_w = model_w + ctx_w + windows_w + status_gap;
     let cwd = fit_cwd(app.cwd(), inner_w.saturating_sub(status_w));
 
     let mut spans: Vec<Span> = vec![Span::styled(cwd.clone(), theme.muted())];
@@ -364,6 +373,10 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let pad = inner_w.saturating_sub(left_w + status_w);
     if pad > 0 {
         spans.push(Span::raw(" ".repeat(pad)));
+    }
+    if let Some(label) = windows {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(label, theme.muted()));
     }
     if let Some(label) = model {
         spans.push(Span::raw("  "));
@@ -567,5 +580,17 @@ mod tests {
             model_status_label(&target(None), true),
             "anthropic:work/claude-sonnet-4"
         );
+    }
+
+    #[test]
+    fn window_label_hidden_for_single_window() {
+        assert_eq!(super::window_label(0), None);
+        assert_eq!(super::window_label(1), None);
+    }
+
+    #[test]
+    fn window_label_shown_for_multiple_windows() {
+        assert_eq!(super::window_label(2), Some("\u{29c9} 2".to_owned()));
+        assert_eq!(super::window_label(5), Some("\u{29c9} 5".to_owned()));
     }
 }
