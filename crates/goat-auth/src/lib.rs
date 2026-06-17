@@ -1,6 +1,8 @@
 use std::{
+    collections::HashMap,
     fmt, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -93,6 +95,25 @@ impl TokenSet {
     }
 }
 
+fn refresh_locks() -> &'static std::sync::Mutex<HashMap<CredentialKey, Arc<tokio::sync::Mutex<()>>>>
+{
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<CredentialKey, Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn refresh_lock_for(key: &CredentialKey) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = refresh_locks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    map.entry(key.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub async fn ensure_valid<F, Fut>(
     tokens: TokenSet,
     store: &CredentialStore,
@@ -106,16 +127,28 @@ where
     if !tokens.is_expired() {
         return Some(tokens);
     }
+    let lock = refresh_lock_for(key);
+    let _guard = lock.lock().await;
+    if let Some(Credential::OAuth(current)) = store.file_get(key) {
+        let changed = current.access_token.expose() != tokens.access_token.expose();
+        if changed && !current.is_expired() {
+            return Some(current);
+        }
+    }
     let refresh_token = tokens.refresh_token.as_ref()?.expose().to_owned();
-    match refresh(refresh_token).await {
-        Ok(fresh) => {
+    match tokio::time::timeout(REFRESH_TIMEOUT, refresh(refresh_token)).await {
+        Ok(Ok(fresh)) => {
             if let Err(err) = store.store(key, Credential::OAuth(fresh.clone())) {
                 tracing::warn!(%err, "failed to persist refreshed oauth tokens");
             }
             Some(fresh)
         }
-        Err(err) => {
+        Ok(Err(err)) => {
             tracing::warn!(%err, "token refresh failed; treating as logged out");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("token refresh timed out; treating as logged out");
             None
         }
     }
@@ -290,6 +323,24 @@ pub struct CredentialStore {
     path: PathBuf,
 }
 
+struct TempCleanup {
+    path: Option<PathBuf>,
+}
+
+impl TempCleanup {
+    fn disarm(mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 impl CredentialStore {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
@@ -359,11 +410,40 @@ impl CredentialStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&self.path, serde_json::to_string_pretty(file)?)?;
-        #[cfg(unix)]
+        let contents = serde_json::to_string_pretty(file)?;
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = self.path.file_name().map_or_else(
+            || "auth.json".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let tmp_path = parent.join(format!("{file_name}.tmp-{}", std::process::id()));
+        let cleanup = TempCleanup {
+            path: Some(tmp_path.clone()),
+        };
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut handle = match options.open(&tmp_path) {
+                Ok(handle) => handle,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&tmp_path);
+                    options.open(&tmp_path)?
+                }
+                Err(err) => return Err(err.into()),
+            };
+            std::io::Write::write_all(&mut handle, contents.as_bytes())?;
+            handle.sync_all()?;
+        }
+        fs::rename(&tmp_path, &self.path)?;
+        cleanup.disarm();
+        #[cfg(unix)]
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
         }
         Ok(())
     }
@@ -395,7 +475,55 @@ impl CredentialStore {
 mod tests {
     use super::{
         Credential, CredentialKey, CredentialKind, CredentialStore, Pkce, SecretString, TokenSet,
+        ensure_valid, now_secs,
     };
+
+    #[tokio::test]
+    async fn ensure_valid_single_flights_concurrent_refresh() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let path = std::env::temp_dir().join("goat-auth-singleflight-test.json");
+        let _ = std::fs::remove_file(&path);
+        let store = CredentialStore::new(path.clone());
+        let key = CredentialKey {
+            provider: "goat-singleflight".into(),
+            account: "a".into(),
+        };
+        let expired = TokenSet {
+            access_token: SecretString::from("old"),
+            refresh_token: Some(SecretString::from("refresh")),
+            expires_at: Some(now_secs() - 100),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let store = store.clone();
+            let key = key.clone();
+            let tokens = expired.clone();
+            let calls = calls.clone();
+            handles.push(tokio::spawn(async move {
+                ensure_valid(tokens, &store, &key, |_| {
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        Ok(TokenSet {
+                            access_token: SecretString::from("new"),
+                            refresh_token: Some(SecretString::from("refresh2")),
+                            expires_at: Some(now_secs() + 3600),
+                        })
+                    }
+                })
+                .await
+            }));
+        }
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(matches!(result, Some(t) if t.access_token.expose() == "new"));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn pkce_generates_s256_challenge() {
@@ -426,6 +554,36 @@ mod tests {
     fn resolved_credential_kind() {
         let cred = Credential::ApiKey(SecretString::from("k"));
         assert_eq!(cred.kind(), CredentialKind::ApiKey);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_file_is_owner_only_and_atomic() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join("goat-auth-perms-test.json");
+        let _ = std::fs::remove_file(&path);
+        let store = CredentialStore::new(path.clone());
+        let key = CredentialKey {
+            provider: "p".into(),
+            account: "a".into(),
+        };
+        store
+            .file_set(&key, Credential::ApiKey(SecretString::from("secret")))
+            .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let got = store.file_get(&key).unwrap();
+        assert!(matches!(got, Credential::ApiKey(secret) if secret.expose() == "secret"));
+        let leftover = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains("goat-auth-perms-test.json.tmp-")
+            });
+        assert!(!leftover, "temp file should be cleaned up");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
