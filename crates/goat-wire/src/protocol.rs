@@ -2,9 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use goat_protocol::{Event, ModelTarget, Op, TranscriptEntry};
 
-pub const PROTOCOL_VERSION: u32 = 1;
-
-pub const DEFAULT_SOCKET_NAME: &str = "daemon.sock";
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SessionId(pub u64);
@@ -22,9 +20,6 @@ pub enum ClientFrame {
         resume: ResumeMode,
     },
     Attach {
-        session: SessionId,
-    },
-    Detach {
         session: SessionId,
     },
     Submit {
@@ -59,7 +54,6 @@ pub enum ServerFrame {
     },
     SessionOpened {
         session: SessionId,
-        correlation_ok: bool,
     },
     Snapshot {
         session: SessionId,
@@ -86,9 +80,6 @@ pub enum ServerFrame {
     Presence {
         session: SessionId,
         clients: Vec<ClientId>,
-    },
-    Detached {
-        session: SessionId,
     },
     Error {
         message: String,
