@@ -311,7 +311,7 @@ impl Provider for GeminiProvider {
                 oauth::Auth::OAuth(access) => {
                     let project =
                         codeassist::resolve_project(&client, access, &project_cache).await?;
-                    let body = codeassist::wrap_request(SEARCH_MODEL, project.as_deref(), &inner);
+                    let body = codeassist::wrap_request(SEARCH_MODEL, project.as_deref(), inner);
                     let url = format!("{}:generateContent", codeassist::CA_BASE);
                     client.post(&url).bearer_auth(access).json(&body)
                 }
@@ -351,7 +351,7 @@ impl Provider for GeminiProvider {
             };
 
             let inner = wire::build_request(&req);
-            let inner_value = wire::inner_request_to_value(&inner);
+            let inner_value = wire::inner_request_to_value(inner);
 
             tracing::debug!(model = %req.model, body = %inner_value, "gemini request");
 
@@ -378,7 +378,7 @@ impl Provider for GeminiProvider {
                             }
                         };
                     let body =
-                        codeassist::wrap_request(&req.model, project.as_deref(), &inner_value);
+                        codeassist::wrap_request(&req.model, project.as_deref(), inner_value);
                     let url = format!("{}:streamGenerateContent?alt=sse", codeassist::CA_BASE);
                     let b = client.post(&url).bearer_auth(access).json(&body);
                     (b, true)

@@ -210,14 +210,14 @@ pub async fn resolve_project(
     result
 }
 
-pub fn wrap_request(model: &str, project: Option<&str>, inner: &Value) -> Value {
+pub fn wrap_request(model: &str, project: Option<&str>, inner: Value) -> Value {
     let mut obj = serde_json::Map::new();
     obj.insert("model".to_owned(), Value::String(model.to_owned()));
     if let Some(p) = project {
         obj.insert("project".to_owned(), Value::String(p.to_owned()));
     }
     obj.insert("user_prompt_id".to_owned(), Value::String(random_state()));
-    obj.insert("request".to_owned(), inner.clone());
+    obj.insert("request".to_owned(), inner);
     tracing::debug!(model, ?project, "Code Assist wrap_request");
     Value::Object(obj)
 }
