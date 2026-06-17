@@ -113,6 +113,10 @@ async fn stream_response(resp: reqwest::Response, tx: &mpsc::Sender<StreamEvent>
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.data) else {
                     continue;
                 };
+                if let Some(error) = error::stream_error(&event.data) {
+                    let _ = tx.send(StreamEvent::Failed { error }).await;
+                    return;
+                }
                 for ev in wire::parse_chunk(&value, oauth) {
                     if tx.send(ev).await.is_err() {
                         return;

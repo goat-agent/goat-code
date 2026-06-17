@@ -52,9 +52,33 @@ pub(crate) fn classify_http(status: reqwest::StatusCode, body: &str) -> StreamEr
         parsed.message
     };
     let code = parsed.code.unwrap_or(status.as_u16());
-    match (code, parsed.status.as_str()) {
+    classify_parsed(code, &parsed.status, message, &parsed.details)
+}
+
+pub(crate) fn stream_error(data: &str) -> Option<StreamError> {
+    let value: Value = serde_json::from_str(data).ok()?;
+    let root = value.get("response").unwrap_or(&value);
+    root.get("error")?;
+    let body = serde_json::to_string(root).unwrap_or_else(|_| data.to_owned());
+    let parsed = parse_body(&body);
+    let message = if parsed.message.is_empty() {
+        format!("stream error: {data}")
+    } else {
+        parsed.message
+    };
+    let code = parsed.code.unwrap_or(0);
+    Some(classify_parsed(
+        code,
+        &parsed.status,
+        message,
+        &parsed.details,
+    ))
+}
+
+fn classify_parsed(code: u16, status: &str, message: String, details: &[Value]) -> StreamError {
+    match (code, status) {
         (429, _) | (_, "RESOURCE_EXHAUSTED") => {
-            StreamError::rate_limited(message, retry_delay(&parsed.details))
+            StreamError::rate_limited(message, retry_delay(details))
         }
         (401 | 403, _) | (_, "UNAUTHENTICATED" | "PERMISSION_DENIED") => StreamError::auth(message),
         (400, _) | (_, "INVALID_ARGUMENT") => {
@@ -125,5 +149,30 @@ mod tests {
             r#"{"error":{"code":400,"message":"Invalid JSON payload","status":"INVALID_ARGUMENT"}}"#,
         );
         assert!(matches!(error, StreamError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn stream_error_detected_and_classified() {
+        let error = super::stream_error(
+            r#"{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED"}}"#,
+        );
+        assert!(matches!(error, Some(StreamError::RateLimited { .. })));
+    }
+
+    #[test]
+    fn stream_error_wrapped_in_response_envelope() {
+        let error = super::stream_error(
+            r#"{"response":{"error":{"code":401,"message":"nope","status":"UNAUTHENTICATED"}}}"#,
+        );
+        assert!(matches!(error, Some(StreamError::Auth { .. })));
+    }
+
+    #[test]
+    fn stream_error_none_for_normal_chunk() {
+        assert!(
+            super::stream_error(r#"{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}"#)
+                .is_none()
+        );
+        assert!(super::stream_error("not json").is_none());
     }
 }
