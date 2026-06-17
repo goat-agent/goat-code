@@ -18,7 +18,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-36 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
+37 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
 
 **Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
@@ -29,6 +29,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-wire` — daemon/client wire contract; leaf (depends on `goat-protocol` only). The `ClientFrame`/`ServerFrame` envelope ({`SessionId`/`ClientId`/`seq` + payload `Op`/`Event`}), length-delimited JSON codec (`WireConn`), and protocol-version handshake. `Op`/`Event` bodies are wrapped, never modified.
 - `goat-daemon` — the resident `goatd` (`goat daemon serve`); machine-wide single daemon holding N live sessions keyed by cwd. Owns the session registry, a single seq-stamping event-log pump per session (stamp→log→fan-out), per-window bounded delivery with disconnect-on-overflow, presence broadcast, idle eviction (kept alive while a turn runs or a window is attached or an Ask/Plan is open), orphaned-turn sweep on startup, and the unix-socket listener (`~/.goat-code/daemon.sock`, 0600). Allocates per-session `TaskId`s and echoes a correlation token.
 - `goat-client` — thin transport the TUI talks to; auto-spawns the daemon if absent, performs the handshake, opens/reattaches a session, and exposes the same `Op`/`Event` channels the TUI already consumes. Owns the bidirectional `IdMap` (client-local ↔ daemon `TaskId`) and seq-gap resync.
+- `goat-remote` — network-facing remote access for the daemon. mTLS over WebSocket: the daemon is a tiny `rcgen` CA, devices pair once over an HTTP `/pair` endpoint (one-time high-entropy code, server cert pinned by QR fingerprint, CSR signed by the CA) and thereafter connect to `/ws` presenting their device client cert. A custom `ClientCertVerifier` validates the chain and checks the cert fingerprint against the live device registry on every handshake (revocation works here, no CRL/OCSP). The TCP listener self-gates: it binds only while at least one device is paired or a pairing code is pending, and winds down otherwise — there is no separate enable flag. Depends on `goat-wire`/`goat-protocol` only; `goat-daemon` supplies a `RemoteHandler` that bridges each authenticated WS connection into the shared connection driver as `ClientOrigin::Remote`. Remote = local trust; only pairing issuance and `StopDaemon` stay local-only.
 - `goat-update` — executable replacement helper for `goat update`; small CLI-only crate with no app-state ownership.
 - `goat-worktree` — git-worktree management (`enter`/`list`/`remove`); `enter` resolves and returns the worktree path (the agent cwd is injected explicitly, not via process `set_current_dir` for the engine).
 
