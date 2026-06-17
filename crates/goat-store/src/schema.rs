@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::StoreError;
 
-pub(crate) const LATEST_VERSION: i64 = 5;
+pub(crate) const LATEST_VERSION: i64 = 6;
 
 pub(crate) const SCHEMA_V1: &str = "\
 CREATE TABLE threads (
@@ -72,6 +72,24 @@ CREATE INDEX idx_compactions_thread ON compactions(thread_id);";
 
 pub(crate) const SCHEMA_V5: &str = "ALTER TABLE threads ADD COLUMN mode TEXT;";
 
+pub(crate) const SCHEMA_V6: &str = "\
+CREATE TABLE session_events (
+    thread_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (thread_id, seq)
+);
+CREATE TABLE open_prompts (
+    thread_id INTEGER NOT NULL,
+    call_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    task_id INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (thread_id, call_id)
+);";
+
 pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > LATEST_VERSION {
@@ -84,6 +102,7 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
             2 => conn.execute_batch(SCHEMA_V3)?,
             3 => conn.execute_batch(SCHEMA_V4)?,
             4 => conn.execute_batch(SCHEMA_V5)?,
+            5 => conn.execute_batch(SCHEMA_V6)?,
             _ => return Err(StoreError::UnknownVersion(version)),
         }
         version += 1;

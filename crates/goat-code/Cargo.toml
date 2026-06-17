@@ -12,15 +12,15 @@ name = "goat"
 path = "src/main.rs"
 
 [dependencies]
-goat-core = { workspace = true }
 goat-tui = { workspace = true }
 goat-config = { workspace = true }
-goat-agent = { workspace = true }
-goat-auth = { workspace = true }
-goat-store = { workspace = true }
+goat-daemon = { workspace = true }
+goat-client = { workspace = true }
+goat-wire = { workspace = true }
 goat-protocol = { workspace = true }
 goat-provider = { workspace = true }
 goat-providers = { workspace = true }
+goat-auth = { workspace = true }
 goat-worktree = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }

@@ -107,6 +107,10 @@ pub fn browser_profile_dir() -> Option<PathBuf> {
     browser_dir().map(|dir| dir.join("profile"))
 }
 
+pub fn socket_path() -> Option<PathBuf> {
+    app_home().map(|home| home.join("daemon.sock"))
+}
+
 pub fn update_dir() -> Option<PathBuf> {
     app_home().map(|home| home.join("update"))
 }

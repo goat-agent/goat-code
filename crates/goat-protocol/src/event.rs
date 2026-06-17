@@ -159,6 +159,9 @@ pub enum Event {
         id: TaskId,
         call: ToolCallId,
     },
+    ThreadBound {
+        thread_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

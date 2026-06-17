@@ -21,11 +21,9 @@ use crate::Ctx;
 pub(crate) async fn restore_target(
     store: &Store,
     credentials: &CredentialStore,
+    cwd: &std::path::Path,
 ) -> Option<ModelTarget> {
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
+    let cwd = cwd.display().to_string();
     let thread = store.latest_thread_in(cwd).await.ok().flatten()?;
     let provider = Registry::load(credentials, &thread.account)
         .get(&goat_provider::ProviderId::from(thread.provider.as_str()))?;

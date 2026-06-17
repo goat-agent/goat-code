@@ -76,6 +76,7 @@ pub(crate) fn thread_title(text: &str) -> Option<String> {
 
 pub(crate) async fn ensure_thread(
     store: &Store,
+    cwd: &std::path::Path,
     thread_id: &mut Option<i64>,
     target: &ModelTarget,
     title: Option<String>,
@@ -84,10 +85,7 @@ pub(crate) async fn ensure_thread(
         return Some(*tid);
     }
     let timestamp = now_ms();
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
+    let cwd = cwd.display().to_string();
     match store
         .create_thread(NewThread {
             cwd,
@@ -120,7 +118,11 @@ pub(crate) async fn init_db_turn(
     target: &ModelTarget,
     thread_id: &mut Option<i64>,
 ) -> TurnIds {
-    let stored_thread = ensure_thread(ctx.store, thread_id, target, thread_title(text)).await;
+    let stored_thread =
+        ensure_thread(ctx.store, ctx.cwd, thread_id, target, thread_title(text)).await;
+    if let Some(tid) = stored_thread {
+        let _ = ctx.events.send(Event::ThreadBound { thread_id: tid }).await;
+    }
     let (turn_db_id, user_message_db_id) = if let Some(tid) = stored_thread {
         let body = serde_json::to_string(&vec![ContentBlock::Text {
             text: text.to_owned(),

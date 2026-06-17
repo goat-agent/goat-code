@@ -6,7 +6,7 @@ mod update;
 use clap::Parser;
 use color_eyre::eyre::eyre;
 
-use crate::cli::{Cli, Command, WorktreeCommand};
+use crate::cli::{Cli, Command, DaemonCommand, WorktreeCommand};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -41,6 +41,11 @@ async fn main() -> color_eyre::Result<()> {
             };
             result.map_err(color_eyre::Report::from)
         }
+        Some(Command::Daemon(command)) => {
+            reject_worktree(cli.worktree.as_ref())?;
+            reject_continue(cli.r#continue)?;
+            run_daemon_command(command).await
+        }
         None => run_tui(cli.worktree, cli.r#continue).await,
     }
 }
@@ -60,9 +65,11 @@ fn reject_continue(r#continue: bool) -> color_eyre::Result<()> {
 }
 
 async fn run_tui(worktree_label: Option<String>, r#continue: bool) -> color_eyre::Result<()> {
-    if let Some(label) = worktree_label.as_deref() {
-        goat_worktree::enter(label)?;
-    }
+    let cwd = if let Some(label) = worktree_label.as_deref() {
+        goat_worktree::enter(label)?
+    } else {
+        std::env::current_dir()?
+    };
 
     goat_tui::install_hooks()?;
     let _guard = logging::init();
@@ -73,23 +80,74 @@ async fn run_tui(worktree_label: Option<String>, r#continue: bool) -> color_eyre
         goat_config::ThemeChoice::Light => goat_tui::Theme::light(),
     };
 
-    let auth_path = goat_config::auth_path()
+    let socket_path = goat_config::socket_path()
         .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
-    let db_path = goat_config::db_path()
-        .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
-    let credentials = goat_auth::CredentialStore::new(auth_path);
-    let store = goat_store::Store::open(&db_path)?;
-    let registry = goat_providers::Registry::new(&credentials);
-    let agent = goat_agent::GoatAgent::new(registry, store, credentials, None).await;
-
-    let session = goat_core::Session::spawn(agent);
-    let (ops, events, handle) = session.into_parts();
-    let initial_ops = if r#continue {
-        vec![goat_protocol::Op::ResumeLatest]
+    let daemon_exe = std::env::current_exe()?;
+    let resume = if r#continue {
+        goat_wire::ResumeMode::Latest
     } else {
-        Vec::new()
+        goat_wire::ResumeMode::New
     };
-    goat_tui::run(ops, events, theme, initial_ops).await?;
-    handle.await.ok();
+
+    let attachment = goat_client::connect(&socket_path, &daemon_exe, cwd, resume).await?;
+    let goat_client::Attachment { ops, events, pump } = attachment;
+
+    goat_tui::run(ops, events, theme, Vec::new()).await?;
+    pump.abort();
     Ok(())
+}
+
+async fn run_daemon_command(command: DaemonCommand) -> color_eyre::Result<()> {
+    let socket_path = goat_config::socket_path()
+        .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
+    match command {
+        DaemonCommand::Serve => {
+            let _guard = logging::init();
+            let auth_path = goat_config::auth_path()
+                .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
+            let db_path = goat_config::db_path()
+                .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
+            goat_daemon::serve(goat_daemon::DaemonConfig {
+                socket_path,
+                auth_path,
+                db_path,
+            })
+            .await
+            .map_err(color_eyre::Report::from)
+        }
+        DaemonCommand::Status => {
+            let sessions = goat_client::status(&socket_path).await?;
+            if sessions.is_empty() {
+                println!("no live sessions");
+            } else {
+                for s in sessions {
+                    let flag = match s.state {
+                        goat_wire::SessionLiveState::WaitingOnAsk => " (waiting on ask)",
+                        _ => "",
+                    };
+                    println!(
+                        "#{} [{:?}] windows={} tokens={} age={}s {}{}",
+                        s.session.0,
+                        s.state,
+                        s.windows,
+                        s.tokens,
+                        s.age_ms / 1000,
+                        s.cwd,
+                        flag
+                    );
+                }
+            }
+            Ok(())
+        }
+        DaemonCommand::Stop => {
+            goat_client::stop(&socket_path).await?;
+            println!("daemon stopped");
+            Ok(())
+        }
+        DaemonCommand::Kill { session } => {
+            goat_client::kill_session(&socket_path, session).await?;
+            println!("killed session #{session}");
+            Ok(())
+        }
+    }
 }
