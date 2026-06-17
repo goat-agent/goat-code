@@ -231,9 +231,9 @@ fn print_pairing_qr(info: &goat_client::PairingInfo) {
     match qrcode::QrCode::new(payload.as_bytes()) {
         Ok(code) => {
             let rendered = code
-                .render::<char>()
+                .render::<qrcode::render::unicode::Dense1x2>()
                 .quiet_zone(true)
-                .module_dimensions(2, 1)
+                .module_dimensions(1, 1)
                 .build();
             println!("{rendered}");
         }

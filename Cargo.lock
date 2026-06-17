@@ -1958,6 +1958,7 @@ dependencies = [
  "goat-tui",
  "goat-wire",
  "goat-worktree",
+ "qrcode",
  "reqwest 0.12.28",
  "semver",
  "serde",
