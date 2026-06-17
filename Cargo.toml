@@ -49,6 +49,7 @@ goat-worktree = { path = "crates/goat-worktree" }
 goat-wire = { path = "crates/goat-wire" }
 goat-daemon = { path = "crates/goat-daemon" }
 goat-client = { path = "crates/goat-client" }
+goat-remote = { path = "crates/goat-remote" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt", "codec"] }
@@ -95,6 +96,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 color-eyre = "0.6"
 thiserror = "2"
+
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
+tokio-tungstenite = "0.28"
+qrcode = { version = "0.14", default-features = false }
 
 
 [workspace.lints.rust]

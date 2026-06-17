@@ -12,6 +12,7 @@ async fn start_daemon(dir: &std::path::Path) -> PathBuf {
         socket_path: socket.clone(),
         auth_path: auth,
         db_path: db,
+        remote: None,
     };
     tokio::spawn(async move {
         let _ = goat_daemon::serve(cfg).await;
@@ -60,10 +61,10 @@ async fn open_session_and_list() {
     let mut lister = connect(&socket).await;
     lister.send(&ClientFrame::ListSessions).await.unwrap();
     match lister.recv().await.unwrap() {
-        ServerFrame::SessionList { sessions } => {
+        ServerFrame::Sessions { sessions } => {
             assert!(sessions.iter().any(|s| s.session == session));
         }
-        other => panic!("expected SessionList, got {other:?}"),
+        other => panic!("expected Sessions, got {other:?}"),
     }
 }
 
@@ -176,9 +177,9 @@ async fn kill_session_removes_it_from_the_list() {
 
     admin.send(&ClientFrame::ListSessions).await.unwrap();
     match admin.recv().await.unwrap() {
-        ServerFrame::SessionList { sessions } => {
+        ServerFrame::Sessions { sessions } => {
             assert!(!sessions.iter().any(|s| s.session == session));
         }
-        other => panic!("expected SessionList, got {other:?}"),
+        other => panic!("expected Sessions, got {other:?}"),
     }
 }

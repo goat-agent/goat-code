@@ -25,6 +25,14 @@ struct ManagerInner {
     sessions: Mutex<SessionTable>,
     next_session: AtomicU64,
     next_client: AtomicU64,
+    remote: Mutex<Option<RemoteControls>>,
+}
+
+struct RemoteControls {
+    pairing: goat_remote::Pairing,
+    devices: goat_remote::Devices,
+    server_fingerprint: String,
+    advertised: Vec<String>,
 }
 
 impl Manager {
@@ -36,8 +44,68 @@ impl Manager {
                 sessions: Mutex::new(HashMap::new()),
                 next_session: AtomicU64::new(1),
                 next_client: AtomicU64::new(1),
+                remote: Mutex::new(None),
             }),
         }
+    }
+
+    pub(crate) fn set_remote(
+        &self,
+        pairing: goat_remote::Pairing,
+        devices: goat_remote::Devices,
+        server_fingerprint: String,
+        advertised: Vec<String>,
+    ) {
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            *inner.remote.lock().await = Some(RemoteControls {
+                pairing,
+                devices,
+                server_fingerprint,
+                advertised,
+            });
+        });
+    }
+
+    pub(crate) async fn pair_device(
+        &self,
+        label: String,
+    ) -> Result<(String, String, Vec<String>), String> {
+        let guard = self.inner.remote.lock().await;
+        let controls = guard.as_ref().ok_or("remote is not enabled")?;
+        let code = controls.pairing.mint(label).await;
+        Ok((
+            code,
+            controls.server_fingerprint.clone(),
+            controls.advertised.clone(),
+        ))
+    }
+
+    pub(crate) async fn list_devices(&self) -> Result<Vec<goat_wire::DeviceInfo>, String> {
+        let guard = self.inner.remote.lock().await;
+        let controls = guard.as_ref().ok_or("remote is not enabled")?;
+        let devices = controls
+            .devices
+            .list()
+            .await
+            .into_iter()
+            .map(|d| goat_wire::DeviceInfo {
+                id: d.id,
+                label: d.label,
+                paired_at: d.paired_at,
+            })
+            .collect();
+        Ok(devices)
+    }
+
+    pub(crate) async fn revoke_device(&self, id: &str) -> Result<bool, String> {
+        let guard = self.inner.remote.lock().await;
+        let controls = guard.as_ref().ok_or("remote is not enabled")?;
+        controls
+            .devices
+            .revoke(id)
+            .await
+            .map_err(|e| format!("revoke: {e}"))
     }
 
     pub(crate) fn next_client_id(&self) -> ClientId {
@@ -164,7 +232,7 @@ impl Manager {
                     session,
                     watermark: snap.watermark,
                     target: snap.target,
-                    entries: snap.entries,
+                    transcript: snap.entries,
                     context_tokens: snap.context_tokens,
                     compaction_threshold: snap.compaction_threshold,
                     mode: snap.mode,
@@ -288,6 +356,25 @@ impl Manager {
                 .map_err(|_| "engine closed".to_owned());
         }
         ops.send(op).await.map_err(|_| "engine closed".to_owned())
+    }
+
+    pub(crate) fn list_directory(path: &str) -> Result<Vec<goat_wire::DirEntry>, String> {
+        let dir = std::fs::read_dir(path).map_err(|e| format!("read_dir: {e}"))?;
+        let mut children = Vec::new();
+        for entry in dir.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let file_type = entry.file_type().map_err(|e| format!("file_type: {e}"))?;
+            let kind = if file_type.is_symlink() {
+                goat_wire::DirEntryKind::Symlink
+            } else if file_type.is_dir() {
+                goat_wire::DirEntryKind::Directory
+            } else {
+                goat_wire::DirEntryKind::File
+            };
+            children.push(goat_wire::DirEntry { name, kind });
+        }
+        children.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(children)
     }
 
     pub(crate) async fn list_sessions(&self) -> Vec<SessionInfo> {

@@ -28,6 +28,20 @@ pub enum Command {
     Worktree(WorktreeCommand),
     #[command(subcommand)]
     Daemon(DaemonCommand),
+    #[command(subcommand)]
+    Remote(RemoteCommand),
+}
+
+#[derive(Subcommand)]
+pub enum RemoteCommand {
+    Pair {
+        #[arg(long, short)]
+        label: Option<String>,
+    },
+    #[command(visible_alias = "ls")]
+    Devices,
+    #[command(visible_alias = "rm")]
+    Revoke { device: String },
 }
 
 #[derive(Subcommand)]

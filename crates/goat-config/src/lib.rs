@@ -18,6 +18,23 @@ pub struct Config {
     pub browser_enabled: bool,
     pub mouse_capture_enabled: bool,
     pub plan_shell_without_sandbox: bool,
+    pub remote: RemoteConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteConfig {
+    pub bind: String,
+    pub advertised: Vec<String>,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            bind: "0.0.0.0:4317".to_owned(),
+            advertised: Vec::new(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -28,6 +45,7 @@ impl Default for Config {
             browser_enabled: false,
             mouse_capture_enabled: true,
             plan_shell_without_sandbox: false,
+            remote: RemoteConfig::default(),
         }
     }
 }
@@ -111,6 +129,10 @@ pub fn socket_path() -> Option<PathBuf> {
     app_home().map(|home| home.join("daemon.sock"))
 }
 
+pub fn remote_dir() -> Option<PathBuf> {
+    app_home().map(|home| home.join("remote"))
+}
+
 pub fn update_dir() -> Option<PathBuf> {
     app_home().map(|home| home.join("update"))
 }
@@ -137,7 +159,7 @@ pub fn rate_limits_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ThemeChoice};
+    use super::{Config, RemoteConfig, ThemeChoice};
 
     #[test]
     fn defaults_to_dark() {
@@ -163,6 +185,7 @@ mod tests {
             browser_enabled: true,
             mouse_capture_enabled: false,
             plan_shell_without_sandbox: true,
+            remote: RemoteConfig::default(),
         };
         let raw = serde_json::to_string(&cfg).unwrap();
         assert_eq!(Config::from_json(&raw).unwrap(), cfg);

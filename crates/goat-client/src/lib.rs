@@ -192,14 +192,14 @@ fn frame_to_event(frame: ServerFrame) -> Option<Event> {
         ServerFrame::Event { event, .. } => Some(event),
         ServerFrame::Snapshot {
             target,
-            entries,
+            transcript,
             context_tokens,
             compaction_threshold,
             mode,
             ..
         } => target.map(|target| Event::ConversationRestored {
             target,
-            entries,
+            entries: transcript,
             context_tokens,
             compaction_threshold,
             mode,
@@ -219,7 +219,7 @@ pub async fn status(socket_path: &Path) -> Result<Vec<goat_wire::SessionInfo>, C
     expect_welcome(&mut conn).await?;
     conn.send(&ClientFrame::ListSessions).await?;
     match conn.recv().await? {
-        ServerFrame::SessionList { sessions } => Ok(sessions),
+        ServerFrame::Sessions { sessions } => Ok(sessions),
         _ => Err(ClientError::Handshake),
     }
 }
@@ -249,6 +249,68 @@ pub async fn kill_session(socket_path: &Path, session: u64) -> Result<(), Client
     })
     .await?;
     Ok(())
+}
+
+pub struct PairingInfo {
+    pub code: String,
+    pub server_fingerprint: String,
+    pub advertised: Vec<String>,
+}
+
+pub async fn pair_device(socket_path: &Path, label: String) -> Result<PairingInfo, ClientError> {
+    let stream = transport::connect(socket_path).await?;
+    let mut conn: ClientConn<Stream> = ClientConn::new(stream);
+    conn.send(&ClientFrame::Hello {
+        version: PROTOCOL_VERSION,
+    })
+    .await?;
+    expect_welcome(&mut conn).await?;
+    conn.send(&ClientFrame::PairDevice { label }).await?;
+    match conn.recv().await? {
+        ServerFrame::PairingCode {
+            code,
+            server_fingerprint,
+            advertised,
+        } => Ok(PairingInfo {
+            code,
+            server_fingerprint,
+            advertised,
+        }),
+        ServerFrame::Error { message } => Err(ClientError::OpenFailed(message)),
+        _ => Err(ClientError::Handshake),
+    }
+}
+
+pub async fn list_devices(socket_path: &Path) -> Result<Vec<goat_wire::DeviceInfo>, ClientError> {
+    let stream = transport::connect(socket_path).await?;
+    let mut conn: ClientConn<Stream> = ClientConn::new(stream);
+    conn.send(&ClientFrame::Hello {
+        version: PROTOCOL_VERSION,
+    })
+    .await?;
+    expect_welcome(&mut conn).await?;
+    conn.send(&ClientFrame::ListDevices).await?;
+    match conn.recv().await? {
+        ServerFrame::Devices { devices } => Ok(devices),
+        ServerFrame::Error { message } => Err(ClientError::OpenFailed(message)),
+        _ => Err(ClientError::Handshake),
+    }
+}
+
+pub async fn revoke_device(socket_path: &Path, device: String) -> Result<bool, ClientError> {
+    let stream = transport::connect(socket_path).await?;
+    let mut conn: ClientConn<Stream> = ClientConn::new(stream);
+    conn.send(&ClientFrame::Hello {
+        version: PROTOCOL_VERSION,
+    })
+    .await?;
+    expect_welcome(&mut conn).await?;
+    conn.send(&ClientFrame::RevokeDevice { device }).await?;
+    match conn.recv().await? {
+        ServerFrame::DeviceRevoked { ok } => Ok(ok),
+        ServerFrame::Error { message } => Err(ClientError::OpenFailed(message)),
+        _ => Err(ClientError::Handshake),
+    }
 }
 
 async fn expect_welcome(conn: &mut ClientConn<Stream>) -> Result<(), ClientError> {

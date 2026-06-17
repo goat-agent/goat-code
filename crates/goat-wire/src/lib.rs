@@ -4,8 +4,8 @@ pub mod transport;
 
 pub use codec::{WireConn, WireError};
 pub use protocol::{
-    ClientFrame, ClientId, PROTOCOL_VERSION, ResumeMode, ServerFrame, SessionId, SessionInfo,
-    SessionLiveState,
+    ClientFrame, ClientId, DeviceInfo, DirEntry, DirEntryKind, PROTOCOL_VERSION, ResumeMode,
+    ServerFrame, SessionId, SessionInfo, SessionLiveState,
 };
 
 pub type ServerConn<S> = WireConn<S, ServerFrame, ClientFrame>;
@@ -68,5 +68,63 @@ mod tests {
         };
         client.send(&frame).await.unwrap();
         assert_eq!(server.recv().await.unwrap(), frame);
+    }
+
+    #[tokio::test]
+    async fn directory_frames_roundtrip() {
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let mut server: ServerConn<_> = WireConn::new(a);
+        let mut client: ClientConn<_> = WireConn::new(b);
+
+        let request = ClientFrame::ListDirectory {
+            path: "/home/me".to_owned(),
+        };
+        client.send(&request).await.unwrap();
+        assert_eq!(server.recv().await.unwrap(), request);
+
+        let response = ServerFrame::Directory {
+            path: "/home/me".to_owned(),
+            children: vec![
+                DirEntry {
+                    name: "src".to_owned(),
+                    kind: DirEntryKind::Directory,
+                },
+                DirEntry {
+                    name: "main.rs".to_owned(),
+                    kind: DirEntryKind::File,
+                },
+            ],
+        };
+        server.send(&response).await.unwrap();
+        assert_eq!(client.recv().await.unwrap(), response);
+    }
+
+    #[tokio::test]
+    async fn sessions_and_device_frames_roundtrip() {
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let mut server: ServerConn<_> = WireConn::new(a);
+        let mut client: ClientConn<_> = WireConn::new(b);
+
+        let sessions = ServerFrame::Sessions {
+            sessions: Vec::new(),
+        };
+        server.send(&sessions).await.unwrap();
+        assert_eq!(client.recv().await.unwrap(), sessions);
+
+        let pair = ClientFrame::PairDevice {
+            label: "phone".to_owned(),
+        };
+        client.send(&pair).await.unwrap();
+        assert_eq!(server.recv().await.unwrap(), pair);
+
+        let devices = ServerFrame::Devices {
+            devices: vec![DeviceInfo {
+                id: "abc".to_owned(),
+                label: "phone".to_owned(),
+                paired_at: 5,
+            }],
+        };
+        server.send(&devices).await.unwrap();
+        assert_eq!(client.recv().await.unwrap(), devices);
     }
 }
