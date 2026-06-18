@@ -604,6 +604,53 @@ mod tests {
         }
     }
 
+    struct CapturingProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        captured: Arc<std::sync::Mutex<Vec<Request>>>,
+    }
+
+    impl Provider for CapturingProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::from("mock")
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                tools: true,
+                auth: AuthMethod::None,
+            }
+        }
+
+        fn stream(&self, req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
+            self.captured.lock().unwrap().push(req);
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(async move {
+                if n == 0 {
+                    let _ = events
+                        .send(StreamEvent::ToolCall {
+                            id: "call-1".to_owned(),
+                            name: "Read".to_owned(),
+                            input: "{\"path\":\"does-not-exist.txt\"}".to_owned(),
+                        })
+                        .await;
+                } else {
+                    let _ = events
+                        .send(StreamEvent::TextDelta {
+                            text: "final answer".to_owned(),
+                        })
+                        .await;
+                }
+                let _ = events.send(StreamEvent::Completed).await;
+            })
+        }
+
+        fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                drop(out);
+            })
+        }
+    }
+
     async fn seq_agent(delay_ms: u64) -> (GoatAgent, Arc<std::sync::atomic::AtomicUsize>) {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let provider = SeqTextProvider {
@@ -1245,6 +1292,60 @@ mod tests {
         assert!(agent_done_ok, "expected the Agent delegation to succeed");
         assert_eq!(final_text, "final answer");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn tool_round_message_carries_language_anchor() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<Request>::new()));
+        let provider = CapturingProvider {
+            calls: calls.clone(),
+            captured: captured.clone(),
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials = CredentialStore::new(std::env::temp_dir().join("goat-agent-anchor.json"));
+        let agent = GoatAgent::new(
+            registry,
+            store,
+            credentials,
+            Some(target("mock")),
+            std::env::temp_dir(),
+        )
+        .await;
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "do it".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        while let Some(event) = events.recv().await {
+            if let Event::TaskDone { .. } = event {
+                break;
+            }
+        }
+
+        let requests = captured.lock().unwrap();
+        assert!(
+            requests.len() >= 2,
+            "expected a second round after the tool call, got {} requests",
+            requests.len()
+        );
+        let second = &requests[1];
+        let last = second.messages.last().expect("second request has messages");
+        let has_anchor = last.content.iter().any(|block| {
+            matches!(
+                block,
+                goat_provider::ContentBlock::Text { text } if text == crate::prompt::LANGUAGE_REMINDER
+            )
+        });
+        assert!(
+            has_anchor,
+            "the tool-result message handed to round 2 must end with the language anchor"
+        );
     }
 
     fn target(provider: &str) -> ModelTarget {
