@@ -140,7 +140,7 @@ impl SessionInner {
     pub(crate) fn evictable(&self) -> bool {
         self.subscribers.is_empty()
             && self.open_asks == 0
-            && matches!(self.state, SessionLiveState::Idle)
+            && matches!(self.state, SessionLiveState::Idle {})
     }
 }
 
@@ -149,10 +149,10 @@ const MAX_RETAINED_EVENTS: usize = 4096;
 fn update_state_from_event(state: &mut SessionLiveState, event: &Event) {
     match event {
         Event::TaskStarted { .. } | Event::AskDismissed { .. } => {
-            *state = SessionLiveState::Active;
+            *state = SessionLiveState::Active {};
         }
-        Event::AskStarted { .. } => *state = SessionLiveState::WaitingOnAsk,
-        Event::TaskDone { .. } => *state = SessionLiveState::Idle,
+        Event::AskStarted { .. } => *state = SessionLiveState::WaitingOnAsk {},
+        Event::TaskDone { .. } => *state = SessionLiveState::Idle {},
         _ => {}
     }
 }
@@ -228,7 +228,7 @@ mod tests {
             next_seq: 0,
             next_task: 1,
             subscribers: Vec::new(),
-            state: SessionLiveState::Idle,
+            state: SessionLiveState::Idle {},
             snapshot: None,
             tokens: 0,
             open_asks: 0,

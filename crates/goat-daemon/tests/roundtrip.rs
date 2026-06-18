@@ -49,7 +49,7 @@ async fn open_session_and_list() {
 
     conn.send(&ClientFrame::OpenSession {
         cwd: dir.path().display().to_string(),
-        resume: ResumeMode::New,
+        resume: ResumeMode::New {},
     })
     .await
     .unwrap();
@@ -59,7 +59,7 @@ async fn open_session_and_list() {
     };
 
     let mut lister = connect(&socket).await;
-    lister.send(&ClientFrame::ListSessions).await.unwrap();
+    lister.send(&ClientFrame::ListSessions {}).await.unwrap();
     match lister.recv().await.unwrap() {
         ServerFrame::Sessions { sessions } => {
             assert!(sessions.iter().any(|s| s.session == session));
@@ -76,7 +76,7 @@ async fn submit_message_flows_back_as_events() {
 
     conn.send(&ClientFrame::OpenSession {
         cwd: dir.path().display().to_string(),
-        resume: ResumeMode::New,
+        resume: ResumeMode::New {},
     })
     .await
     .unwrap();
@@ -125,7 +125,7 @@ async fn reattach_by_cwd_returns_same_session() {
     let mut a = connect(&socket).await;
     a.send(&ClientFrame::OpenSession {
         cwd: dir.path().display().to_string(),
-        resume: ResumeMode::New,
+        resume: ResumeMode::New {},
     })
     .await
     .unwrap();
@@ -137,7 +137,7 @@ async fn reattach_by_cwd_returns_same_session() {
     let mut b = connect(&socket).await;
     b.send(&ClientFrame::OpenSession {
         cwd: dir.path().display().to_string(),
-        resume: ResumeMode::Latest,
+        resume: ResumeMode::Latest {},
     })
     .await
     .unwrap();
@@ -159,7 +159,7 @@ async fn kill_session_removes_it_from_the_list() {
     let mut conn = connect(&socket).await;
     conn.send(&ClientFrame::OpenSession {
         cwd: dir.path().display().to_string(),
-        resume: ResumeMode::New,
+        resume: ResumeMode::New {},
     })
     .await
     .unwrap();
@@ -175,7 +175,7 @@ async fn kill_session_removes_it_from_the_list() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    admin.send(&ClientFrame::ListSessions).await.unwrap();
+    admin.send(&ClientFrame::ListSessions {}).await.unwrap();
     match admin.recv().await.unwrap() {
         ServerFrame::Sessions { sessions } => {
             assert!(!sessions.iter().any(|s| s.session == session));

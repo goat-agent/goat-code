@@ -173,7 +173,7 @@ async fn dispatch(
             }
             Disposition::Continue
         }
-        ClientFrame::ListSessions => {
+        ClientFrame::ListSessions {} => {
             let sessions = manager.list_sessions().await;
             let _ = out_tx.send(ServerFrame::Sessions { sessions }).await;
             Disposition::Continue
@@ -220,7 +220,7 @@ async fn dispatch(
             }
             Disposition::Continue
         }
-        ClientFrame::ListDevices => {
+        ClientFrame::ListDevices {} => {
             match manager.list_devices().await {
                 Ok(devices) => {
                     let _ = out_tx.send(ServerFrame::Devices { devices }).await;
@@ -242,7 +242,7 @@ async fn dispatch(
             }
             Disposition::Continue
         }
-        ClientFrame::StopDaemon => {
+        ClientFrame::StopDaemon {} => {
             if origin.is_local() {
                 shutdown.cancel();
                 Disposition::Closed
@@ -255,7 +255,7 @@ async fn dispatch(
                 Disposition::Continue
             }
         }
-        ClientFrame::Goodbye => Disposition::Closed,
+        ClientFrame::Goodbye {} => Disposition::Closed,
     }
 }
 

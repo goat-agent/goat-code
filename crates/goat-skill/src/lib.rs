@@ -193,12 +193,12 @@ fn command_shape(
 ) -> Result<Option<SkillCommandShape>, String> {
     match (arguments, subcommands) {
         (Some(_), Some(_)) => Err("arguments and subcommands cannot both be present".to_owned()),
-        (Some(arguments), None) => Ok(Some(SkillCommandShape::Arguments(
-            arguments.into_iter().map(parameter_info).collect(),
-        ))),
-        (None, Some(subcommands)) => Ok(Some(SkillCommandShape::Subcommands(
-            subcommands.into_iter().map(branch_info).collect(),
-        ))),
+        (Some(arguments), None) => Ok(Some(SkillCommandShape::Arguments {
+            items: arguments.into_iter().map(parameter_info).collect(),
+        })),
+        (None, Some(subcommands)) => Ok(Some(SkillCommandShape::Subcommands {
+            items: subcommands.into_iter().map(branch_info).collect(),
+        })),
         (None, None) => Ok(None),
     }
 }
@@ -222,25 +222,25 @@ fn parameter_info(parameter: ManifestParameter) -> SkillParameterInfo {
 
 fn value_info(value: ManifestValue) -> SkillParameterValue {
     match value {
-        ManifestValue::Kind(ManifestValueKind::Word) => SkillParameterValue::Word,
-        ManifestValue::Kind(ManifestValueKind::Integer) => SkillParameterValue::Integer,
-        ManifestValue::Kind(ManifestValueKind::TextTail) => SkillParameterValue::TextTail,
-        ManifestValue::Choice { choice } => SkillParameterValue::Choice(
-            choice
+        ManifestValue::Kind(ManifestValueKind::Word) => SkillParameterValue::Word {},
+        ManifestValue::Kind(ManifestValueKind::Integer) => SkillParameterValue::Integer {},
+        ManifestValue::Kind(ManifestValueKind::TextTail) => SkillParameterValue::TextTail {},
+        ManifestValue::Choice { choice } => SkillParameterValue::Choice {
+            options: choice
                 .into_iter()
                 .map(|choice| SkillChoiceInfo {
                     value: choice.value,
                     description: choice.description,
                 })
                 .collect(),
-        ),
+        },
     }
 }
 
 fn validate_command(command: &SkillCommandShape) -> Result<(), String> {
     match command {
-        SkillCommandShape::Arguments(arguments) => validate_parameters(arguments),
-        SkillCommandShape::Subcommands(subcommands) => {
+        SkillCommandShape::Arguments { items: arguments } => validate_parameters(arguments),
+        SkillCommandShape::Subcommands { items: subcommands } => {
             if subcommands.is_empty() {
                 return Err("subcommands cannot be empty".to_owned());
             }
@@ -283,7 +283,7 @@ fn validate_parameters(arguments: &[SkillParameterInfo]) -> Result<(), String> {
         } else if optional_seen {
             return Err("required argument cannot follow optional argument".to_owned());
         }
-        if matches!(argument.value, SkillParameterValue::TextTail) {
+        if matches!(argument.value, SkillParameterValue::TextTail {}) {
             if text_tail_seen {
                 return Err("text_tail cannot appear more than once".to_owned());
             }
@@ -292,7 +292,7 @@ fn validate_parameters(arguments: &[SkillParameterInfo]) -> Result<(), String> {
                 return Err("text_tail must be last".to_owned());
             }
         }
-        if let SkillParameterValue::Choice(choices) = &argument.value {
+        if let SkillParameterValue::Choice { options: choices } = &argument.value {
             if choices.is_empty() {
                 return Err(format!("choice argument {} cannot be empty", argument.name));
             }
@@ -370,11 +370,11 @@ mod tests {
             "review",
         )
         .unwrap();
-        let Some(SkillCommandShape::Arguments(arguments)) = parsed.command else {
+        let Some(SkillCommandShape::Arguments { items: arguments }) = parsed.command else {
             panic!("expected arguments");
         };
         assert_eq!(arguments[0].name, "instructions");
-        assert_eq!(arguments[0].value, SkillParameterValue::TextTail);
+        assert_eq!(arguments[0].value, SkillParameterValue::TextTail {});
     }
 
     #[test]
@@ -384,7 +384,7 @@ mod tests {
             "review",
         )
         .unwrap();
-        let Some(SkillCommandShape::Subcommands(subcommands)) = parsed.command else {
+        let Some(SkillCommandShape::Subcommands { items: subcommands }) = parsed.command else {
             panic!("expected subcommands");
         };
         assert_eq!(subcommands[0].name, "security");

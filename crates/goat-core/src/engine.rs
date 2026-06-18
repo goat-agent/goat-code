@@ -35,7 +35,7 @@ impl Session {
     }
 
     pub async fn shutdown(self) {
-        let _ = self.ops.send(Op::Shutdown).await;
+        let _ = self.ops.send(Op::Shutdown {}).await;
         let _ = self.handle.await;
     }
 }

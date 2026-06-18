@@ -1,6 +1,35 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+pub mod id_serde {
+    use super::{Deserializer, Serializer};
+    use serde::de::Visitor;
+
+    pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = u64;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("u64 as string or integer")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<u64, E> {
+                v.parse().map_err(E::custom)
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<u64, E> {
+                Ok(v)
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<u64, E> {
+                u64::try_from(v).map_err(E::custom)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Usage {
@@ -24,8 +53,20 @@ pub struct RateLimitSnapshot {
     pub representative: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TaskId(pub u64);
+
+impl Serialize for TaskId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        id_serde::serialize(&self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        id_serde::deserialize(d).map(Self)
+    }
+}
 
 impl fmt::Display for TaskId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -33,8 +74,20 @@ impl fmt::Display for TaskId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ToolCallId(pub u64);
+
+impl Serialize for ToolCallId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        id_serde::serialize(&self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolCallId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        id_serde::deserialize(d).map(Self)
+    }
+}
 
 impl fmt::Display for ToolCallId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -145,8 +198,9 @@ impl Mode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum PlanDecision {
-    Approve,
+    Approve {},
     Reject { feedback: String },
 }
 
@@ -185,9 +239,14 @@ pub struct ThreadSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum TranscriptEntry {
-    User(String),
-    Assistant(String),
+    User {
+        text: String,
+    },
+    Assistant {
+        text: String,
+    },
     Tool {
         call: ToolCall,
         outcome: ToolOutcome,
@@ -233,9 +292,10 @@ pub struct AccountEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum LoginCredential {
-    ApiKey(String),
-    OAuth,
+    ApiKey { key: String },
+    OAuth {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,10 +307,10 @@ pub struct SkillInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SkillCommandShape {
-    Arguments(Vec<SkillParameterInfo>),
-    Subcommands(Vec<SkillBranchInfo>),
+    Arguments { items: Vec<SkillParameterInfo> },
+    Subcommands { items: Vec<SkillBranchInfo> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,12 +331,12 @@ pub struct SkillParameterInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SkillParameterValue {
-    Word,
-    Integer,
-    Choice(Vec<SkillChoiceInfo>),
-    TextTail,
+    Word {},
+    Integer {},
+    Choice { options: Vec<SkillChoiceInfo> },
+    TextTail {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -338,7 +338,7 @@ impl Config {
             ConfigOutcome::AddAccount {
                 provider,
                 name,
-                credential: LoginCredential::OAuth,
+                credential: LoginCredential::OAuth {},
             }
         } else {
             if key.is_empty() {
@@ -357,7 +357,7 @@ impl Config {
             ConfigOutcome::AddAccount {
                 provider,
                 name,
-                credential: LoginCredential::ApiKey(key),
+                credential: LoginCredential::ApiKey { key },
             }
         }
     }
@@ -720,7 +720,7 @@ mod tests {
                 ref provider,
                 ref credential,
                 ..
-            } if provider == "anthropic" && matches!(credential, LoginCredential::OAuth)
+            } if provider == "anthropic" && matches!(credential, LoginCredential::OAuth {})
         ));
         assert!(matches!(config.stage, super::InputStage::Waiting { .. }));
     }
@@ -786,7 +786,7 @@ mod tests {
         assert!(matches!(
             out3,
             ConfigOutcome::AddAccount { ref provider, ref name, ref credential }
-            if provider == "anthropic" && name == "mykey" && matches!(credential, LoginCredential::ApiKey(k) if k == "sk-test")
+            if provider == "anthropic" && name == "mykey" && matches!(credential, LoginCredential::ApiKey { key: k } if k == "sk-test")
         ));
     }
 

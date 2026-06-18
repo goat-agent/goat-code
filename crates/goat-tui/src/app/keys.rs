@@ -682,7 +682,7 @@ impl App {
             return vec![Op::ResolvePlan {
                 id,
                 call,
-                decision: PlanDecision::Approve,
+                decision: PlanDecision::Approve {},
             }];
         }
         Vec::new()

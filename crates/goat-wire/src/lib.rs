@@ -87,11 +87,11 @@ mod tests {
             children: vec![
                 DirEntry {
                     name: "src".to_owned(),
-                    kind: DirEntryKind::Directory,
+                    kind: DirEntryKind::Directory {},
                 },
                 DirEntry {
                     name: "main.rs".to_owned(),
-                    kind: DirEntryKind::File,
+                    kind: DirEntryKind::File {},
                 },
             ],
         };
@@ -126,5 +126,43 @@ mod tests {
         };
         server.send(&devices).await.unwrap();
         assert_eq!(client.recv().await.unwrap(), devices);
+    }
+
+    #[test]
+    fn client_frame_list_sessions_serializes_as_type_object() {
+        let json = serde_json::to_string(&ClientFrame::ListSessions {}).unwrap();
+        assert_eq!(json, r#"{"type":"ListSessions"}"#);
+        let back: ClientFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ClientFrame::ListSessions {});
+    }
+
+    #[test]
+    fn client_frame_hello_serializes_flat() {
+        let frame = ClientFrame::Hello {
+            version: PROTOCOL_VERSION,
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains(r#""type":"Hello""#));
+        assert!(!json.contains(r#"{"Hello":"#));
+        let back: ClientFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn server_frame_event_nests_event_type_separately() {
+        use goat_protocol::Event;
+        let frame = ServerFrame::Event {
+            session: SessionId(1),
+            seq: 0,
+            event: Event::TextDelta {
+                id: goat_protocol::TaskId(1),
+                chunk: "x".to_owned(),
+            },
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains(r#""type":"Event""#));
+        assert!(json.contains(r#""type":"TextDelta""#));
+        let back: ServerFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, frame);
     }
 }

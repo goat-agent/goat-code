@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{LoginCredential, Mode, ModelTarget, PlanDecision, TaskId, ToolCallId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum Op {
     SubmitMessage {
         id: TaskId,
@@ -15,7 +16,7 @@ pub enum Op {
     Interrupt {
         id: TaskId,
     },
-    Clear,
+    Clear {},
     SelectModel {
         target: ModelTarget,
     },
@@ -32,11 +33,11 @@ pub enum Op {
         provider: String,
         name: String,
     },
-    ListThreads,
+    ListThreads {},
     Resume {
         thread_id: i64,
     },
-    ResumeLatest,
+    ResumeLatest {},
     RenameThread {
         title: String,
     },
@@ -60,5 +61,5 @@ pub enum Op {
         call: ToolCallId,
         decision: PlanDecision,
     },
-    Shutdown,
+    Shutdown {},
 }

@@ -1,16 +1,41 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use goat_protocol::{Event, ModelTarget, Op, TranscriptEntry};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+impl Serialize for SessionId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        goat_protocol::id_serde::serialize(&self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        goat_protocol::id_serde::deserialize(d).map(Self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClientId(pub u64);
 
+impl Serialize for ClientId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        goat_protocol::id_serde::serialize(&self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ClientId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        goat_protocol::id_serde::deserialize(d).map(Self)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ClientFrame {
     Hello {
         version: u32,
@@ -24,6 +49,7 @@ pub enum ClientFrame {
     },
     Submit {
         session: SessionId,
+        #[serde(with = "goat_protocol::id_serde")]
         correlation: u64,
         op: Op,
     },
@@ -31,7 +57,7 @@ pub enum ClientFrame {
         session: SessionId,
         op: Op,
     },
-    ListSessions,
+    ListSessions {},
     ListDirectory {
         path: String,
     },
@@ -41,22 +67,24 @@ pub enum ClientFrame {
     PairDevice {
         label: String,
     },
-    ListDevices,
+    ListDevices {},
     RevokeDevice {
         device: String,
     },
-    StopDaemon,
-    Goodbye,
+    StopDaemon {},
+    Goodbye {},
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ResumeMode {
-    New,
-    Latest,
+    New {},
+    Latest {},
     Thread { thread_id: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ServerFrame {
     Welcome {
         version: u32,
@@ -88,6 +116,7 @@ pub enum ServerFrame {
     },
     CorrelationAssigned {
         session: SessionId,
+        #[serde(with = "goat_protocol::id_serde")]
         correlation: u64,
         task: goat_protocol::TaskId,
     },
@@ -132,10 +161,11 @@ pub struct SessionInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum SessionLiveState {
-    Idle,
-    Active,
-    WaitingOnAsk,
+    Idle {},
+    Active {},
+    WaitingOnAsk {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,8 +175,9 @@ pub struct DirEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum DirEntryKind {
-    Directory,
-    File,
-    Symlink,
+    Directory {},
+    File {},
+    Symlink {},
 }

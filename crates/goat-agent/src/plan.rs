@@ -140,7 +140,7 @@ pub(crate) async fn run_propose_plan(
         res = rx => res,
     };
     match decision {
-        Ok(PlanDecision::Approve) => {
+        Ok(PlanDecision::Approve {}) => {
             if let Some(cell) = env.transition {
                 let inject = approved_plan_inject(&path);
                 *cell

@@ -367,7 +367,7 @@ impl App {
                     return Vec::new();
                 }
                 self.pending.resume = Some(ResumeIntent::Picker);
-                vec![Op::ListThreads]
+                vec![Op::ListThreads {}]
             }
             CommandEffect::ResumeIndex(index) => {
                 if self.turn.active.is_some() {
@@ -378,7 +378,7 @@ impl App {
                     return Vec::new();
                 }
                 self.pending.resume = Some(ResumeIntent::Index(index));
-                vec![Op::ListThreads]
+                vec![Op::ListThreads {}]
             }
             CommandEffect::OpenConfig => {
                 self.overlay = Overlay::Config(Config::new(
@@ -408,7 +408,7 @@ impl App {
                 self.clear_ctx_indicator();
                 self.scroll = 0;
                 self.follow = true;
-                vec![Op::Clear]
+                vec![Op::Clear {}]
             }
             CommandEffect::CompactConversation(instructions) => {
                 let id = TaskId(self.next_task);
@@ -1049,7 +1049,7 @@ pub async fn run(
     )
     .await;
     tui::restore();
-    let _ = ops.send(Op::Shutdown).await;
+    let _ = ops.send(Op::Shutdown {}).await;
     result
 }
 
@@ -1192,7 +1192,7 @@ mod tests {
         assert!(matches!(
             ops.as_slice(),
             [Op::ResolvePlan {
-                decision: PlanDecision::Approve,
+                decision: PlanDecision::Approve {},
                 ..
             }]
         ));
@@ -1306,7 +1306,7 @@ mod tests {
         assert!(matches!(
             ops.as_slice(),
             [Op::ResolvePlan {
-                decision: PlanDecision::Approve,
+                decision: PlanDecision::Approve {},
                 ..
             }]
         ));
@@ -1655,7 +1655,7 @@ mod tests {
         app.follow = false;
         app.composer.insert_str("/clear");
         let ops = app.submit();
-        assert!(matches!(ops.as_slice(), [Op::Clear]));
+        assert!(matches!(ops.as_slice(), [Op::Clear {}]));
         assert!(app.transcript.items.is_empty());
         assert_eq!(app.scroll, 0);
         assert!(app.follow);
@@ -1896,7 +1896,7 @@ mod tests {
         use goat_protocol::ThreadSummary;
         let mut app = App::new(Theme::dark());
         let ops = app.dispatch_slash_command("/resume");
-        assert!(matches!(ops.as_slice(), [Op::ListThreads]));
+        assert!(matches!(ops.as_slice(), [Op::ListThreads {}]));
         let ops = app.on_engine(EngineEvent::ThreadsListed {
             threads: vec![ThreadSummary {
                 id: 7,
@@ -1914,7 +1914,7 @@ mod tests {
         use goat_protocol::ThreadSummary;
         let mut app = App::new(Theme::dark());
         let ops = app.dispatch_slash_command("/resume 1");
-        assert!(matches!(ops.as_slice(), [Op::ListThreads]));
+        assert!(matches!(ops.as_slice(), [Op::ListThreads {}]));
         let ops = app.on_engine(EngineEvent::ThreadsListed {
             threads: vec![ThreadSummary {
                 id: 42,
@@ -1943,8 +1943,12 @@ mod tests {
             compaction_threshold: None,
             mode: goat_protocol::Mode::Normal,
             entries: vec![
-                TranscriptEntry::User("hello".to_owned()),
-                TranscriptEntry::Assistant("hi there".to_owned()),
+                TranscriptEntry::User {
+                    text: "hello".to_owned(),
+                },
+                TranscriptEntry::Assistant {
+                    text: "hi there".to_owned(),
+                },
                 TranscriptEntry::Tool {
                     call: ToolCall {
                         id: ToolCallId(1),

@@ -200,7 +200,7 @@ pub(crate) async fn handle_resume(
                     Some((command, output)) => {
                         entries.push(TranscriptEntry::Shell { command, output });
                     }
-                    None => entries.push(TranscriptEntry::User(text.clone())),
+                    None => entries.push(TranscriptEntry::User { text: text.clone() }),
                 }
             }
             parsed.push((stored.id, MessageRole::User, content));
@@ -215,9 +215,9 @@ pub(crate) async fn handle_resume(
         for block in &content {
             match block {
                 ContentBlock::Text { text } => match role {
-                    MessageRole::User => entries.push(TranscriptEntry::User(text.clone())),
+                    MessageRole::User => entries.push(TranscriptEntry::User { text: text.clone() }),
                     MessageRole::Assistant => {
-                        entries.push(TranscriptEntry::Assistant(text.clone()));
+                        entries.push(TranscriptEntry::Assistant { text: text.clone() });
                     }
                     MessageRole::System => {}
                 },
