@@ -89,9 +89,9 @@ async fn run_tui(worktree_label: Option<String>, r#continue: bool) -> color_eyre
         .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
     let daemon_exe = std::env::current_exe()?;
     let resume = if r#continue {
-        goat_wire::ResumeMode::Latest
+        goat_wire::ResumeMode::Latest {}
     } else {
-        goat_wire::ResumeMode::New
+        goat_wire::ResumeMode::New {}
     };
 
     let attachment = goat_client::connect(&socket_path, &daemon_exe, cwd, resume).await?;
@@ -135,7 +135,7 @@ async fn run_daemon_command(command: DaemonCommand) -> color_eyre::Result<()> {
             } else {
                 for s in sessions {
                     let flag = match s.state {
-                        goat_wire::SessionLiveState::WaitingOnAsk => " (waiting on ask)",
+                        goat_wire::SessionLiveState::WaitingOnAsk {} => " (waiting on ask)",
                         _ => "",
                     };
                     println!(

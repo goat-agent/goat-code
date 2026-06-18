@@ -85,7 +85,8 @@ async fn drain_daemon(force: bool) -> color_eyre::Result<()> {
         .filter(|s| {
             matches!(
                 s.state,
-                goat_wire::SessionLiveState::Active | goat_wire::SessionLiveState::WaitingOnAsk
+                goat_wire::SessionLiveState::Active {}
+                    | goat_wire::SessionLiveState::WaitingOnAsk {}
             )
         })
         .count();

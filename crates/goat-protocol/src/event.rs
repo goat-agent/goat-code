@@ -14,6 +14,7 @@ pub enum NotifyKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum Event {
     TaskStarted {
         id: TaskId,

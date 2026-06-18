@@ -240,7 +240,7 @@ async fn remote_pair_and_open_session_over_mtls() {
         &mut ws,
         &ClientFrame::OpenSession {
             cwd: dir.path().display().to_string(),
-            resume: ResumeMode::New,
+            resume: ResumeMode::New {},
         },
     )
     .await;
@@ -262,7 +262,7 @@ async fn revoked_device_cannot_reconnect() {
 
     let device_id = {
         let mut conn = local_conn(&socket).await;
-        conn.send(&ClientFrame::ListDevices).await.unwrap();
+        conn.send(&ClientFrame::ListDevices {}).await.unwrap();
         match conn.recv().await.unwrap() {
             ServerFrame::Devices { devices } => devices[0].id.clone(),
             other => panic!("expected Devices, got {other:?}"),

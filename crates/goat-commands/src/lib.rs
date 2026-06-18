@@ -141,10 +141,10 @@ fn default_skill_shape() -> CommandShape {
 
 fn skill_shape(command: &SkillCommandShape) -> CommandShape {
     match command {
-        SkillCommandShape::Arguments(arguments) => {
+        SkillCommandShape::Arguments { items: arguments } => {
             CommandShape::Parameters(arguments.iter().map(skill_parameter).collect())
         }
-        SkillCommandShape::Subcommands(subcommands) => {
+        SkillCommandShape::Subcommands { items: subcommands } => {
             CommandShape::Branches(subcommands.iter().map(skill_branch).collect())
         }
     }
@@ -169,9 +169,9 @@ fn skill_parameter(parameter: &SkillParameterInfo) -> ParameterSpec {
 
 fn skill_value(value: &SkillParameterValue) -> ParameterValue {
     match value {
-        SkillParameterValue::Word => ParameterValue::Word,
-        SkillParameterValue::Integer => ParameterValue::Integer,
-        SkillParameterValue::Choice(choices) => ParameterValue::Choice(
+        SkillParameterValue::Word {} => ParameterValue::Word,
+        SkillParameterValue::Integer {} => ParameterValue::Integer,
+        SkillParameterValue::Choice { options: choices } => ParameterValue::Choice(
             choices
                 .iter()
                 .map(|choice| ChoiceSpec {
@@ -180,7 +180,7 @@ fn skill_value(value: &SkillParameterValue) -> ParameterValue {
                 })
                 .collect(),
         ),
-        SkillParameterValue::TextTail => ParameterValue::TextTail,
+        SkillParameterValue::TextTail {} => ParameterValue::TextTail,
     }
 }
 
@@ -361,12 +361,14 @@ mod tests {
         registry.set_skills(&[SkillInfo {
             name: "review".to_owned(),
             description: "review".to_owned(),
-            command: Some(SkillCommandShape::Arguments(vec![SkillParameterInfo {
-                name: "target".to_owned(),
-                description: "target".to_owned(),
-                required: true,
-                value: SkillParameterValue::Word,
-            }])),
+            command: Some(SkillCommandShape::Arguments {
+                items: vec![SkillParameterInfo {
+                    name: "target".to_owned(),
+                    description: "target".to_owned(),
+                    required: true,
+                    value: SkillParameterValue::Word {},
+                }],
+            }),
         }]);
         let CommandEffect::Submit(text) = registry.resolve_line("/review src/lib.rs") else {
             panic!("expected submit");
@@ -381,16 +383,18 @@ mod tests {
         registry.set_skills(&[SkillInfo {
             name: "review".to_owned(),
             description: "review".to_owned(),
-            command: Some(SkillCommandShape::Subcommands(vec![SkillBranchInfo {
-                name: "security".to_owned(),
-                description: "security".to_owned(),
-                arguments: vec![SkillParameterInfo {
-                    name: "focus".to_owned(),
-                    description: "focus".to_owned(),
-                    required: false,
-                    value: SkillParameterValue::TextTail,
+            command: Some(SkillCommandShape::Subcommands {
+                items: vec![SkillBranchInfo {
+                    name: "security".to_owned(),
+                    description: "security".to_owned(),
+                    arguments: vec![SkillParameterInfo {
+                        name: "focus".to_owned(),
+                        description: "focus".to_owned(),
+                        required: false,
+                        value: SkillParameterValue::TextTail {},
+                    }],
                 }],
-            }])),
+            }),
         }]);
         let CommandEffect::Submit(text) = registry.resolve_line("/review security auth flow")
         else {
@@ -406,11 +410,13 @@ mod tests {
         registry.set_skills(&[SkillInfo {
             name: "review".to_owned(),
             description: "review".to_owned(),
-            command: Some(SkillCommandShape::Subcommands(vec![SkillBranchInfo {
-                name: "security".to_owned(),
-                description: "security".to_owned(),
-                arguments: Vec::new(),
-            }])),
+            command: Some(SkillCommandShape::Subcommands {
+                items: vec![SkillBranchInfo {
+                    name: "security".to_owned(),
+                    description: "security".to_owned(),
+                    arguments: Vec::new(),
+                }],
+            }),
         }]);
         assert!(matches!(
             registry.resolve_line("/review nope"),

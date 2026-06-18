@@ -277,15 +277,17 @@ pub(crate) async fn handle_login(
         return;
     }
     let resolved = match credential {
-        LoginCredential::ApiKey(secret) => Credential::ApiKey(SecretString::from(secret)),
-        LoginCredential::OAuth => match run_self_oauth(&provider, ctx.events, ctx.registry).await {
-            Ok(tokens) => Credential::OAuth(tokens),
-            Err(message) => {
-                login_failed(&provider, ctx.events, message).await;
-                emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
-                return;
+        LoginCredential::ApiKey { key: secret } => Credential::ApiKey(SecretString::from(secret)),
+        LoginCredential::OAuth {} => {
+            match run_self_oauth(&provider, ctx.events, ctx.registry).await {
+                Ok(tokens) => Credential::OAuth(tokens),
+                Err(message) => {
+                    login_failed(&provider, ctx.events, message).await;
+                    emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
+                    return;
+                }
             }
-        },
+        }
     };
     finalize_login(ctx, provider, name, key, resolved).await;
 }

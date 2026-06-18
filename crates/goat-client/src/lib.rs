@@ -107,7 +107,7 @@ fn spawn_pumps(conn: ClientConn<Stream>, session: SessionId, client_id: u64) -> 
                 maybe_op = ops_rx.recv() => {
                     let Some(op) = maybe_op else { break };
                     let frame = match op {
-                        Op::Shutdown => ClientFrame::Goodbye,
+                        Op::Shutdown {} => ClientFrame::Goodbye {},
                         Op::Interrupt { .. }
                         | Op::Answer { .. }
                         | Op::DequeueMessage { .. }
@@ -217,7 +217,7 @@ pub async fn status(socket_path: &Path) -> Result<Vec<goat_wire::SessionInfo>, C
     })
     .await?;
     expect_welcome(&mut conn).await?;
-    conn.send(&ClientFrame::ListSessions).await?;
+    conn.send(&ClientFrame::ListSessions {}).await?;
     match conn.recv().await? {
         ServerFrame::Sessions { sessions } => Ok(sessions),
         _ => Err(ClientError::Handshake),
@@ -232,7 +232,7 @@ pub async fn stop(socket_path: &Path) -> Result<(), ClientError> {
     })
     .await?;
     expect_welcome(&mut conn).await?;
-    conn.send(&ClientFrame::StopDaemon).await?;
+    conn.send(&ClientFrame::StopDaemon {}).await?;
     Ok(())
 }
 
@@ -289,7 +289,7 @@ pub async fn list_devices(socket_path: &Path) -> Result<Vec<goat_wire::DeviceInf
     })
     .await?;
     expect_welcome(&mut conn).await?;
-    conn.send(&ClientFrame::ListDevices).await?;
+    conn.send(&ClientFrame::ListDevices {}).await?;
     match conn.recv().await? {
         ServerFrame::Devices { devices } => Ok(devices),
         ServerFrame::Error { message } => Err(ClientError::OpenFailed(message)),

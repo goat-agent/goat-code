@@ -62,8 +62,8 @@ impl App {
                 self.follow = true;
                 for entry in entries {
                     match entry {
-                        TranscriptEntry::User(text) => self.transcript.push_user(text),
-                        TranscriptEntry::Assistant(text) => {
+                        TranscriptEntry::User { text } => self.transcript.push_user(text),
+                        TranscriptEntry::Assistant { text } => {
                             self.transcript.commit_text(&text);
                         }
                         TranscriptEntry::Tool { call, outcome } => {

@@ -360,7 +360,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     break;
                 }
             }
-            Op::Clear => {
+            Op::Clear {} => {
                 state.conversation.clear();
                 state.tracker.invalidate();
                 state.thread_id = None;
@@ -421,7 +421,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 .await;
                 accounts::clear_account_registries(&account_registries);
             }
-            Op::ListThreads => {
+            Op::ListThreads {} => {
                 threads::handle_list_threads(&store, &cwd, &events).await;
             }
             Op::Resume { thread_id: tid } => {
@@ -436,7 +436,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 )
                 .await;
             }
-            Op::ResumeLatest => {
+            Op::ResumeLatest {} => {
                 threads::handle_resume_latest(
                     &store,
                     &skills,
@@ -451,7 +451,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
             Op::RenameThread { title } => {
                 threads::handle_rename(&store, state.thread_id, title, &events).await;
             }
-            Op::Shutdown => break,
+            Op::Shutdown {} => break,
         }
     }
     mcp.shutdown().await;
@@ -937,7 +937,7 @@ mod tests {
                 break;
             }
         }
-        ops.send(Op::Shutdown).await.unwrap();
+        ops.send(Op::Shutdown {}).await.unwrap();
 
         let provider2 = MockProvider {
             id: "mock".to_owned(),
@@ -1474,12 +1474,12 @@ mod tests {
         .unwrap();
         drain_until_task_done(&mut events).await;
 
-        ops.send(Op::ResumeLatest).await.unwrap();
+        ops.send(Op::ResumeLatest {}).await.unwrap();
         while let Some(event) = events.recv().await {
             if let Event::ConversationRestored { entries, .. } = event {
                 assert!(entries.iter().any(|entry| matches!(
                     entry,
-                    goat_protocol::TranscriptEntry::User(text) if text == "hello there"
+                    goat_protocol::TranscriptEntry::User { text } if text == "hello there"
                 )));
                 return;
             }
@@ -1509,8 +1509,8 @@ mod tests {
         let session = Session::spawn(agent);
         let (ops, mut events, _handle) = session.into_parts();
 
-        ops.send(Op::ResumeLatest).await.unwrap();
-        ops.send(Op::Shutdown).await.unwrap();
+        ops.send(Op::ResumeLatest {}).await.unwrap();
+        ops.send(Op::Shutdown {}).await.unwrap();
 
         let mut saw_notify = false;
         while let Some(event) = events.recv().await {
@@ -1565,7 +1565,7 @@ mod tests {
         .unwrap();
         drain_until_task_done(&mut events).await;
 
-        ops.send(Op::Clear).await.unwrap();
+        ops.send(Op::Clear {}).await.unwrap();
 
         ops.send(Op::SubmitMessage {
             id: TaskId(2),

@@ -141,7 +141,7 @@ impl Manager {
         resume: ResumeMode,
     ) -> Result<SessionId, String> {
         let normalized = Self::normalize_cwd(&cwd);
-        if matches!(resume, ResumeMode::Latest) {
+        if matches!(resume, ResumeMode::Latest {}) {
             let table = self.inner.sessions.lock().await;
             if let Some(id) = Self::find_live_by_cwd_locked(&table, &normalized) {
                 return Ok(id);
@@ -174,7 +174,7 @@ impl Manager {
             next_seq: 0,
             next_task: 1,
             subscribers: Vec::new(),
-            state: goat_wire::SessionLiveState::Idle,
+            state: goat_wire::SessionLiveState::Idle {},
             snapshot: None,
             tokens: 0,
             open_asks: 0,
@@ -184,10 +184,10 @@ impl Manager {
 
         let id = {
             let mut table = self.inner.sessions.lock().await;
-            if matches!(resume, ResumeMode::Latest)
+            if matches!(resume, ResumeMode::Latest {})
                 && let Some(existing) = Self::find_live_by_cwd_locked(&table, &normalized)
             {
-                let _ = ops.send(Op::Shutdown).await;
+                let _ = ops.send(Op::Shutdown {}).await;
                 return Ok(existing);
             }
             table.insert(
@@ -203,9 +203,9 @@ impl Manager {
         spawn_pump(self.clone(), id, inner, events, handle, store_for_pump);
 
         match resume {
-            ResumeMode::New => {}
-            ResumeMode::Latest => {
-                let _ = ops.send(Op::ResumeLatest).await;
+            ResumeMode::New {} => {}
+            ResumeMode::Latest {} => {
+                let _ = ops.send(Op::ResumeLatest {}).await;
             }
             ResumeMode::Thread { thread_id } => {
                 let _ = ops.send(Op::Resume { thread_id }).await;
@@ -294,7 +294,7 @@ impl Manager {
             table.remove(&session);
             ops
         };
-        let _ = ops.send(Op::Shutdown).await;
+        let _ = ops.send(Op::Shutdown {}).await;
         tracing::info!(session = session.0, "evicted idle session with no windows");
     }
 
@@ -365,11 +365,11 @@ impl Manager {
             let name = entry.file_name().to_string_lossy().into_owned();
             let file_type = entry.file_type().map_err(|e| format!("file_type: {e}"))?;
             let kind = if file_type.is_symlink() {
-                goat_wire::DirEntryKind::Symlink
+                goat_wire::DirEntryKind::Symlink {}
             } else if file_type.is_dir() {
-                goat_wire::DirEntryKind::Directory
+                goat_wire::DirEntryKind::Directory {}
             } else {
-                goat_wire::DirEntryKind::File
+                goat_wire::DirEntryKind::File {}
             };
             children.push(goat_wire::DirEntry { name, kind });
         }
@@ -408,7 +408,7 @@ impl Manager {
             let inner = live.inner.lock().await;
             inner.ops.clone()
         };
-        let _ = ops.send(Op::Shutdown).await;
+        let _ = ops.send(Op::Shutdown {}).await;
         Ok(())
     }
 

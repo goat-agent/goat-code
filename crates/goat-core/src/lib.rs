@@ -31,7 +31,7 @@ mod tests {
                                 })
                                 .await;
                         }
-                        Op::Shutdown => break,
+                        Op::Shutdown {} => break,
                         _ => {}
                     }
                 }

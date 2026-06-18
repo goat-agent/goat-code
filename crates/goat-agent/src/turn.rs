@@ -159,7 +159,7 @@ pub(crate) async fn handle_idle_op(
         Op::RenameThread { title } => {
             crate::threads::handle_rename(store, thread_id, title, events).await;
         }
-        Op::ListThreads => {
+        Op::ListThreads {} => {
             crate::threads::handle_list_threads(store, cwd, events).await;
         }
         _ => {}
@@ -318,7 +318,7 @@ pub(crate) async fn handle_shell(
                     Some(Op::Interrupt { id: target_id }) if target_id == id => {
                         break ShellEnd::Interrupted;
                     }
-                    Some(Op::Shutdown) | None => break ShellEnd::Shutdown,
+                    Some(Op::Shutdown {}) | None => break ShellEnd::Shutdown,
                     Some(op) => deferred.push(op),
                 },
             }
@@ -489,7 +489,7 @@ pub(crate) async fn handle_compact(
                         }
                     }
                     Some(Op::Interrupt { id: target_id }) if target_id == id => token.cancel(),
-                    Some(Op::Shutdown) | None => {
+                    Some(Op::Shutdown {}) | None => {
                         shutdown = true;
                         token.cancel();
                     }
@@ -700,7 +700,7 @@ async fn run_one_turn(
                         }
                     }
                     Some(Op::Interrupt { id: target_id }) if target_id == id => token.cancel(),
-                    Some(Op::Shutdown) | None => {
+                    Some(Op::Shutdown {}) | None => {
                         shutdown = true;
                         token.cancel();
                     }
