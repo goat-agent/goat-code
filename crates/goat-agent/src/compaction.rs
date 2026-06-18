@@ -124,7 +124,7 @@ First, inside <analysis> tags, walk through the conversation chronologically: ea
 Then write the summary inside <summary> tags using exactly these sections:
 
 ## Task
-Every explicit request the user made, in order, quoting the user's wording where it is load-bearing. State the overall goal and the current sub-goal.
+Every explicit request the user made, in order, quoting the user's wording in its original language where it is load-bearing, and noting the language the user is writing in. State the overall goal and the current sub-goal.
 
 ## Constraints and preferences
 Rules, conventions, and preferences from the user or project instructions, including anything the user said not to do.
@@ -143,7 +143,7 @@ The concrete remaining work, in order, each step tied to the user request it ser
 
 Respond with the analysis and summary only. Do not address the user and do not continue the task.";
 
-pub(crate) const SUMMARY_WRAPPER: &str = "This session is continuing from an earlier conversation that ran out of context. The summary below covers everything before the most recent messages. Continue the work from where it left off without asking the user to repeat anything. File contents may have changed since they appear in the summary; reread before editing.\n\n";
+pub(crate) const SUMMARY_WRAPPER: &str = "This session is continuing from an earlier conversation that ran out of context. The summary below covers everything before the most recent messages. Continue the work from where it left off without asking the user to repeat anything. File contents may have changed since they appear in the summary; reread before editing. Reply to the user in the language of their original request recorded in the summary's Task section, and keep code, identifiers, paths, and commands unchanged.\n\n";
 
 const PARTIAL_INPUT_NOTE: &str =
     "[The earliest part of this conversation was not available when this summary was written.]";
@@ -703,5 +703,16 @@ mod compact_tests {
         let untagged = "<analysis>thinking</analysis>\nplain summary body";
         assert_eq!(extract_summary(untagged), "plain summary body");
         assert_eq!(extract_summary("just text"), "just text");
+    }
+
+    #[test]
+    fn summarization_and_wrapper_preserve_language() {
+        assert!(super::SUMMARIZATION_PROMPT.contains("original language"));
+        assert!(super::SUMMARIZATION_PROMPT.contains("noting the language the user is writing in"));
+        assert!(super::SUMMARY_WRAPPER.contains("language of their original request"));
+        assert!(
+            super::SUMMARY_WRAPPER
+                .contains("keep code, identifiers, paths, and commands unchanged")
+        );
     }
 }

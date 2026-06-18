@@ -363,7 +363,7 @@ pub(crate) async fn process_round_output(
             .collect();
         let message = Message {
             role: MessageRole::User,
-            content: synthetic,
+            content: crate::prompt::append_language_anchor(synthetic, run.is_top()),
         };
         let db_id = match run.ids() {
             Some(ids) => persist_message(ctx, ids, &message).await,
@@ -375,7 +375,7 @@ pub(crate) async fn process_round_output(
     let batch = run_tool_batch(ctx, run, env, &pending_calls, call_seq, tool_ctx, token).await;
     let message = Message {
         role: MessageRole::User,
-        content: batch.tool_results,
+        content: crate::prompt::append_language_anchor(batch.tool_results, run.is_top()),
     };
     let db_id = match run.ids() {
         Some(ids) => persist_message(ctx, ids, &message).await,

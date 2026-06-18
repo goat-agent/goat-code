@@ -269,7 +269,7 @@ pub(crate) async fn handle_resume(
     let mut new_history: Vec<(Message, Option<i64>)> = vec![(
         Message::text(
             MessageRole::System,
-            build_system_prompt(skills, instructions),
+            build_system_prompt(std::path::Path::new(&thread.cwd), skills, instructions),
         ),
         None,
     )];
@@ -324,8 +324,8 @@ pub(crate) async fn handle_resume_latest(
     state: &mut crate::SessionState,
     events: &mpsc::Sender<Event>,
 ) {
-    let cwd = cwd.display().to_string();
-    match store.latest_thread_in(cwd).await {
+    let cwd_key = cwd.display().to_string();
+    match store.latest_thread_in(cwd_key).await {
         Ok(Some(thread)) => {
             handle_resume(store, skills, tools, instructions, thread.id, state, events).await;
         }
