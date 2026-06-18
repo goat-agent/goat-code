@@ -612,13 +612,11 @@ impl App {
         self.next_task += 1;
         self.follow = true;
         self.dirty = true;
-        if self.turn.active.is_some() {
-            self.queued.push((id, text.clone()));
-            return vec![Op::SubmitMessage { id, text }];
+        if self.turn.active.is_none() {
+            self.turn.active = Some(id);
+            self.reset_agents();
         }
-        self.turn.active = Some(id);
-        self.reset_agents();
-        self.transcript.push_user(text.clone());
+        self.queued.push((id, text.clone()));
         vec![Op::SubmitMessage { id, text }]
     }
 
@@ -628,6 +626,7 @@ impl App {
         }
         self.queued
             .iter()
+            .filter(|(id, _)| self.turn.active != Some(*id))
             .map(|(_, text)| {
                 text.lines()
                     .find(|line| !line.trim().is_empty())
@@ -1155,6 +1154,99 @@ mod tests {
         assert!(matches!(started.as_slice(), [Op::SubmitMessage { .. }]));
         let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(ops.as_slice(), [Op::Interrupt { .. }]));
+    }
+
+    fn user_lines(app: &App) -> usize {
+        app.transcript
+            .items
+            .iter()
+            .filter(|item| matches!(item, crate::transcript::Item::User(_)))
+            .count()
+    }
+
+    fn submit_id(ops: &[Op]) -> TaskId {
+        match ops {
+            [Op::SubmitMessage { id, .. }] => *id,
+            _ => panic!("expected a single SubmitMessage op"),
+        }
+    }
+
+    #[test]
+    fn sender_first_message_renders_once_on_echo() {
+        let mut app = App::new(Theme::dark());
+        let ops = app.submit_text("hello".to_owned());
+        let id = submit_id(&ops);
+        assert_eq!(user_lines(&app), 0, "no optimistic render");
+        assert_eq!(app.turn.active, Some(id));
+
+        app.on_engine(EngineEvent::UserMessage {
+            id,
+            text: "hello".to_owned(),
+        });
+        assert_eq!(user_lines(&app), 1);
+        assert!(app.queued.is_empty());
+
+        app.on_engine(EngineEvent::TaskStarted { id });
+        assert_eq!(user_lines(&app), 1, "TaskStarted adds no user line");
+    }
+
+    #[test]
+    fn peer_message_renders_from_echo_and_resets() {
+        let mut app = App::new(Theme::dark());
+        assert!(app.turn.active.is_none());
+        app.on_engine(EngineEvent::UserMessage {
+            id: TaskId(42),
+            text: "from another window".to_owned(),
+        });
+        assert_eq!(user_lines(&app), 1);
+        assert!(app.follow);
+    }
+
+    #[test]
+    fn steering_echo_does_not_reset_agents() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::TaskStarted { id: TaskId(1) });
+        app.follow = false;
+        app.on_engine(EngineEvent::UserMessage {
+            id: TaskId(2),
+            text: "mid turn".to_owned(),
+        });
+        assert_eq!(user_lines(&app), 1);
+        assert!(!app.follow, "mid-turn echo does not force follow");
+    }
+
+    #[test]
+    fn in_flight_first_message_excluded_from_queued_labels() {
+        let mut app = App::new(Theme::dark());
+        let ops = app.submit_text("hello".to_owned());
+        let _ = submit_id(&ops);
+        assert!(app.queued_labels().is_empty());
+    }
+
+    #[test]
+    fn queued_steering_message_shows_label() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::TaskStarted { id: TaskId(100) });
+        let _ = app.submit_text("next up".to_owned());
+        assert_eq!(app.queued_labels(), vec!["next up".to_owned()]);
+    }
+
+    #[test]
+    fn first_message_then_immediate_interrupt_does_not_double_render() {
+        let mut app = App::new(Theme::dark());
+        let ops = app.submit_text("hello".to_owned());
+        let id = submit_id(&ops);
+        app.on_engine(EngineEvent::UserMessage {
+            id,
+            text: "hello".to_owned(),
+        });
+        app.on_engine(EngineEvent::TaskStarted { id });
+        app.on_engine(EngineEvent::TaskDone {
+            id,
+            interrupted: true,
+        });
+        assert_eq!(user_lines(&app), 1);
+        assert!(app.composer.text().trim().is_empty());
     }
 
     #[test]
@@ -1985,6 +2077,10 @@ mod tests {
         app.composer.insert_str("go");
         app.submit();
         let top = app.turn.active.unwrap();
+        app.on_engine(EngineEvent::UserMessage {
+            id: top,
+            text: "go".to_owned(),
+        });
         app.on_engine(EngineEvent::ToolStarted {
             id: top,
             call: ToolCall {

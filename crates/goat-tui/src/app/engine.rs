@@ -9,16 +9,6 @@ impl App {
         let mut ops = Vec::new();
         match event {
             EngineEvent::TaskStarted { id } => {
-                if let Some(pos) = self
-                    .queued
-                    .iter()
-                    .position(|(queued_id, _)| *queued_id == id)
-                {
-                    let (_, text) = self.queued.remove(pos);
-                    self.reset_agents();
-                    self.transcript.push_user(text);
-                    self.follow = true;
-                }
                 self.turn.active = Some(id);
                 self.turn.task_start = Some(std::time::Instant::now());
                 self.turn.thinking = false;
@@ -146,12 +136,15 @@ impl App {
                 self.dirty = true;
             }
             EngineEvent::UserMessage { id, text } => {
-                if let Some(pos) = self
+                let sent_by_us = self
                     .queued
                     .iter()
                     .position(|(queued_id, _)| *queued_id == id)
-                {
-                    self.queued.remove(pos);
+                    .map(|pos| self.queued.remove(pos))
+                    .is_some();
+                if !sent_by_us && self.turn.active.is_none() {
+                    self.reset_agents();
+                    self.follow = true;
                 }
                 self.transcript.push_user(text);
                 self.dirty = true;

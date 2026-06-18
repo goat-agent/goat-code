@@ -615,6 +615,18 @@ async fn run_one_turn(
         Message::text(MessageRole::User, text.clone()),
         ids.user_message_db_id,
     );
+    if ctx
+        .events
+        .send(Event::UserMessage {
+            id,
+            text: text.clone(),
+        })
+        .await
+        .is_err()
+    {
+        finalize_turn(ctx, id, &TurnEnd::Shutdown, &ids).await;
+        return (TurnFlow::Shutdown, Vec::new());
+    }
     if ctx.events.send(Event::TaskStarted { id }).await.is_err() {
         finalize_turn(ctx, id, &TurnEnd::Shutdown, &ids).await;
         return (TurnFlow::Shutdown, Vec::new());
