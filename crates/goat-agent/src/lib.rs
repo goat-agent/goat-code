@@ -664,8 +664,11 @@ mod tests {
         }
         assert_eq!(
             user_messages,
-            vec![(TaskId(2), "also do this".to_owned())],
-            "steering message must be injected with its own task id"
+            vec![
+                (TaskId(1), "first".to_owned()),
+                (TaskId(2), "also do this".to_owned())
+            ],
+            "first message and steering message are both echoed with their task ids"
         );
         assert_eq!(text_dones, vec!["reply 0".to_owned(), "reply 1".to_owned()]);
         assert_eq!(
@@ -698,18 +701,55 @@ mod tests {
             .unwrap();
 
         let mut dequeued = Vec::new();
-        let mut user_messages = 0;
+        let mut user_messages = Vec::new();
         while let Some(event) = events.recv().await {
             match event {
                 Event::MessageDequeued { id, text } => dequeued.push((id, text)),
-                Event::UserMessage { .. } => user_messages += 1,
+                Event::UserMessage { id, .. } => user_messages.push(id),
                 Event::TaskDone { .. } => break,
                 _ => {}
             }
         }
         assert_eq!(dequeued, vec![(TaskId(2), "typo message".to_owned())]);
-        assert_eq!(user_messages, 0, "dequeued message must never inject");
+        assert_eq!(
+            user_messages,
+            vec![TaskId(1)],
+            "only the first message echoes; the dequeued message never injects"
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn first_message_echoes_user_message_before_task_started() {
+        let (agent, _calls) = seq_agent(10).await;
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(1),
+            text: "first".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        let mut order = Vec::new();
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::UserMessage { id, text } => {
+                    order.push(("user", id, Some(text)));
+                }
+                Event::TaskStarted { id } => order.push(("started", id, None)),
+                Event::TaskDone { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            order,
+            vec![
+                ("user", TaskId(1), Some("first".to_owned())),
+                ("started", TaskId(1), None),
+            ],
+            "UserMessage must precede TaskStarted for the first message"
+        );
     }
 
     #[tokio::test]
@@ -1249,6 +1289,7 @@ mod tests {
         let mut started = false;
         let mut deltas = String::new();
         let mut done = false;
+        let mut user_echo = None;
         while let Some(event) = events.recv().await {
             match event {
                 Event::ModelListChanged { .. }
@@ -1262,6 +1303,7 @@ mod tests {
                 | Event::ThreadBound { .. }
                 | Event::RateLimits { .. } => {}
                 Event::TaskStarted { .. } => started = true,
+                Event::UserMessage { id, text } => user_echo = Some((id, text)),
                 Event::TextDelta { chunk, .. } => deltas.push_str(&chunk),
                 Event::TaskDone { interrupted, .. } => {
                     assert!(!interrupted);
@@ -1274,6 +1316,7 @@ mod tests {
         assert!(started);
         assert_eq!(deltas, "hello");
         assert!(done);
+        assert_eq!(user_echo, Some((TaskId(1), "hi".to_owned())));
     }
 
     #[tokio::test]
