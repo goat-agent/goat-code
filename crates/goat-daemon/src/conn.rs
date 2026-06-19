@@ -162,7 +162,30 @@ async fn dispatch(
             correlation,
             op,
         } => {
-            if let Err(message) = manager.submit(session, out_tx, correlation, op).await {
+            let result = match op {
+                goat_protocol::Op::Clear {} => {
+                    manager
+                        .rebind(client_id, session, out_tx, goat_wire::ResumeMode::New {})
+                        .await
+                }
+                goat_protocol::Op::ResumeLatest {} => {
+                    manager
+                        .rebind(client_id, session, out_tx, goat_wire::ResumeMode::Latest {})
+                        .await
+                }
+                goat_protocol::Op::Resume { thread_id } => {
+                    manager
+                        .rebind(
+                            client_id,
+                            session,
+                            out_tx,
+                            goat_wire::ResumeMode::Thread { thread_id },
+                        )
+                        .await
+                }
+                other => manager.submit(session, out_tx, correlation, other).await,
+            };
+            if let Err(message) = result {
                 let _ = out_tx.send(ServerFrame::Error { message }).await;
             }
             Disposition::Continue
@@ -176,6 +199,11 @@ async fn dispatch(
         ClientFrame::ListSessions {} => {
             let sessions = manager.list_sessions().await;
             let _ = out_tx.send(ServerFrame::Sessions { sessions }).await;
+            Disposition::Continue
+        }
+        ClientFrame::ListThreads { cwd } => {
+            let threads = manager.list_threads(&cwd).await;
+            let _ = out_tx.send(ServerFrame::Threads { threads }).await;
             Disposition::Continue
         }
         ClientFrame::ListDirectory { path } => {

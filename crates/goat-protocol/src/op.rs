@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{LoginCredential, Mode, ModelTarget, PlanDecision, TaskId, ToolCallId};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum Op {
     SubmitMessage {

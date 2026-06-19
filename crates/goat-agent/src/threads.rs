@@ -62,6 +62,7 @@ pub(crate) async fn handle_list_threads(
                 .unwrap_or_else(|| format!("{}/{}", thread.provider, thread.model)),
             id: thread.id,
             updated_at: thread.updated_at,
+            live: false,
         })
         .collect();
     let _ = events

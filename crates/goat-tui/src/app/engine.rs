@@ -48,6 +48,7 @@ impl App {
                 self.on_mode_changed(mode, None);
                 self.transcript.clear();
                 self.reset_agents();
+                self.turn = crate::app::TurnStatus::default();
                 self.scroll = 0;
                 self.follow = true;
                 for entry in entries {
