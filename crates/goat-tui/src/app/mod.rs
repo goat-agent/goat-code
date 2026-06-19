@@ -359,24 +359,10 @@ impl App {
                 self.apply_effort(effort)
             }
             CommandEffect::OpenThreadPicker => {
-                if self.turn.active.is_some() {
-                    self.push_toast(
-                        NotifyKind::Info,
-                        "finish the current task before resuming".to_owned(),
-                    );
-                    return Vec::new();
-                }
                 self.pending.resume = Some(ResumeIntent::Picker);
                 vec![Op::ListThreads {}]
             }
             CommandEffect::ResumeIndex(index) => {
-                if self.turn.active.is_some() {
-                    self.push_toast(
-                        NotifyKind::Info,
-                        "finish the current task before resuming".to_owned(),
-                    );
-                    return Vec::new();
-                }
                 self.pending.resume = Some(ResumeIntent::Index(index));
                 vec![Op::ListThreads {}]
             }
@@ -396,15 +382,9 @@ impl App {
             }
             CommandEffect::RenameConversation(title) => vec![Op::RenameThread { title }],
             CommandEffect::ClearConversation => {
-                if self.turn.active.is_some() {
-                    self.push_toast(
-                        NotifyKind::Info,
-                        "finish the current task before clearing".to_owned(),
-                    );
-                    return Vec::new();
-                }
                 self.transcript.clear();
                 self.reset_agents();
+                self.turn = TurnStatus::default();
                 self.clear_ctx_indicator();
                 self.scroll = 0;
                 self.follow = true;
@@ -1754,13 +1734,14 @@ mod tests {
     }
 
     #[test]
-    fn clear_command_ignored_while_active() {
+    fn clear_command_rebinds_even_while_active() {
         let mut app = App::new(Theme::dark());
         app.turn.active = Some(TaskId(1));
         app.transcript.push_user("in flight");
         let ops = app.dispatch_slash_command("/clear");
-        assert!(ops.is_empty());
-        assert!(!app.transcript.items.is_empty());
+        assert_eq!(ops, vec![Op::Clear {}]);
+        assert!(app.transcript.items.is_empty());
+        assert!(app.turn.active.is_none());
     }
 
     #[test]
@@ -1995,6 +1976,7 @@ mod tests {
                 title: "first chat".to_owned(),
                 model: "openai/gpt".to_owned(),
                 updated_at: 1,
+                live: false,
             }],
         });
         assert!(ops.is_empty());
@@ -2013,6 +1995,7 @@ mod tests {
                 title: "chat".to_owned(),
                 model: "openai/gpt".to_owned(),
                 updated_at: 1,
+                live: false,
             }],
         });
         assert!(matches!(ops.as_slice(), [Op::Resume { thread_id: 42 }]));

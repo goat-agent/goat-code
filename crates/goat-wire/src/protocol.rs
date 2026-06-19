@@ -2,7 +2,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use goat_protocol::{Event, ModelTarget, Op, TranscriptEntry};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
+
+fn id_json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    <String as schemars::JsonSchema>::json_schema(generator)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(pub u64);
@@ -16,6 +20,18 @@ impl Serialize for SessionId {
 impl<'de> Deserialize<'de> for SessionId {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         goat_protocol::id_serde::deserialize(d).map(Self)
+    }
+}
+
+impl schemars::JsonSchema for SessionId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SessionId".into()
+    }
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::SessionId").into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        id_json_schema(generator)
     }
 }
 
@@ -34,7 +50,19 @@ impl<'de> Deserialize<'de> for ClientId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl schemars::JsonSchema for ClientId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ClientId".into()
+    }
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::ClientId").into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        id_json_schema(generator)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum ClientFrame {
     Hello {
@@ -50,6 +78,7 @@ pub enum ClientFrame {
     Submit {
         session: SessionId,
         #[serde(with = "goat_protocol::id_serde")]
+        #[schemars(with = "String")]
         correlation: u64,
         op: Op,
     },
@@ -58,6 +87,9 @@ pub enum ClientFrame {
         op: Op,
     },
     ListSessions {},
+    ListThreads {
+        cwd: String,
+    },
     ListDirectory {
         path: String,
     },
@@ -75,7 +107,7 @@ pub enum ClientFrame {
     Goodbye {},
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum ResumeMode {
     New {},
@@ -83,7 +115,7 @@ pub enum ResumeMode {
     Thread { thread_id: i64 },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum ServerFrame {
     Welcome {
@@ -91,6 +123,9 @@ pub enum ServerFrame {
         client_id: ClientId,
     },
     SessionOpened {
+        session: SessionId,
+    },
+    Detached {
         session: SessionId,
     },
     Snapshot {
@@ -110,6 +145,9 @@ pub enum ServerFrame {
     Sessions {
         sessions: Vec<SessionInfo>,
     },
+    Threads {
+        threads: Vec<ThreadInfo>,
+    },
     Directory {
         path: String,
         children: Vec<DirEntry>,
@@ -117,6 +155,7 @@ pub enum ServerFrame {
     CorrelationAssigned {
         session: SessionId,
         #[serde(with = "goat_protocol::id_serde")]
+        #[schemars(with = "String")]
         correlation: u64,
         task: goat_protocol::TaskId,
     },
@@ -143,14 +182,14 @@ pub enum ServerFrame {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DeviceInfo {
     pub id: String,
     pub label: String,
     pub paired_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionInfo {
     pub session: SessionId,
     pub cwd: String,
@@ -160,7 +199,18 @@ pub struct SessionInfo {
     pub tokens: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ThreadInfo {
+    pub thread_id: i64,
+    pub cwd: String,
+    pub title: Option<String>,
+    pub model: String,
+    pub updated_at: i64,
+    pub live: Option<SessionId>,
+    pub state: Option<SessionLiveState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum SessionLiveState {
     Idle {},
@@ -168,13 +218,13 @@ pub enum SessionLiveState {
     WaitingOnAsk {},
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DirEntry {
     pub name: String,
     pub kind: DirEntryKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum DirEntryKind {
     Directory {},

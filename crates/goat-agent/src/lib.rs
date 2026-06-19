@@ -321,7 +321,8 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
             Op::Interrupt { .. }
             | Op::Answer { .. }
             | Op::DequeueMessage { .. }
-            | Op::ResolvePlan { .. } => {}
+            | Op::ResolvePlan { .. }
+            | Op::Clear {} => {}
             Op::SetMode { mode: requested } => {
                 state.mode = requested;
                 if requested == Mode::Normal {
@@ -359,13 +360,6 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 {
                     break;
                 }
-            }
-            Op::Clear {} => {
-                state.conversation.clear();
-                state.tracker.invalidate();
-                state.thread_id = None;
-                state.mode = Mode::Normal;
-                state.plan_path = None;
             }
             Op::SelectModel { .. } => {
                 turn::handle_idle_op(
@@ -1681,7 +1675,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_starts_new_thread() {
+    async fn clear_is_noop_in_engine_now_that_daemon_owns_rebind() {
         let provider = MockProvider {
             id: "mock".to_owned(),
             reply: "ok".to_owned(),
@@ -1719,6 +1713,6 @@ mod tests {
         .unwrap();
         drain_until_task_done(&mut events).await;
 
-        assert!(store.get_thread(2).await.unwrap().is_some());
+        assert!(store.get_thread(1).await.unwrap().is_some());
     }
 }

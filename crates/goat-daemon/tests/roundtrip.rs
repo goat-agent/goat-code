@@ -118,14 +118,14 @@ async fn submit_message_flows_back_as_events() {
 }
 
 #[tokio::test]
-async fn reattach_by_cwd_returns_same_session() {
+async fn same_thread_id_returns_same_session() {
     let dir = tempfile::tempdir().unwrap();
     let socket = start_daemon(dir.path()).await;
 
     let mut a = connect(&socket).await;
     a.send(&ClientFrame::OpenSession {
         cwd: dir.path().display().to_string(),
-        resume: ResumeMode::New {},
+        resume: ResumeMode::Thread { thread_id: 99 },
     })
     .await
     .unwrap();
@@ -137,7 +137,7 @@ async fn reattach_by_cwd_returns_same_session() {
     let mut b = connect(&socket).await;
     b.send(&ClientFrame::OpenSession {
         cwd: dir.path().display().to_string(),
-        resume: ResumeMode::Latest {},
+        resume: ResumeMode::Thread { thread_id: 99 },
     })
     .await
     .unwrap();
@@ -148,7 +148,42 @@ async fn reattach_by_cwd_returns_same_session() {
 
     assert_eq!(
         first, second,
-        "resume-latest must reattach to the live session in the same cwd"
+        "opening the same thread must converge on the one live session"
+    );
+}
+
+#[tokio::test]
+async fn distinct_thread_ids_get_distinct_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = start_daemon(dir.path()).await;
+
+    let mut a = connect(&socket).await;
+    a.send(&ClientFrame::OpenSession {
+        cwd: dir.path().display().to_string(),
+        resume: ResumeMode::Thread { thread_id: 1 },
+    })
+    .await
+    .unwrap();
+    let first = match a.recv().await.unwrap() {
+        ServerFrame::SessionOpened { session, .. } => session,
+        other => panic!("expected SessionOpened, got {other:?}"),
+    };
+
+    let mut b = connect(&socket).await;
+    b.send(&ClientFrame::OpenSession {
+        cwd: dir.path().display().to_string(),
+        resume: ResumeMode::Thread { thread_id: 2 },
+    })
+    .await
+    .unwrap();
+    let second = match b.recv().await.unwrap() {
+        ServerFrame::SessionOpened { session, .. } => session,
+        other => panic!("expected SessionOpened, got {other:?}"),
+    };
+
+    assert_ne!(
+        first, second,
+        "different threads must run as independent sessions"
     );
 }
 
@@ -182,4 +217,134 @@ async fn kill_session_removes_it_from_the_list() {
         }
         other => panic!("expected Sessions, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn rebind_moves_one_window_leaving_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = start_daemon(dir.path()).await;
+
+    let mut a = connect(&socket).await;
+    a.send(&ClientFrame::OpenSession {
+        cwd: dir.path().display().to_string(),
+        resume: ResumeMode::Thread { thread_id: 1 },
+    })
+    .await
+    .unwrap();
+    let first = match a.recv().await.unwrap() {
+        ServerFrame::SessionOpened { session, .. } => session,
+        other => panic!("expected SessionOpened, got {other:?}"),
+    };
+
+    let mut b = connect(&socket).await;
+    b.send(&ClientFrame::OpenSession {
+        cwd: dir.path().display().to_string(),
+        resume: ResumeMode::Thread { thread_id: 1 },
+    })
+    .await
+    .unwrap();
+    let shared = match b.recv().await.unwrap() {
+        ServerFrame::SessionOpened { session, .. } => session,
+        other => panic!("expected SessionOpened, got {other:?}"),
+    };
+    assert_eq!(
+        first, shared,
+        "both windows share the live session for thread 1"
+    );
+
+    b.send(&ClientFrame::Submit {
+        session: shared,
+        correlation: 1,
+        op: goat_protocol::Op::Resume { thread_id: 2 },
+    })
+    .await
+    .unwrap();
+    let moved = loop {
+        match tokio::time::timeout(Duration::from_secs(5), b.recv()).await {
+            Ok(Ok(ServerFrame::SessionOpened { session })) => break session,
+            Ok(Ok(_)) => {}
+            other => panic!("expected SessionOpened, got {other:?}"),
+        }
+    };
+    assert_ne!(moved, first, "rebound window is on a different session");
+
+    let mut admin = connect(&socket).await;
+    admin.send(&ClientFrame::ListSessions {}).await.unwrap();
+    match admin.recv().await.unwrap() {
+        ServerFrame::Sessions { sessions } => {
+            assert!(
+                sessions.iter().any(|s| s.session == first),
+                "the original session stays alive for window a"
+            );
+        }
+        other => panic!("expected Sessions, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn list_threads_returns_a_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = start_daemon(dir.path()).await;
+    let mut conn = connect(&socket).await;
+
+    conn.send(&ClientFrame::ListThreads {
+        cwd: dir.path().display().to_string(),
+    })
+    .await
+    .unwrap();
+    match conn.recv().await.unwrap() {
+        ServerFrame::Threads { threads } => {
+            assert!(threads.is_empty(), "no threads exist yet in a fresh cwd");
+        }
+        other => panic!("expected Threads, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn daemon_intercepts_clear_as_rebind() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = start_daemon(dir.path()).await;
+    let mut conn = connect(&socket).await;
+
+    conn.send(&ClientFrame::OpenSession {
+        cwd: dir.path().display().to_string(),
+        resume: ResumeMode::Thread { thread_id: 1 },
+    })
+    .await
+    .unwrap();
+    let first = match conn.recv().await.unwrap() {
+        ServerFrame::SessionOpened { session, .. } => session,
+        other => panic!("expected SessionOpened, got {other:?}"),
+    };
+
+    conn.send(&ClientFrame::Submit {
+        session: first,
+        correlation: 1,
+        op: goat_protocol::Op::Clear {},
+    })
+    .await
+    .unwrap();
+
+    let mut detached = false;
+    let mut opened: Option<goat_wire::SessionId> = None;
+    for _ in 0..20 {
+        match tokio::time::timeout(Duration::from_secs(5), conn.recv()).await {
+            Ok(Ok(ServerFrame::Detached { session })) => {
+                assert_eq!(session, first);
+                detached = true;
+            }
+            Ok(Ok(ServerFrame::SessionOpened { session })) => {
+                opened = Some(session);
+                break;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    assert!(
+        detached,
+        "clear must detach the window from the old session"
+    );
+    let opened = opened.expect("clear must open a new session");
+    assert_ne!(opened, first, "clear must rebind to a different session");
 }

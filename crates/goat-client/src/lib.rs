@@ -79,96 +79,84 @@ pub async fn connect(
         _ => return Err(ClientError::Handshake),
     };
 
-    Ok(spawn_pumps(conn, session, client_id))
+    Ok(spawn_pumps(
+        conn,
+        session,
+        client_id,
+        &cwd,
+        socket_path.to_path_buf(),
+    ))
 }
 
-fn spawn_pumps(conn: ClientConn<Stream>, session: SessionId, client_id: u64) -> Attachment {
+enum Outbound {
+    Op(Op),
+    Resync,
+    ListThreads,
+}
+
+struct Shared {
+    current: Mutex<SessionId>,
+    current_thread: Mutex<Option<i64>>,
+    idmap: Mutex<IdMap>,
+    cwd: String,
+}
+
+fn spawn_pumps(
+    conn: ClientConn<Stream>,
+    session: SessionId,
+    client_id: u64,
+    cwd: &Path,
+    socket_path: PathBuf,
+) -> Attachment {
     let (ops_tx, mut ops_rx) = mpsc::channel::<Op>(OPS_CAPACITY);
     let (events_tx, events_rx) = mpsc::channel::<Event>(EVENTS_CAPACITY);
     let (presence_tx, presence_rx) = mpsc::channel::<usize>(PRESENCE_CAPACITY);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Outbound>(OPS_CAPACITY + 8);
 
-    let (sink, mut source) = conn.split();
-    let mut sink = Box::pin(sink);
-    let idmap = Arc::new(Mutex::new(IdMap::new()));
+    let shared = Arc::new(Shared {
+        current: Mutex::new(session),
+        current_thread: Mutex::new(None),
+        idmap: Mutex::new(IdMap::new()),
+        cwd: cwd.display().to_string(),
+    });
 
-    let outbound_map = idmap.clone();
-    let (resync_tx, mut resync_rx) = mpsc::channel::<()>(4);
-
-    let outbound = tokio::spawn(async move {
-        use futures::SinkExt;
-        loop {
-            tokio::select! {
-                biased;
-                Some(()) = resync_rx.recv() => {
-                    if sink.send(ClientFrame::Attach { session }).await.is_err() {
-                        break;
-                    }
-                }
-                maybe_op = ops_rx.recv() => {
-                    let Some(op) = maybe_op else { break };
-                    let frame = match op {
-                        Op::Shutdown {} => ClientFrame::Goodbye {},
-                        Op::Interrupt { .. }
-                        | Op::Answer { .. }
-                        | Op::DequeueMessage { .. }
-                        | Op::ResolvePlan { .. } => {
-                            let mut op = op;
-                            outbound_map.lock().await.translate_outbound(&mut op);
-                            ClientFrame::Control { session, op }
-                        }
-                        other => {
-                            let correlation = submit_correlation(&other);
-                            ClientFrame::Submit {
-                                session,
-                                correlation,
-                                op: other,
-                            }
-                        }
-                    };
-                    if sink.send(frame).await.is_err() {
-                        break;
-                    }
-                }
+    let cmd_for_ops = cmd_tx.clone();
+    tokio::spawn(async move {
+        while let Some(op) = ops_rx.recv().await {
+            let cmd = match op {
+                Op::ListThreads {} => Outbound::ListThreads,
+                other => Outbound::Op(other),
+            };
+            if cmd_for_ops.send(cmd).await.is_err() {
+                break;
             }
         }
     });
 
+    let resync_cmd = cmd_tx.clone();
     let pump = tokio::spawn(async move {
-        use futures::StreamExt;
-        let mut expected_seq: Option<u64> = None;
-        while let Some(item) = source.next().await {
-            let Ok(frame) = item else { break };
-            if let ServerFrame::CorrelationAssigned {
-                correlation, task, ..
-            } = &frame
-            {
-                idmap.lock().await.record_correlation(*correlation, *task);
-                continue;
-            }
-            if let ServerFrame::Presence { clients, .. } = &frame {
-                let _ = presence_tx.try_send(clients.len());
-                continue;
-            }
-            if let ServerFrame::Snapshot { watermark, .. } = &frame {
-                expected_seq = Some(*watermark);
-            }
-            if let ServerFrame::Event { seq, .. } = &frame {
-                match expected_seq {
-                    Some(exp) if *seq > exp => {
-                        let _ = resync_tx.try_send(());
-                        expected_seq = Some(*seq + 1);
-                    }
-                    _ => expected_seq = Some(*seq + 1),
-                }
-            }
-            if let Some(mut event) = frame_to_event(frame) {
-                idmap.lock().await.translate_inbound(&mut event);
-                if events_tx.send(event).await.is_err() {
-                    break;
-                }
+        let mut conn = Some(conn);
+        loop {
+            let this_conn = match conn.take() {
+                Some(c) => c,
+                None => match reconnect(&socket_path, &shared).await {
+                    Some(c) => c,
+                    None => break,
+                },
+            };
+            let alive = run_connection(
+                this_conn,
+                &shared,
+                &mut cmd_rx,
+                &resync_cmd,
+                &events_tx,
+                &presence_tx,
+            )
+            .await;
+            if !alive {
+                break;
             }
         }
-        outbound.abort();
     });
 
     Attachment {
@@ -177,6 +165,159 @@ fn spawn_pumps(conn: ClientConn<Stream>, session: SessionId, client_id: u64) -> 
         presence: presence_rx,
         client_id,
         pump,
+    }
+}
+
+async fn reconnect(socket_path: &Path, shared: &Arc<Shared>) -> Option<ClientConn<Stream>> {
+    for _ in 0..100 {
+        let Ok(stream) = transport::connect(socket_path).await else {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        };
+        let mut conn: ClientConn<Stream> = ClientConn::new(stream);
+        if conn
+            .send(&ClientFrame::Hello {
+                version: PROTOCOL_VERSION,
+            })
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        match conn.recv().await {
+            Ok(ServerFrame::Welcome { version, .. }) if version == PROTOCOL_VERSION => {}
+            _ => continue,
+        }
+        let resume = match *shared.current_thread.lock().await {
+            Some(thread_id) => ResumeMode::Thread { thread_id },
+            None => ResumeMode::New {},
+        };
+        if conn
+            .send(&ClientFrame::OpenSession {
+                cwd: shared.cwd.clone(),
+                resume,
+            })
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        if let Ok(ServerFrame::SessionOpened { session }) = conn.recv().await {
+            *shared.current.lock().await = session;
+            shared.idmap.lock().await.reset();
+            return Some(conn);
+        }
+    }
+    None
+}
+
+async fn run_connection(
+    conn: ClientConn<Stream>,
+    shared: &Arc<Shared>,
+    cmd_rx: &mut mpsc::Receiver<Outbound>,
+    resync_cmd: &mpsc::Sender<Outbound>,
+    events_tx: &mpsc::Sender<Event>,
+    presence_tx: &mpsc::Sender<usize>,
+) -> bool {
+    use futures::{SinkExt, StreamExt};
+    let (sink, mut source) = conn.split();
+    let mut sink = Box::pin(sink);
+    let mut expected_seq: Option<u64> = None;
+
+    loop {
+        tokio::select! {
+            biased;
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else { return false };
+                let frame = match cmd {
+                    Outbound::Resync => {
+                        let session = *shared.current.lock().await;
+                        ClientFrame::Attach { session }
+                    }
+                    Outbound::ListThreads => ClientFrame::ListThreads {
+                        cwd: shared.cwd.clone(),
+                    },
+                    Outbound::Op(op) => {
+                        let session = *shared.current.lock().await;
+                        match op {
+                            Op::Shutdown {} => {
+                                let _ = sink.send(ClientFrame::Goodbye {}).await;
+                                return false;
+                            }
+                            Op::Interrupt { .. }
+                            | Op::Answer { .. }
+                            | Op::DequeueMessage { .. }
+                            | Op::ResolvePlan { .. } => {
+                                let mut op = op;
+                                shared.idmap.lock().await.translate_outbound(&mut op);
+                                ClientFrame::Control { session, op }
+                            }
+                            other => {
+                                let correlation = submit_correlation(&other);
+                                ClientFrame::Submit {
+                                    session,
+                                    correlation,
+                                    op: other,
+                                }
+                            }
+                        }
+                    }
+                };
+                if sink.send(frame).await.is_err() {
+                    return true;
+                }
+            }
+            item = source.next() => {
+                let Some(item) = item else { return true };
+                let Ok(frame) = item else { return true };
+                match &frame {
+                    ServerFrame::SessionOpened { session: new } => {
+                        *shared.current.lock().await = *new;
+                        *shared.current_thread.lock().await = None;
+                        continue;
+                    }
+                    ServerFrame::Detached { .. } => {
+                        shared.idmap.lock().await.reset();
+                        expected_seq = None;
+                        continue;
+                    }
+                    ServerFrame::CorrelationAssigned { correlation, task, .. } => {
+                        shared.idmap.lock().await.record_correlation(*correlation, *task);
+                        continue;
+                    }
+                    ServerFrame::Presence { clients, .. } => {
+                        let _ = presence_tx.try_send(clients.len());
+                        continue;
+                    }
+                    _ => {}
+                }
+                if let ServerFrame::Snapshot { watermark, .. } = &frame {
+                    expected_seq = Some(*watermark);
+                }
+                if let ServerFrame::Event { seq, .. } = &frame {
+                    match expected_seq {
+                        Some(exp) if *seq > exp => {
+                            let _ = resync_cmd.try_send(Outbound::Resync);
+                            expected_seq = Some(*seq + 1);
+                        }
+                        _ => expected_seq = Some(*seq + 1),
+                    }
+                }
+                if let ServerFrame::Event {
+                    event: Event::ThreadBound { thread_id },
+                    ..
+                } = &frame
+                {
+                    *shared.current_thread.lock().await = Some(*thread_id);
+                }
+                if let Some(mut event) = frame_to_event(frame) {
+                    shared.idmap.lock().await.translate_inbound(&mut event);
+                    if events_tx.send(event).await.is_err() {
+                        return false;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -204,6 +345,18 @@ fn frame_to_event(frame: ServerFrame) -> Option<Event> {
             compaction_threshold,
             mode,
         }),
+        ServerFrame::Threads { threads } => Some(Event::ThreadsListed {
+            threads: threads
+                .into_iter()
+                .map(|t| goat_protocol::ThreadSummary {
+                    id: t.thread_id,
+                    title: t.title.unwrap_or_default(),
+                    model: t.model,
+                    updated_at: t.updated_at,
+                    live: t.live.is_some(),
+                })
+                .collect(),
+        }),
         ServerFrame::Error { message } => Some(Event::Error { id: None, message }),
         _ => None,
     }
@@ -220,6 +373,27 @@ pub async fn status(socket_path: &Path) -> Result<Vec<goat_wire::SessionInfo>, C
     conn.send(&ClientFrame::ListSessions {}).await?;
     match conn.recv().await? {
         ServerFrame::Sessions { sessions } => Ok(sessions),
+        _ => Err(ClientError::Handshake),
+    }
+}
+
+pub async fn list_threads(
+    socket_path: &Path,
+    cwd: &Path,
+) -> Result<Vec<goat_wire::ThreadInfo>, ClientError> {
+    let stream = transport::connect(socket_path).await?;
+    let mut conn: ClientConn<Stream> = ClientConn::new(stream);
+    conn.send(&ClientFrame::Hello {
+        version: PROTOCOL_VERSION,
+    })
+    .await?;
+    expect_welcome(&mut conn).await?;
+    conn.send(&ClientFrame::ListThreads {
+        cwd: cwd.display().to_string(),
+    })
+    .await?;
+    match conn.recv().await? {
+        ServerFrame::Threads { threads } => Ok(threads),
         _ => Err(ClientError::Handshake),
     }
 }

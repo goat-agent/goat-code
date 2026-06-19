@@ -26,6 +26,8 @@ pub(crate) struct SessionInner {
     pub(crate) tokens: u64,
     pub(crate) open_asks: usize,
     pub(crate) thread_id: Option<i64>,
+    pub(crate) awaits_restore: bool,
+    pub(crate) ready: Arc<tokio::sync::Notify>,
     pub(crate) resurrected: std::collections::HashSet<u64>,
 }
 
@@ -39,18 +41,9 @@ pub(crate) struct RestoredSnapshot {
     pub(crate) mode: goat_protocol::Mode,
 }
 
+#[derive(Clone)]
 pub(crate) struct LiveSession {
-    pub(crate) cwd: String,
     pub(crate) inner: Arc<Mutex<SessionInner>>,
-}
-
-impl Clone for LiveSession {
-    fn clone(&self) -> Self {
-        Self {
-            cwd: self.cwd.clone(),
-            inner: self.inner.clone(),
-        }
-    }
 }
 
 pub(crate) struct PersistEvent {
@@ -110,6 +103,8 @@ impl SessionInner {
                 compaction_threshold: *compaction_threshold,
                 mode: *mode,
             });
+            self.awaits_restore = false;
+            self.ready.notify_waiters();
         }
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -233,6 +228,8 @@ mod tests {
             tokens: 0,
             open_asks: 0,
             thread_id: None,
+            awaits_restore: false,
+            ready: std::sync::Arc::new(tokio::sync::Notify::new()),
             resurrected: std::collections::HashSet::new(),
         }
     }

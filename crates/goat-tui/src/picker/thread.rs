@@ -117,10 +117,14 @@ impl ThreadPicker {
             for (idx, thread) in self.threads.iter().enumerate().skip(scroll).take(take) {
                 let selected = idx == self.cursor;
                 let title_style = if selected { theme.key() } else { theme.base() };
-                let left = vec![
-                    Span::styled(format!("{}. ", idx + 1), theme.muted()),
-                    Span::styled(thread.title.clone(), title_style),
-                ];
+                let mut left = vec![Span::styled(format!("{}. ", idx + 1), theme.muted())];
+                if thread.live {
+                    left.push(Span::styled(
+                        format!("{} ", symbols::ui::DOT_FULL),
+                        theme.key(),
+                    ));
+                }
+                left.push(Span::styled(thread.title.clone(), title_style));
                 let right = Some(Span::styled(thread.model.clone(), theme.muted()));
                 lines.push(selection_row(theme, selected, width, left, right));
             }

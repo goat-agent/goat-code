@@ -23,6 +23,7 @@ struct ManagerInner {
     auth_path: PathBuf,
     db_path: PathBuf,
     sessions: Mutex<SessionTable>,
+    threads: Mutex<HashMap<i64, SessionId>>,
     next_session: AtomicU64,
     next_client: AtomicU64,
     remote: Mutex<Option<RemoteControls>>,
@@ -42,6 +43,7 @@ impl Manager {
                 auth_path,
                 db_path,
                 sessions: Mutex::new(HashMap::new()),
+                threads: Mutex::new(HashMap::new()),
                 next_session: AtomicU64::new(1),
                 next_client: AtomicU64::new(1),
                 remote: Mutex::new(None),
@@ -126,13 +128,14 @@ impl Manager {
             .to_string()
     }
 
-    fn find_live_by_cwd_locked(table: &SessionTable, cwd: &str) -> Option<SessionId> {
-        for (id, live) in table {
-            if live.cwd == cwd {
-                return Some(*id);
-            }
-        }
-        None
+    async fn register_thread(&self, thread_id: i64, session: SessionId) {
+        let mut threads = self.inner.threads.lock().await;
+        thread_register(&mut threads, thread_id, session);
+    }
+
+    async fn unregister_thread_if_owner(&self, session: SessionId) {
+        let mut threads = self.inner.threads.lock().await;
+        thread_unregister_owner(&mut threads, session);
     }
 
     pub(crate) async fn open_or_attach(
@@ -141,20 +144,37 @@ impl Manager {
         resume: ResumeMode,
     ) -> Result<SessionId, String> {
         let normalized = Self::normalize_cwd(&cwd);
-        if matches!(resume, ResumeMode::Latest {}) {
-            let table = self.inner.sessions.lock().await;
-            if let Some(id) = Self::find_live_by_cwd_locked(&table, &normalized) {
-                return Ok(id);
+        let thread_id = self.resolve_thread_id(&normalized, resume).await;
+        if let Some(tid) = thread_id {
+            let threads = self.inner.threads.lock().await;
+            if let Some(existing) = threads.get(&tid).copied() {
+                return Ok(existing);
             }
         }
-        self.open_session(cwd, normalized, resume).await
+        self.open_session(cwd, normalized, thread_id).await
+    }
+
+    async fn resolve_thread_id(&self, normalized: &str, resume: ResumeMode) -> Option<i64> {
+        match resume {
+            ResumeMode::New {} => None,
+            ResumeMode::Thread { thread_id } => Some(thread_id),
+            ResumeMode::Latest {} => {
+                let store = Store::open(&self.inner.db_path).ok()?;
+                store
+                    .latest_thread_in(normalized.to_owned())
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|t| t.id)
+            }
+        }
     }
 
     async fn open_session(
         &self,
         cwd: PathBuf,
         normalized: String,
-        resume: ResumeMode,
+        thread_id: Option<i64>,
     ) -> Result<SessionId, String> {
         let credentials = CredentialStore::new(self.inner.auth_path.clone());
         let store = Store::open(&self.inner.db_path).map_err(|e| format!("store: {e}"))?;
@@ -165,9 +185,10 @@ impl Manager {
         let (ops, events, handle) = session.into_parts();
 
         let id = SessionId(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
+        let ready = Arc::new(tokio::sync::Notify::new());
         let inner = Arc::new(Mutex::new(SessionInner {
             id,
-            cwd: normalized.clone(),
+            cwd: normalized,
             created_at: Self::now_ms(),
             ops: ops.clone(),
             log: std::collections::VecDeque::new(),
@@ -178,22 +199,25 @@ impl Manager {
             snapshot: None,
             tokens: 0,
             open_asks: 0,
-            thread_id: None,
+            thread_id,
+            awaits_restore: thread_id.is_some(),
+            ready,
             resurrected: std::collections::HashSet::new(),
         }));
 
         let id = {
             let mut table = self.inner.sessions.lock().await;
-            if matches!(resume, ResumeMode::Latest {})
-                && let Some(existing) = Self::find_live_by_cwd_locked(&table, &normalized)
-            {
-                let _ = ops.send(Op::Shutdown {}).await;
-                return Ok(existing);
+            if let Some(tid) = thread_id {
+                let mut threads = self.inner.threads.lock().await;
+                if let Some(existing) = threads.get(&tid).copied() {
+                    let _ = ops.send(Op::Shutdown {}).await;
+                    return Ok(existing);
+                }
+                threads.insert(tid, id);
             }
             table.insert(
                 id,
                 LiveSession {
-                    cwd: normalized,
                     inner: inner.clone(),
                 },
             );
@@ -202,14 +226,8 @@ impl Manager {
 
         spawn_pump(self.clone(), id, inner, events, handle, store_for_pump);
 
-        match resume {
-            ResumeMode::New {} => {}
-            ResumeMode::Latest {} => {
-                let _ = ops.send(Op::ResumeLatest {}).await;
-            }
-            ResumeMode::Thread { thread_id } => {
-                let _ = ops.send(Op::Resume { thread_id }).await;
-            }
+        if let Some(thread_id) = thread_id {
+            let _ = ops.send(Op::Resume { thread_id }).await;
         }
         Ok(id)
     }
@@ -225,6 +243,28 @@ impl Manager {
             table.get(&session).cloned()
         };
         let live = live.ok_or("unknown session")?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let notified = {
+                let inner = live.inner.lock().await;
+                if inner.snapshot.is_some() || !inner.awaits_restore {
+                    break;
+                }
+                inner.ready.clone()
+            };
+            let wait = notified.notified();
+            tokio::pin!(wait);
+            wait.as_mut().enable();
+            {
+                let inner = live.inner.lock().await;
+                if inner.snapshot.is_some() || !inner.awaits_restore {
+                    break;
+                }
+            }
+            if tokio::time::timeout_at(deadline, wait).await.is_err() {
+                break;
+            }
+        }
         let mut inner = live.inner.lock().await;
         if let Some(snap) = inner.snapshot.clone() {
             let _ = sender
@@ -257,6 +297,26 @@ impl Manager {
         let clients = inner.presence();
         broadcast_presence(&mut inner, clients);
         Ok(())
+    }
+
+    pub(crate) async fn unsubscribe(&self, session: SessionId, client: ClientId) {
+        let live = {
+            let table = self.inner.sessions.lock().await;
+            table.get(&session).cloned()
+        };
+        let Some(live) = live else {
+            return;
+        };
+        let evictable = {
+            let mut inner = live.inner.lock().await;
+            crate::session::subscriber_map_remove(&mut inner.subscribers, client);
+            let clients = inner.presence();
+            broadcast_presence(&mut inner, clients);
+            inner.evictable()
+        };
+        if evictable {
+            self.evict_if_idle(session).await;
+        }
     }
 
     pub(crate) async fn drop_client(&self, client: ClientId) {
@@ -294,8 +354,33 @@ impl Manager {
             table.remove(&session);
             ops
         };
+        self.unregister_thread_if_owner(session).await;
         let _ = ops.send(Op::Shutdown {}).await;
         tracing::info!(session = session.0, "evicted idle session with no windows");
+    }
+
+    pub(crate) async fn rebind(
+        &self,
+        client: ClientId,
+        from: SessionId,
+        client_sender: &mpsc::Sender<ServerFrame>,
+        resume: ResumeMode,
+    ) -> Result<(), String> {
+        let cwd = {
+            let table = self.inner.sessions.lock().await;
+            let live = table.get(&from).ok_or("unknown session")?;
+            let inner = live.inner.lock().await;
+            inner.cwd.clone()
+        };
+        let new = self.open_or_attach(PathBuf::from(cwd), resume).await?;
+        self.unsubscribe(from, client).await;
+        let _ = client_sender
+            .send(ServerFrame::Detached { session: from })
+            .await;
+        let _ = client_sender
+            .send(ServerFrame::SessionOpened { session: new })
+            .await;
+        self.subscribe(new, client, client_sender.clone()).await
     }
 
     pub(crate) async fn submit(
@@ -377,6 +462,34 @@ impl Manager {
         Ok(children)
     }
 
+    pub(crate) async fn list_threads(&self, cwd: &str) -> Vec<goat_wire::ThreadInfo> {
+        let normalized = Self::normalize_cwd(std::path::Path::new(cwd));
+        let live: HashMap<i64, SessionId> = {
+            let threads = self.inner.threads.lock().await;
+            threads.clone()
+        };
+        let mut states: HashMap<SessionId, goat_wire::SessionLiveState> = HashMap::new();
+        {
+            let table = self.inner.sessions.lock().await;
+            for session in live.values() {
+                if let Some(found) = table.get(session) {
+                    let inner = found.inner.lock().await;
+                    states.insert(*session, inner.state);
+                }
+            }
+        }
+        let Ok(store) = Store::open(&self.inner.db_path) else {
+            return Vec::new();
+        };
+        let Ok(threads) = store.list_threads_in(normalized, 100).await else {
+            return Vec::new();
+        };
+        threads
+            .into_iter()
+            .map(|t| thread_info(t, &live, &states))
+            .collect()
+    }
+
     pub(crate) async fn list_sessions(&self) -> Vec<SessionInfo> {
         let lives: Vec<LiveSession> = {
             let table = self.inner.sessions.lock().await;
@@ -404,6 +517,7 @@ impl Manager {
             table.remove(&session)
         };
         let live = live.ok_or("unknown session")?;
+        self.unregister_thread_if_owner(session).await;
         let ops = {
             let inner = live.inner.lock().await;
             inner.ops.clone()
@@ -413,8 +527,11 @@ impl Manager {
     }
 
     async fn remove_session(&self, session: SessionId) {
-        let mut table = self.inner.sessions.lock().await;
-        table.remove(&session);
+        {
+            let mut table = self.inner.sessions.lock().await;
+            table.remove(&session);
+        }
+        self.unregister_thread_if_owner(session).await;
     }
 }
 
@@ -489,6 +606,7 @@ fn spawn_pump(
                     None => {}
                 }
                 if bound {
+                    manager.register_thread(persist.thread_id, session).await;
                     resurrect_open_prompts(&inner, &store, persist.thread_id).await;
                 }
             }
@@ -552,5 +670,100 @@ async fn resurrect_open_prompts(inner: &Arc<Mutex<SessionInner>>, store: &Store,
         let mut guard = inner.lock().await;
         guard.resurrected.insert(call);
         let _ = guard.record_and_fanout(event);
+    }
+}
+
+fn thread_info(
+    t: goat_store::Thread,
+    live: &HashMap<i64, SessionId>,
+    states: &HashMap<SessionId, goat_wire::SessionLiveState>,
+) -> goat_wire::ThreadInfo {
+    let live_session = live.get(&t.id).copied();
+    let state = live_session.and_then(|s| states.get(&s).copied());
+    goat_wire::ThreadInfo {
+        thread_id: t.id,
+        cwd: t.cwd,
+        title: t.title,
+        model: t.model,
+        updated_at: t.updated_at,
+        live: live_session,
+        state,
+    }
+}
+
+fn thread_register(threads: &mut HashMap<i64, SessionId>, thread_id: i64, session: SessionId) {
+    threads.entry(thread_id).or_insert(session);
+}
+
+fn thread_unregister_owner(threads: &mut HashMap<i64, SessionId>, session: SessionId) {
+    threads.retain(|_, owner| *owner != session);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HashMap, SessionId, thread_register, thread_unregister_owner};
+
+    #[test]
+    fn register_is_first_writer_wins() {
+        let mut threads: HashMap<i64, SessionId> = HashMap::new();
+        thread_register(&mut threads, 42, SessionId(1));
+        thread_register(&mut threads, 42, SessionId(2));
+        assert_eq!(threads.get(&42), Some(&SessionId(1)));
+    }
+
+    #[test]
+    fn unregister_only_removes_owned_entries() {
+        let mut threads: HashMap<i64, SessionId> = HashMap::new();
+        threads.insert(7, SessionId(1));
+        threads.insert(8, SessionId(2));
+        thread_unregister_owner(&mut threads, SessionId(1));
+        assert_eq!(threads.get(&7), None);
+        assert_eq!(threads.get(&8), Some(&SessionId(2)));
+    }
+
+    #[test]
+    fn unregister_keeps_entry_reassigned_to_other_session() {
+        let mut threads: HashMap<i64, SessionId> = HashMap::new();
+        threads.insert(7, SessionId(2));
+        thread_unregister_owner(&mut threads, SessionId(1));
+        assert_eq!(threads.get(&7), Some(&SessionId(2)));
+    }
+
+    fn sample_thread(id: i64) -> goat_store::Thread {
+        goat_store::Thread {
+            id,
+            cwd: "/tmp".to_owned(),
+            title: Some("t".to_owned()),
+            provider: "p".to_owned(),
+            model: "m".to_owned(),
+            account: "a".to_owned(),
+            effort: None,
+            mode: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn thread_info_marks_live_threads() {
+        let mut live: HashMap<i64, SessionId> = HashMap::new();
+        live.insert(5, SessionId(9));
+        let mut states: HashMap<SessionId, goat_wire::SessionLiveState> = HashMap::new();
+        states.insert(SessionId(9), goat_wire::SessionLiveState::Active {});
+
+        let info = super::thread_info(sample_thread(5), &live, &states);
+        assert_eq!(info.live, Some(SessionId(9)));
+        assert_eq!(info.state, Some(goat_wire::SessionLiveState::Active {}));
+    }
+
+    #[test]
+    fn thread_info_marks_dead_threads_with_no_live_session() {
+        let live: HashMap<i64, SessionId> = HashMap::new();
+        let states: HashMap<SessionId, goat_wire::SessionLiveState> = HashMap::new();
+
+        let info = super::thread_info(sample_thread(5), &live, &states);
+        assert_eq!(info.live, None);
+        assert_eq!(info.state, None);
+        assert_eq!(info.thread_id, 5);
     }
 }

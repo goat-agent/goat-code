@@ -17,6 +17,12 @@ impl IdMap {
         }
     }
 
+    pub(crate) fn reset(&mut self) {
+        self.local_to_daemon.clear();
+        self.daemon_to_local.clear();
+        self.next_local = 1;
+    }
+
     fn bind(&mut self, local: u64, daemon: u64) {
         self.local_to_daemon.insert(local, daemon);
         self.daemon_to_local.insert(daemon, local);

@@ -31,7 +31,13 @@ pub mod id_serde {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+fn id_json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    String::json_schema(generator)
+}
+
+use schemars::JsonSchema;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -39,14 +45,14 @@ pub struct Usage {
     pub cache_write_tokens: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RateWindow {
     pub label: String,
     pub used_percent: f32,
     pub resets_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RateLimitSnapshot {
     pub windows: Vec<RateWindow>,
     #[serde(default)]
@@ -74,6 +80,18 @@ impl fmt::Display for TaskId {
     }
 }
 
+impl JsonSchema for TaskId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "TaskId".into()
+    }
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::TaskId").into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        id_json_schema(generator)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ToolCallId(pub u64);
 
@@ -95,7 +113,19 @@ impl fmt::Display for ToolCallId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl JsonSchema for ToolCallId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ToolCallId".into()
+    }
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::ToolCallId").into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        id_json_schema(generator)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolDisplay {
     pub primary: String,
     pub detail: Option<String>,
@@ -117,20 +147,20 @@ impl ToolDisplay {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolCall {
     pub id: ToolCallId,
     pub name: String,
     pub display: ToolDisplay,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolImageData {
     pub media_type: String,
     pub data: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolOutcome {
     pub ok: bool,
     pub summary: Option<String>,
@@ -138,7 +168,7 @@ pub struct ToolOutcome {
     pub image: Option<ToolImageData>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
     Off,
@@ -182,7 +212,9 @@ impl fmt::Display for Effort {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     #[default]
@@ -197,14 +229,14 @@ impl Mode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum PlanDecision {
     Approve {},
     Reject { feedback: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelTarget {
     pub provider: String,
     pub model: String,
@@ -213,14 +245,14 @@ pub struct ModelTarget {
     pub effort: Option<Effort>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AccountChoice {
     pub id: String,
     pub display: String,
     pub target: ModelTarget,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelEntry {
     pub provider: String,
     pub model: String,
@@ -230,15 +262,17 @@ pub struct ModelEntry {
     pub efforts: Vec<Effort>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ThreadSummary {
     pub id: i64,
     pub title: String,
     pub model: String,
     pub updated_at: i64,
+    #[serde(default)]
+    pub live: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum TranscriptEntry {
     User {
@@ -261,7 +295,7 @@ pub enum TranscriptEntry {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMethod {
     None,
@@ -270,19 +304,19 @@ pub enum AuthMethod {
     ApiKeyOrOAuth,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LoginProvider {
     pub id: String,
     pub method: AuthMethod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AccountInfo {
     pub name: String,
     pub method: AuthMethod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AccountEntry {
     pub provider: String,
     pub display_name: String,
@@ -291,14 +325,14 @@ pub struct AccountEntry {
     pub login: AuthMethod,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum LoginCredential {
     ApiKey { key: String },
     OAuth {},
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
@@ -306,14 +340,14 @@ pub struct SkillInfo {
     pub command: Option<SkillCommandShape>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SkillCommandShape {
     Arguments { items: Vec<SkillParameterInfo> },
     Subcommands { items: Vec<SkillBranchInfo> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SkillBranchInfo {
     pub name: String,
     pub description: String,
@@ -321,7 +355,7 @@ pub struct SkillBranchInfo {
     pub arguments: Vec<SkillParameterInfo>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SkillParameterInfo {
     pub name: String,
     pub description: String,
@@ -330,7 +364,7 @@ pub struct SkillParameterInfo {
     pub value: SkillParameterValue,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SkillParameterValue {
     Word {},
@@ -339,7 +373,7 @@ pub enum SkillParameterValue {
     TextTail {},
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SkillChoiceInfo {
     pub value: String,
     #[serde(default)]
