@@ -1,5 +1,6 @@
 mod auth;
 mod cli;
+mod headless;
 mod logging;
 mod update;
 
@@ -51,7 +52,13 @@ async fn main() -> color_eyre::Result<()> {
             reject_continue(cli.r#continue)?;
             run_remote_command(command).await
         }
-        None => run_tui(cli.worktree, cli.r#continue).await,
+        None => {
+            if cli.headless || cli.print {
+                run_headless(cli.worktree, cli.r#continue, &cli.protocol, cli.print).await
+            } else {
+                run_tui(cli.worktree, cli.r#continue).await
+            }
+        }
     }
 }
 
@@ -69,20 +76,14 @@ fn reject_continue(r#continue: bool) -> color_eyre::Result<()> {
     Ok(())
 }
 
-async fn run_tui(worktree_label: Option<String>, r#continue: bool) -> color_eyre::Result<()> {
+async fn connect_session(
+    worktree_label: Option<String>,
+    r#continue: bool,
+) -> color_eyre::Result<goat_client::Attachment> {
     let cwd = if let Some(label) = worktree_label.as_deref() {
         goat_worktree::enter(label)?
     } else {
         std::env::current_dir()?
-    };
-
-    goat_tui::install_hooks()?;
-    let _guard = logging::init();
-
-    let config = goat_config::Config::load();
-    let theme = match config.theme {
-        goat_config::ThemeChoice::Dark => goat_tui::Theme::dark(),
-        goat_config::ThemeChoice::Light => goat_tui::Theme::light(),
     };
 
     let socket_path = goat_config::socket_path()
@@ -94,7 +95,22 @@ async fn run_tui(worktree_label: Option<String>, r#continue: bool) -> color_eyre
         goat_wire::ResumeMode::New {}
     };
 
-    let attachment = goat_client::connect(&socket_path, &daemon_exe, cwd, resume).await?;
+    goat_client::connect(&socket_path, &daemon_exe, cwd, resume)
+        .await
+        .map_err(color_eyre::Report::from)
+}
+
+async fn run_tui(worktree_label: Option<String>, r#continue: bool) -> color_eyre::Result<()> {
+    goat_tui::install_hooks()?;
+    let _guard = logging::init();
+
+    let config = goat_config::Config::load();
+    let theme = match config.theme {
+        goat_config::ThemeChoice::Dark => goat_tui::Theme::dark(),
+        goat_config::ThemeChoice::Light => goat_tui::Theme::light(),
+    };
+
+    let attachment = connect_session(worktree_label, r#continue).await?;
     let goat_client::Attachment {
         ops,
         events,
@@ -106,6 +122,31 @@ async fn run_tui(worktree_label: Option<String>, r#continue: bool) -> color_eyre
     goat_tui::run(ops, events, presence, theme, Vec::new()).await?;
     pump.abort();
     Ok(())
+}
+
+async fn run_headless(
+    worktree_label: Option<String>,
+    r#continue: bool,
+    protocol: &str,
+    one_shot: bool,
+) -> color_eyre::Result<()> {
+    let _guard = logging::init();
+
+    let codec = headless::codec_for(protocol)?;
+    let attachment = connect_session(worktree_label, r#continue).await?;
+    let goat_client::Attachment {
+        ops, events, pump, ..
+    } = attachment;
+
+    let exit = headless::run(ops, events, codec, one_shot).await;
+    pump.abort();
+    match exit {
+        headless::Exit::Ok => std::process::exit(0),
+        headless::Exit::Disconnected => {
+            eprintln!("headless: daemon connection closed");
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn run_daemon_command(command: DaemonCommand) -> color_eyre::Result<()> {
