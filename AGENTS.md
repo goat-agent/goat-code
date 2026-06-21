@@ -25,7 +25,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-config` — config, `ThemeChoice`, `~/.goat-code` paths, log directory; no TUI deps; leaf.
 - `goat-core` — `Session` and the `Engine` trait; depends on `goat-protocol` only.
 - `goat-tui` — full-screen ratatui app (The Elm Architecture); depends on `goat-protocol`, `goat-commands`, and `goat-config`, not `goat-core` or any engine crate.
-- `goat-code` — the `goat` binary; wires the CLI, logging, and `goat daemon` subcommands; runs as a thin client that connects to (or auto-spawns) the daemon.
+- `goat-code` — the `goat` binary; wires the CLI, logging, and `goat daemon` subcommands; runs as a thin client that connects to (or auto-spawns) the daemon. Besides the TUI it ships a headless front-end (`goat --headless`, or `-p/--print` for a single turn): the same daemon `Op`/`Event` channels driven over stdin/stdout as JSON Lines instead of a screen, with a pluggable codec (`--protocol`, default `json`) so an ACP adapter can slot in later. Ask/Plan prompts flow out as events and the caller answers with `Op`s; the bridge fills task/call ids, mirrors the seq pump, and on stdin EOF or SIGINT interrupts an in-flight turn and waits for `TaskDone` before exiting.
 - `goat-wire` — daemon/client wire contract; leaf (depends on `goat-protocol` only). The `ClientFrame`/`ServerFrame` envelope ({`SessionId`/`ClientId`/`seq` + payload `Op`/`Event`}), length-delimited JSON codec (`WireConn`), and protocol-version handshake. `Op`/`Event` bodies are wrapped, never modified.
 - `goat-daemon` — the resident `goatd` (`goat daemon serve`); machine-wide single daemon holding N live sessions keyed by cwd. Owns the session registry, a single seq-stamping event-log pump per session (stamp→log→fan-out), per-window bounded delivery with disconnect-on-overflow, presence broadcast, idle eviction (kept alive while a turn runs or a window is attached or an Ask/Plan is open), orphaned-turn sweep on startup, and the unix-socket listener (`~/.goat-code/daemon.sock`, 0600). Allocates per-session `TaskId`s and echoes a correlation token.
 - `goat-client` — thin transport the TUI talks to; auto-spawns the daemon if absent, performs the handshake, opens/reattaches a session, and exposes the same `Op`/`Event` channels the TUI already consumes. Owns the bidirectional `IdMap` (client-local ↔ daemon `TaskId`) and seq-gap resync.
@@ -113,7 +113,9 @@ The project is not published to crates.io and internal crates are `publish = fal
 
 The full-screen TUI needs a real tty, so it is not driven headlessly. Test the pure
 `App::update` reducer and the engine's `Op → Event` behavior instead. The binary's non-TUI
-paths (`--version`, `--help`, `update`, `--print-log-path`) are safe to run anywhere.
+paths (`--version`, `--help`, `update`, `--print-log-path`) are safe to run anywhere. The
+headless bridge (`goat --headless`) needs no tty either: its codec round-trips and shutdown
+handshake are unit-tested, and an end-to-end smoke can pipe JSON Lines through a spawned daemon.
 
 When a crate grows conventions of its own, add a nested `crates/<name>/AGENTS.md`; the
 closest file wins.
