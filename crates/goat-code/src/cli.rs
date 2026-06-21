@@ -12,6 +12,15 @@ pub struct Cli {
     #[arg(long, short = 'c')]
     pub r#continue: bool,
 
+    #[arg(long)]
+    pub headless: bool,
+
+    #[arg(long, short = 'p')]
+    pub print: bool,
+
+    #[arg(long, value_name = "NAME", default_value = "json")]
+    pub protocol: String,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -154,5 +163,32 @@ mod tests {
     fn parses_update_force() {
         let cli = Cli::try_parse_from(["goat", "update", "--force"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Update { force: true })));
+    }
+
+    #[test]
+    fn headless_defaults_off() {
+        let cli = Cli::try_parse_from(["goat"]).unwrap();
+        assert!(!cli.headless);
+        assert!(!cli.print);
+        assert_eq!(cli.protocol, "json");
+    }
+
+    #[test]
+    fn parses_headless_flag() {
+        let cli = Cli::try_parse_from(["goat", "--headless"]).unwrap();
+        assert!(cli.headless);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parses_print_flag() {
+        let cli = Cli::try_parse_from(["goat", "-p"]).unwrap();
+        assert!(cli.print);
+    }
+
+    #[test]
+    fn parses_protocol_flag() {
+        let cli = Cli::try_parse_from(["goat", "--headless", "--protocol", "json"]).unwrap();
+        assert_eq!(cli.protocol, "json");
     }
 }
