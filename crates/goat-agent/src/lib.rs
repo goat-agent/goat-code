@@ -127,6 +127,7 @@ pub(crate) struct Ctx<'a> {
     pub(crate) rl_cache: &'a std::sync::Mutex<rate_limit_cache::RateLimitCache>,
     pub(crate) rl_path: Option<&'a std::path::Path>,
     pub(crate) cwd: &'a std::path::Path,
+    pub(crate) date: &'a str,
 }
 
 pub(crate) enum Flow {
@@ -247,6 +248,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     let skills = prompt::load_skill_infos(&cwd);
     let agents = AgentRegistry::load(&cwd);
     let project_instructions = instructions::load_project_instructions(&cwd);
+    let session_date = prompt::current_utc_date();
     let semaphore = Arc::new(Semaphore::new(delegate::MAX_CONCURRENT_AGENTS));
     let child_ids = AtomicU64::new(CHILD_ID_BASE);
     let engine_ids = AtomicU64::new(ENGINE_TURN_ID_BASE);
@@ -304,6 +306,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 rl_cache: &rl_cache,
                 rl_path: rl_path.as_deref(),
                 cwd: &cwd,
+                date: &session_date,
             }
         };
     }
@@ -424,6 +427,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     &skills,
                     &tools,
                     project_instructions.as_deref(),
+                    &session_date,
                     tid,
                     &mut state,
                     &events,
@@ -436,6 +440,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     &skills,
                     &tools,
                     project_instructions.as_deref(),
+                    &session_date,
                     &cwd,
                     &mut state,
                     &events,

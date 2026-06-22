@@ -106,11 +106,13 @@ pub(crate) async fn handle_rename(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_resume(
     store: &Store,
     skills: &[SkillInfo],
     tools: &ToolRegistry,
     instructions: Option<&str>,
+    date: &str,
     tid: i64,
     state: &mut crate::SessionState,
     events: &mpsc::Sender<Event>,
@@ -270,7 +272,12 @@ pub(crate) async fn handle_resume(
     let mut new_history: Vec<(Message, Option<i64>)> = vec![(
         Message::text(
             MessageRole::System,
-            build_system_prompt(std::path::Path::new(&thread.cwd), skills, instructions),
+            build_system_prompt(
+                std::path::Path::new(&thread.cwd),
+                skills,
+                instructions,
+                date,
+            ),
         ),
         None,
     )];
@@ -316,11 +323,13 @@ pub(crate) async fn handle_resume(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_resume_latest(
     store: &Store,
     skills: &[SkillInfo],
     tools: &ToolRegistry,
     instructions: Option<&str>,
+    date: &str,
     cwd: &std::path::Path,
     state: &mut crate::SessionState,
     events: &mpsc::Sender<Event>,
@@ -328,7 +337,17 @@ pub(crate) async fn handle_resume_latest(
     let cwd_key = cwd.display().to_string();
     match store.latest_thread_in(cwd_key).await {
         Ok(Some(thread)) => {
-            handle_resume(store, skills, tools, instructions, thread.id, state, events).await;
+            handle_resume(
+                store,
+                skills,
+                tools,
+                instructions,
+                date,
+                thread.id,
+                state,
+                events,
+            )
+            .await;
         }
         Ok(None) => {
             let _ = events

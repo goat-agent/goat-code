@@ -336,7 +336,7 @@ pub(crate) async fn handle_shell(
         state.conversation.push(
             Message::text(
                 MessageRole::System,
-                build_system_prompt(ctx.cwd, ctx.skills, ctx.instructions),
+                build_system_prompt(ctx.cwd, ctx.skills, ctx.instructions, ctx.date),
             ),
             None,
         );
@@ -593,7 +593,7 @@ async fn run_one_turn(
         }
     }
     let system = {
-        let mut text = build_system_prompt(ctx.cwd, ctx.skills, ctx.instructions);
+        let mut text = build_system_prompt(ctx.cwd, ctx.skills, ctx.instructions, ctx.date);
         if state.mode.is_plan()
             && let Some(path) = state.plan_path.as_ref()
         {
