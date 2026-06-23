@@ -1,6 +1,10 @@
 mod ssrf;
 
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    net::IpAddr,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use futures::StreamExt;
 use goat_protocol::ToolDisplay;
@@ -145,8 +149,18 @@ impl std::fmt::Display for RedirectBlocked {
 
 impl std::error::Error for RedirectBlocked {}
 
+fn shared_client() -> Result<&'static reqwest::Client, ToolError> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| build_client().map_err(|err| err.to_string()))
+        .as_ref()
+        .map_err(|message| ToolError::Execution {
+            message: message.clone(),
+        })
+}
+
 async fn fetch(url: &str) -> Result<ToolOutput, ToolError> {
-    let client = build_client()?;
+    let client = shared_client()?;
     let response = client
         .get(url)
         .send()
@@ -203,7 +217,7 @@ async fn fetch(url: &str) -> Result<ToolOutput, ToolError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{github_blob_to_raw, normalize_url, reject_blocked_literal};
+    use super::{github_blob_to_raw, normalize_url, reject_blocked_literal, shared_client};
 
     #[test]
     fn upgrades_http_to_https() {
@@ -239,6 +253,11 @@ mod tests {
     #[test]
     fn allows_public_literal() {
         assert!(reject_blocked_literal("https://8.8.8.8/").is_ok());
+    }
+
+    #[test]
+    fn shared_client_uses_guarded_builder() {
+        assert!(shared_client().is_ok());
     }
 
     #[tokio::test]

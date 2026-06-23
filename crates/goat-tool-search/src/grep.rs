@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::io::BufRead as _;
 
 use goat_tool::{
     Tool, ToolContext, ToolError, ToolFuture, ToolOutput,
@@ -140,32 +141,27 @@ fn search(
         {
             continue;
         }
-        let Ok(contents) = std::fs::read(entry.path()) else {
-            continue;
-        };
-        let Ok(text) = std::str::from_utf8(&contents) else {
-            continue;
-        };
         let display = relative_display(cwd, entry.path());
-        for (lineno, line) in text.lines().enumerate() {
-            if regex.is_match(line) {
-                if count >= max_results {
-                    truncated = true;
-                    break 'walk;
-                }
-                let line_display = if line.len() > 1024 {
-                    let b = line.floor_char_boundary(1024);
-                    format!("{}\u{2026}", &line[..b])
-                } else {
-                    line.to_owned()
-                };
-                let _ = writeln!(out, "{display}:{}: {line_display}", lineno + 1);
-                count += 1;
-                if out.len() >= max_output_bytes {
-                    truncated = true;
-                    break 'walk;
-                }
+        let Ok(file_hits) = matching_lines(entry.path(), &display, &regex, max_results - count)
+        else {
+            continue;
+        };
+        let overflowed = file_hits.overflowed;
+        for line in file_hits.lines {
+            if count >= max_results {
+                truncated = true;
+                break 'walk;
             }
+            out.push_str(&line);
+            count += 1;
+            if out.len() >= max_output_bytes {
+                truncated = true;
+                break 'walk;
+            }
+        }
+        if overflowed {
+            truncated = true;
+            break 'walk;
         }
     }
 
@@ -176,6 +172,55 @@ fn search(
         out.push_str("\n[output truncated]");
     }
     Ok(out)
+}
+
+struct FileHits {
+    lines: Vec<String>,
+    overflowed: bool,
+}
+
+fn matching_lines(
+    path: &std::path::Path,
+    display: &str,
+    regex: &regex::Regex,
+    max_matches: usize,
+) -> std::io::Result<FileHits> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut lines = Vec::new();
+    let mut overflowed = false;
+    let mut line = String::new();
+    let mut lineno = 0usize;
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        lineno += 1;
+        let normalized = normalize_line(&line);
+        if regex.is_match(normalized) {
+            if lines.len() >= max_matches {
+                overflowed = true;
+                continue;
+            }
+            let line_display = if normalized.len() > 1024 {
+                let b = normalized.floor_char_boundary(1024);
+                format!("{}\u{2026}", &normalized[..b])
+            } else {
+                normalized.to_owned()
+            };
+            let mut rendered = String::new();
+            let _ = writeln!(rendered, "{display}:{lineno}: {line_display}");
+            lines.push(rendered);
+        }
+    }
+    Ok(FileHits { lines, overflowed })
+}
+
+fn normalize_line(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
 }
 
 #[cfg(test)]
@@ -248,5 +293,64 @@ mod tests {
             result,
             Err(goat_tool::ToolError::PathBlocked { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn reports_truncation_when_same_file_has_more_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.txt"),
+            "needle 1
+needle 2
+",
+        )
+        .unwrap();
+        let ctx = ctx(dir.path());
+        let out = GrepTool
+            .run(r#"{"pattern":"needle","max_results":1}"#, &ctx)
+            .await
+            .unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.contains("a.txt:1: needle 1"));
+        assert!(text.contains("[output truncated]"));
+    }
+
+    #[tokio::test]
+    async fn skips_non_utf8_file_without_consuming_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bad.txt"), b"needle\n\xFF\n").unwrap();
+        std::fs::write(dir.path().join("good.txt"), "needle\n").unwrap();
+        let ctx = ctx(dir.path());
+        let out = GrepTool
+            .run(r#"{"pattern":"needle","max_results":1}"#, &ctx)
+            .await
+            .unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.contains("good.txt:1: needle"));
+        assert!(!text.contains("bad.txt"));
+    }
+
+    #[tokio::test]
+    async fn truncates_long_utf8_line_on_char_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = format!("needle {}", "é".repeat(600));
+        std::fs::write(dir.path().join("a.txt"), format!("{line}\n")).unwrap();
+        let ctx = ctx(dir.path());
+        let out = GrepTool.run(r#"{"pattern":"needle"}"#, &ctx).await.unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.contains('\u{2026}'));
+        assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn crlf_matches_without_carriage_return() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "needle\r\n").unwrap();
+        let ctx = ctx(dir.path());
+        let out = GrepTool
+            .run(r#"{"pattern":"needle$"}"#, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.as_text().unwrap(), "a.txt:1: needle\n");
     }
 }
