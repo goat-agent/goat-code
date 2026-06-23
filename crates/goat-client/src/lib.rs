@@ -90,7 +90,6 @@ pub async fn connect(
 
 enum Outbound {
     Op(Op),
-    Resync,
     ListThreads,
 }
 
@@ -133,7 +132,6 @@ fn spawn_pumps(
         }
     });
 
-    let resync_cmd = cmd_tx.clone();
     let pump = tokio::spawn(async move {
         let mut conn = Some(conn);
         loop {
@@ -144,15 +142,8 @@ fn spawn_pumps(
                     None => break,
                 },
             };
-            let alive = run_connection(
-                this_conn,
-                &shared,
-                &mut cmd_rx,
-                &resync_cmd,
-                &events_tx,
-                &presence_tx,
-            )
-            .await;
+            let alive =
+                run_connection(this_conn, &shared, &mut cmd_rx, &events_tx, &presence_tx).await;
             if !alive {
                 break;
             }
@@ -215,7 +206,6 @@ async fn run_connection(
     conn: ClientConn<Stream>,
     shared: &Arc<Shared>,
     cmd_rx: &mut mpsc::Receiver<Outbound>,
-    resync_cmd: &mpsc::Sender<Outbound>,
     events_tx: &mpsc::Sender<Event>,
     presence_tx: &mpsc::Sender<usize>,
 ) -> bool {
@@ -223,6 +213,7 @@ async fn run_connection(
     let (sink, mut source) = conn.split();
     let mut sink = Box::pin(sink);
     let mut expected_seq: Option<u64> = None;
+    let mut replaying = false;
 
     loop {
         tokio::select! {
@@ -230,10 +221,6 @@ async fn run_connection(
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { return false };
                 let frame = match cmd {
-                    Outbound::Resync => {
-                        let session = *shared.current.lock().await;
-                        ClientFrame::Attach { session }
-                    }
                     Outbound::ListThreads => ClientFrame::ListThreads {
                         cwd: shared.cwd.clone(),
                     },
@@ -291,17 +278,16 @@ async fn run_connection(
                     }
                     _ => {}
                 }
-                if let ServerFrame::Snapshot { watermark, .. } = &frame {
-                    expected_seq = Some(*watermark);
-                }
-                if let ServerFrame::Event { seq, .. } = &frame {
-                    match expected_seq {
-                        Some(exp) if *seq > exp => {
-                            let _ = resync_cmd.try_send(Outbound::Resync);
-                            expected_seq = Some(*seq + 1);
+                match sequenced_delivery(&mut expected_seq, &mut replaying, &frame) {
+                    Delivery::RequestResync => {
+                        let session = *shared.current.lock().await;
+                        if sink.send(ClientFrame::Attach { session }).await.is_err() {
+                            return true;
                         }
-                        _ => expected_seq = Some(*seq + 1),
+                        continue;
                     }
+                    Delivery::Skip => continue,
+                    Delivery::Forward => {}
                 }
                 if let ServerFrame::Event {
                     event: Event::ThreadBound { thread_id },
@@ -318,6 +304,48 @@ async fn run_connection(
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Delivery {
+    Forward,
+    Skip,
+    RequestResync,
+}
+
+fn sequenced_delivery(
+    expected_seq: &mut Option<u64>,
+    replaying: &mut bool,
+    frame: &ServerFrame,
+) -> Delivery {
+    match frame {
+        ServerFrame::Snapshot { watermark, .. } => {
+            *expected_seq = Some(*watermark);
+            *replaying = false;
+            Delivery::Forward
+        }
+        ServerFrame::Event { seq, .. } if *replaying => match *expected_seq {
+            Some(exp) if *seq < exp => Delivery::Skip,
+            Some(exp) if *seq == exp => {
+                *expected_seq = Some(*seq + 1);
+                *replaying = false;
+                Delivery::Forward
+            }
+            Some(_) | None => Delivery::Skip,
+        },
+        ServerFrame::Event { seq, .. } => match *expected_seq {
+            Some(exp) if *seq < exp => Delivery::Skip,
+            Some(exp) if *seq > exp => {
+                *replaying = true;
+                Delivery::RequestResync
+            }
+            _ => {
+                *expected_seq = Some(*seq + 1);
+                Delivery::Forward
+            }
+        },
+        _ => Delivery::Forward,
     }
 }
 
@@ -529,4 +557,107 @@ fn spawn_daemon(daemon_exe: &Path) -> Result<(), ClientError> {
         .spawn()
         .map_err(|e| ClientError::SpawnFailed(e.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Delivery, sequenced_delivery};
+    use goat_protocol::{Event, TaskId};
+    use goat_wire::{ServerFrame, SessionId};
+
+    fn text(seq: u64) -> ServerFrame {
+        ServerFrame::Event {
+            session: SessionId(1),
+            seq,
+            event: Event::TextDelta {
+                id: TaskId(1),
+                chunk: "x".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn gap_requests_resync_and_suppresses_until_snapshot() {
+        let mut expected = Some(2);
+        let mut replaying = false;
+        assert_eq!(
+            sequenced_delivery(&mut expected, &mut replaying, &text(4)),
+            Delivery::RequestResync
+        );
+        assert!(replaying);
+        assert_eq!(
+            sequenced_delivery(&mut expected, &mut replaying, &text(5)),
+            Delivery::Skip
+        );
+        assert_eq!(expected, Some(2));
+        assert_eq!(
+            sequenced_delivery(&mut expected, &mut replaying, &text(2)),
+            Delivery::Forward
+        );
+        assert_eq!(expected, Some(3));
+        assert!(!replaying);
+    }
+
+    #[test]
+    fn snapshot_resets_replay_state() {
+        let mut expected = Some(2);
+        let mut replaying = true;
+        let snapshot = ServerFrame::Snapshot {
+            session: SessionId(1),
+            watermark: 4,
+            target: None,
+            transcript: Vec::new(),
+            context_tokens: None,
+            compaction_threshold: None,
+            mode: goat_protocol::Mode::default(),
+        };
+        assert_eq!(
+            sequenced_delivery(&mut expected, &mut replaying, &snapshot),
+            Delivery::Forward
+        );
+        assert_eq!(expected, Some(4));
+        assert!(!replaying);
+        assert_eq!(
+            sequenced_delivery(&mut expected, &mut replaying, &text(4)),
+            Delivery::Forward
+        );
+        assert_eq!(expected, Some(5));
+    }
+
+    #[test]
+    fn duplicate_event_is_skipped() {
+        let mut expected = Some(4);
+        let mut replaying = false;
+        assert_eq!(
+            sequenced_delivery(&mut expected, &mut replaying, &text(3)),
+            Delivery::Skip
+        );
+        assert_eq!(expected, Some(4));
+    }
+
+    #[test]
+    fn control_frames_forward_while_replaying() {
+        let mut expected = Some(4);
+        let mut replaying = true;
+        assert_eq!(
+            sequenced_delivery(
+                &mut expected,
+                &mut replaying,
+                &ServerFrame::Error {
+                    message: "err".to_owned(),
+                },
+            ),
+            Delivery::Forward
+        );
+        assert_eq!(
+            sequenced_delivery(
+                &mut expected,
+                &mut replaying,
+                &ServerFrame::Threads {
+                    threads: Vec::new()
+                },
+            ),
+            Delivery::Forward
+        );
+    }
 }

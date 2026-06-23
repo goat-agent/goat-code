@@ -10,7 +10,9 @@ use goat_protocol::Op;
 use goat_store::Store;
 use goat_wire::{ClientId, ResumeMode, ServerFrame, SessionId, SessionInfo};
 use tokio::sync::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+const SUBSCRIBER_QUEUE: usize = 1024;
 
 use crate::session::{LiveSession, SessionInner, SessionTable};
 
@@ -265,10 +267,11 @@ impl Manager {
                 break;
             }
         }
-        let mut inner = live.inner.lock().await;
-        if let Some(snap) = inner.snapshot.clone() {
-            let _ = sender
-                .send(ServerFrame::Snapshot {
+        let (backlog, live_rx) = {
+            let mut inner = live.inner.lock().await;
+            let mut backlog = Vec::new();
+            if let Some(snap) = inner.snapshot.clone() {
+                backlog.push(ServerFrame::Snapshot {
                     session,
                     watermark: snap.watermark,
                     target: snap.target,
@@ -276,26 +279,28 @@ impl Manager {
                     context_tokens: snap.context_tokens,
                     compaction_threshold: snap.compaction_threshold,
                     mode: snap.mode,
-                })
-                .await;
-        }
-        for (seq, event) in &inner.log {
-            if let Some(snap) = &inner.snapshot
-                && *seq < snap.watermark
-            {
-                continue;
+                });
             }
-            let _ = sender
-                .send(ServerFrame::Event {
+            for (seq, event) in &inner.log {
+                if let Some(snap) = &inner.snapshot
+                    && *seq < snap.watermark
+                {
+                    continue;
+                }
+                backlog.push(ServerFrame::Event {
                     session,
                     seq: *seq,
                     event: event.clone(),
-                })
-                .await;
-        }
-        crate::session::subscriber_upsert(&mut inner.subscribers, client, sender);
-        let clients = inner.presence();
-        broadcast_presence(&mut inner, clients);
+                });
+            }
+            let (bridge_tx, bridge_rx) = mpsc::channel(SUBSCRIBER_QUEUE);
+            crate::session::subscriber_upsert(&mut inner.subscribers, client, bridge_tx);
+            let clients = inner.presence();
+            broadcast_presence(&mut inner, clients);
+            (backlog, bridge_rx)
+        };
+        let replay_sent = spawn_subscriber_bridge(sender, backlog, live_rx);
+        let _ = replay_sent.await;
         Ok(())
     }
 
@@ -535,6 +540,29 @@ impl Manager {
     }
 }
 
+fn spawn_subscriber_bridge(
+    sender: mpsc::Sender<ServerFrame>,
+    backlog: Vec<ServerFrame>,
+    mut live_rx: mpsc::Receiver<ServerFrame>,
+) -> oneshot::Receiver<()> {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        for frame in backlog {
+            if sender.send(frame).await.is_err() {
+                let _ = ready_tx.send(());
+                return;
+            }
+        }
+        let _ = ready_tx.send(());
+        while let Some(frame) = live_rx.recv().await {
+            if sender.send(frame).await.is_err() {
+                break;
+            }
+        }
+    });
+    ready_rx
+}
+
 fn rewrite_resurrected_answer(inner: &mut SessionInner, op: &Op) -> Option<(u64, String)> {
     let (call, message) = match op {
         Op::Answer { call, answers, .. } => (call.0, format!("My answer: {}", answers.join(", "))),
@@ -701,7 +729,11 @@ fn thread_unregister_owner(threads: &mut HashMap<i64, SessionId>, session: Sessi
 
 #[cfg(test)]
 mod tests {
-    use super::{HashMap, SessionId, thread_register, thread_unregister_owner};
+    use super::{
+        HashMap, SessionId, spawn_subscriber_bridge, thread_register, thread_unregister_owner,
+    };
+    use goat_wire::ServerFrame;
+    use tokio::sync::mpsc;
 
     #[test]
     fn register_is_first_writer_wins() {
@@ -765,5 +797,32 @@ mod tests {
         assert_eq!(info.live, None);
         assert_eq!(info.state, None);
         assert_eq!(info.thread_id, 5);
+    }
+    #[tokio::test]
+    async fn subscriber_bridge_sends_backlog_before_live() {
+        let (target_tx, mut target_rx) = mpsc::channel(8);
+        let (live_tx, live_rx) = mpsc::channel(8);
+        let replay_sent = spawn_subscriber_bridge(
+            target_tx,
+            vec![ServerFrame::Error {
+                message: "backlog".to_owned(),
+            }],
+            live_rx,
+        );
+        live_tx
+            .send(ServerFrame::Error {
+                message: "live".to_owned(),
+            })
+            .await
+            .unwrap();
+        replay_sent.await.unwrap();
+        match target_rx.recv().await.unwrap() {
+            ServerFrame::Error { message } => assert_eq!(message, "backlog"),
+            _ => panic!("expected backlog frame"),
+        }
+        match target_rx.recv().await.unwrap() {
+            ServerFrame::Error { message } => assert_eq!(message, "live"),
+            _ => panic!("expected live frame"),
+        }
     }
 }
