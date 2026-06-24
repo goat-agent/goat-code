@@ -149,12 +149,34 @@ async fn run_headless(
     }
 }
 
+fn install_daemon_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info.location().map_or_else(
+            || "unknown".to_owned(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
+        let message = info.payload().downcast_ref::<&str>().map_or_else(
+            || {
+                info.payload()
+                    .downcast_ref::<String>()
+                    .map_or("<non-string panic payload>", String::as_str)
+                    .to_owned()
+            },
+            |s| (*s).to_owned(),
+        );
+        tracing::error!(location, message, "daemon panicked");
+        previous(info);
+    }));
+}
+
 async fn run_daemon_command(command: DaemonCommand) -> color_eyre::Result<()> {
     let socket_path = goat_config::socket_path()
         .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
     match command {
         DaemonCommand::Serve => {
             let _guard = logging::init();
+            install_daemon_panic_hook();
             let auth_path = goat_config::auth_path()
                 .ok_or_else(|| color_eyre::eyre::eyre!(goat_config::HOME_NOT_FOUND))?;
             let db_path = goat_config::db_path()

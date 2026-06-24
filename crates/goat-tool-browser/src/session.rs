@@ -29,6 +29,7 @@ const NAV_TIMEOUT: Duration = Duration::from_secs(30);
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 const SNAPSHOT_MAX_BYTES: usize = 32 * 1024;
 const SCREENSHOT_MAX_DIM: u32 = 1280;
+const HANDLER_MAX_CONSECUTIVE_ERRORS: u32 = 64;
 
 const LAUNCH_ARGS: [&str; 21] = [
     "disable-background-networking",
@@ -119,6 +120,7 @@ async fn launch_shared_once() -> Result<SharedBrowser, BrowserError> {
         .launch_timeout(LAUNCH_TIMEOUT)
         .request_timeout(CMD_TIMEOUT)
         .disable_default_args()
+        .surface_invalid_messages()
         .args(LAUNCH_ARGS)
         .build()
         .map_err(BrowserError::NoChrome)?;
@@ -126,9 +128,20 @@ async fn launch_shared_once() -> Result<SharedBrowser, BrowserError> {
     let built = tokio::spawn(async move {
         let (browser, mut handler) = Browser::launch(config).await?;
         let handler_task = tokio::spawn(async move {
+            let mut consecutive_errors: u32 = 0;
             while let Some(event) = handler.next().await {
                 if let Err(err) = event {
-                    tracing::debug!(%err, "browser handler event error");
+                    consecutive_errors += 1;
+                    tracing::debug!(%err, consecutive_errors, "browser handler event error");
+                    if handler_should_stop(consecutive_errors) {
+                        tracing::warn!(
+                            consecutive_errors,
+                            "browser handler stopping after sustained errors; chrome will relaunch on next use"
+                        );
+                        break;
+                    }
+                } else {
+                    consecutive_errors = 0;
                 }
             }
         });
@@ -141,6 +154,10 @@ async fn launch_shared_once() -> Result<SharedBrowser, BrowserError> {
     .map_err(|err| BrowserError::Message(format!("browser launch task failed: {err}")))?;
 
     built.map_err(map_launch_err)
+}
+
+fn handler_should_stop(consecutive_errors: u32) -> bool {
+    consecutive_errors >= HANDLER_MAX_CONSECUTIVE_ERRORS
 }
 
 pub struct BrowserSession {
@@ -438,7 +455,20 @@ fn downscale_png(bytes: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_url;
+    use super::{HANDLER_MAX_CONSECUTIVE_ERRORS, handler_should_stop, normalize_url};
+
+    #[test]
+    fn handler_keeps_running_below_threshold() {
+        assert!(!handler_should_stop(0));
+        assert!(!handler_should_stop(1));
+        assert!(!handler_should_stop(HANDLER_MAX_CONSECUTIVE_ERRORS - 1));
+    }
+
+    #[test]
+    fn handler_stops_at_threshold() {
+        assert!(handler_should_stop(HANDLER_MAX_CONSECUTIVE_ERRORS));
+        assert!(handler_should_stop(HANDLER_MAX_CONSECUTIVE_ERRORS + 1));
+    }
 
     #[test]
     fn adds_https_scheme() {

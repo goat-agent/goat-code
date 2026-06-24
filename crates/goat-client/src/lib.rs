@@ -534,7 +534,7 @@ async fn connect_or_spawn(socket_path: &Path, daemon_exe: &Path) -> Result<Strea
     if let Ok(stream) = transport::connect(socket_path).await {
         return Ok(stream);
     }
-    spawn_daemon(daemon_exe)?;
+    spawn_daemon(daemon_exe, socket_path)?;
     for _ in 0..50 {
         if let Ok(stream) = transport::connect(socket_path).await {
             return Ok(stream);
@@ -546,17 +546,37 @@ async fn connect_or_spawn(socket_path: &Path, daemon_exe: &Path) -> Result<Strea
     ))
 }
 
-fn spawn_daemon(daemon_exe: &Path) -> Result<(), ClientError> {
+fn spawn_daemon(daemon_exe: &Path, socket_path: &Path) -> Result<(), ClientError> {
     use std::process::{Command, Stdio};
+    let stderr = daemon_stderr(socket_path);
     Command::new(daemon_exe)
         .arg("daemon")
         .arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .spawn()
         .map_err(|e| ClientError::SpawnFailed(e.to_string()))?;
     Ok(())
+}
+
+fn daemon_stderr(socket_path: &Path) -> std::process::Stdio {
+    use std::process::Stdio;
+    let Some(home) = socket_path.parent() else {
+        return Stdio::null();
+    };
+    let log_dir = home.join("logs");
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return Stdio::null();
+    }
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("daemon-stderr.log"))
+    {
+        Ok(file) => Stdio::from(file),
+        Err(_) => Stdio::null(),
+    }
 }
 
 #[cfg(test)]
