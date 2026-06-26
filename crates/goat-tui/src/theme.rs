@@ -24,6 +24,7 @@ pub struct Theme {
     fg: Color,
     dark: bool,
     user: Color,
+    user_panel: Color,
     agent: Color,
     tool: Color,
     error: Color,
@@ -54,6 +55,7 @@ impl Theme {
             dark: true,
             fg: Color::Rgb(0xd7, 0xda, 0xe0),
             user: Color::Rgb(0x7d, 0x9b, 0xd4),
+            user_panel: Color::Rgb(0x18, 0x22, 0x35),
             agent: Color::Rgb(0x6f, 0xb3, 0xa8),
             tool: Color::Rgb(0xcf, 0x9b, 0x6b),
             error: Color::Rgb(0xc9, 0x7a, 0x7a),
@@ -90,6 +92,7 @@ impl Theme {
             dark: false,
             fg: Color::Rgb(0x1c, 0x1e, 0x22),
             user: Color::Rgb(0x2e, 0x5c, 0xc9),
+            user_panel: Color::Rgb(0xe8, 0xef, 0xff),
             agent: Color::Rgb(0x2f, 0x7d, 0x32),
             tool: Color::Rgb(0xb5, 0x6a, 0x00),
             error: Color::Rgb(0xc6, 0x28, 0x28),
@@ -165,6 +168,10 @@ impl Theme {
 
     pub fn role_user(self) -> Style {
         Style::new().fg(self.user)
+    }
+
+    pub fn user_panel(self) -> Style {
+        Style::new().bg(self.user_panel)
     }
 
     pub fn role_agent(self) -> Style {
