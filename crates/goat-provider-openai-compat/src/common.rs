@@ -159,6 +159,7 @@ pub fn discover_models(
     url: String,
     bearer: Option<String>,
     filter: Option<fn(&str) -> bool>,
+    vision_filter: fn(&str) -> bool,
     tx: mpsc::Sender<Model>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -178,7 +179,15 @@ pub fn discover_models(
             {
                 continue;
             }
-            if tx.send(Model { id: model.id }).await.is_err() {
+            let supports_images = vision_filter(&model.id);
+            if tx
+                .send(Model {
+                    id: model.id,
+                    supports_images,
+                })
+                .await
+                .is_err()
+            {
                 return;
             }
         }

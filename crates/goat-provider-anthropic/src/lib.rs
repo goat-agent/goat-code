@@ -47,6 +47,14 @@ fn anthropic_context_window(model: &str) -> u32 {
     }
 }
 
+fn anthropic_supports_images(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    id.starts_with("claude-")
+        && !id.contains("text")
+        && !id.contains("embedding")
+        && !id.contains("search")
+}
+
 const CATALOG: &[&str] = &[
     "claude-fable-5",
     "claude-opus-4-8",
@@ -731,7 +739,12 @@ impl Provider for AnthropicProvider {
         Capabilities {
             tools: true,
             auth: AuthMethod::ApiKeyOrOAuth,
+            images: true,
         }
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        anthropic_supports_images(model)
     }
 
     fn supports_web_search(&self) -> bool {
@@ -917,7 +930,14 @@ impl Provider for AnthropicProvider {
             let api_key = match auth {
                 Auth::OAuth(_) => {
                     for &id in CATALOG {
-                        if out.send(Model { id: id.to_owned() }).await.is_err() {
+                        if out
+                            .send(Model {
+                                id: id.to_owned(),
+                                supports_images: anthropic_supports_images(id),
+                            })
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -938,7 +958,15 @@ impl Provider for AnthropicProvider {
                 return;
             };
             for model in models.data {
-                if out.send(Model { id: model.id }).await.is_err() {
+                let supports_images = anthropic_supports_images(&model.id);
+                if out
+                    .send(Model {
+                        id: model.id,
+                        supports_images,
+                    })
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }

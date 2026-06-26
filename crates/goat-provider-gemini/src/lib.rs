@@ -20,6 +20,11 @@ pub const ENV_VAR: &str = "GEMINI_API_KEY";
 const GL_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const SEARCH_MODEL: &str = "gemini-2.5-flash";
 
+fn gemini_supports_images(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    id.starts_with("gemini-") && !id.contains("embedding")
+}
+
 const CATALOG: &[&str] = &[
     "gemini-3.5-flash",
     "gemini-3.1-pro-preview",
@@ -95,8 +100,12 @@ async fn fetch_gl_models(client: &reqwest::Client, api_key: &str) -> Vec<Model> 
                 .iter()
                 .any(|method| method == "generateContent")
         })
-        .map(|m| Model {
-            id: m.name.strip_prefix("models/").unwrap_or(&m.name).to_owned(),
+        .map(|m| {
+            let id = m.name.strip_prefix("models/").unwrap_or(&m.name).to_owned();
+            Model {
+                supports_images: gemini_supports_images(&id),
+                id,
+            }
         })
         .collect()
 }
@@ -209,7 +218,12 @@ impl Provider for GeminiProvider {
         Capabilities {
             tools: true,
             auth: AuthMethod::ApiKeyOrOAuth,
+            images: true,
         }
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        gemini_supports_images(model)
     }
 
     fn authenticated(&self) -> bool {
@@ -267,7 +281,14 @@ impl Provider for GeminiProvider {
             match auth {
                 oauth::Auth::OAuth(_) => {
                     for &id in CATALOG {
-                        if out.send(Model { id: id.to_owned() }).await.is_err() {
+                        if out
+                            .send(Model {
+                                id: id.to_owned(),
+                                supports_images: gemini_supports_images(id),
+                            })
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }

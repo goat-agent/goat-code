@@ -137,7 +137,21 @@ fn append_message_items(
                     input.push(item);
                 }
             }
-            ContentBlock::Image { .. } | ContentBlock::Thinking { .. } => {}
+            ContentBlock::Image { media_type, data } => {
+                if !text.is_empty() {
+                    input.push(text_item(role, content_kind, &text));
+                    text.clear();
+                }
+                input.push(json!({
+                    "type": "message",
+                    "role": role,
+                    "content": [{
+                        "type": "input_image",
+                        "image_url": format!("data:{media_type};base64,{data}"),
+                    }],
+                }));
+            }
+            ContentBlock::Thinking { .. } => {}
         }
     }
     if !text.is_empty() {
@@ -472,6 +486,7 @@ pub struct ResponsesProvider {
     auth: AuthMethod,
     client: reqwest::Client,
     model_filter: Option<fn(&str) -> bool>,
+    vision_filter: fn(&str) -> bool,
     catalog: &'static [&'static str],
     rate_limits_parser: Option<fn(&reqwest::header::HeaderMap) -> Option<RateLimitSnapshot>>,
     context_windows: &'static [(&'static str, u32)],
@@ -492,6 +507,7 @@ impl ResponsesProvider {
             auth,
             client: common::http_client(),
             model_filter: None,
+            vision_filter: crate::vision::known_openai_vision_model,
             catalog: &[],
             rate_limits_parser: None,
             context_windows: &[],
@@ -512,9 +528,20 @@ impl ResponsesProvider {
     }
 
     #[must_use]
+    pub fn with_vision_filter(mut self, filter: fn(&str) -> bool) -> Self {
+        self.vision_filter = filter;
+        self
+    }
+
+    #[must_use]
     pub fn with_catalog(mut self, catalog: &'static [&'static str]) -> Self {
         self.catalog = catalog;
         self
+    }
+
+    #[must_use]
+    pub fn supports_images(&self, model: &str) -> bool {
+        (self.vision_filter)(model)
     }
 
     #[must_use]
@@ -651,7 +678,12 @@ impl Provider for ResponsesProvider {
         Capabilities {
             tools: true,
             auth: self.auth,
+            images: true,
         }
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        (self.vision_filter)(model)
     }
 
     fn supports_web_search(&self) -> bool {
@@ -720,6 +752,7 @@ impl Provider for ResponsesProvider {
             format!("{}/models", self.base_url),
             self.bearer.clone(),
             self.model_filter,
+            self.vision_filter,
             out,
         )
     }

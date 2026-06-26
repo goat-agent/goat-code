@@ -139,6 +139,8 @@ impl Message {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
+    #[serde(default)]
+    pub supports_images: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -165,6 +167,7 @@ pub struct Request {
 pub struct Capabilities {
     pub tools: bool,
     pub auth: AuthMethod,
+    pub images: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +335,10 @@ pub trait Provider: Send + Sync + 'static {
         None
     }
 
+    fn supports_images(&self, _model: &str) -> bool {
+        self.capabilities().images
+    }
+
     fn supports_web_search(&self) -> bool {
         false
     }
@@ -367,6 +374,7 @@ mod tests {
             Capabilities {
                 tools: false,
                 auth: AuthMethod::None,
+                images: false,
             }
         }
 
@@ -382,6 +390,7 @@ mod tests {
                 let _ = out
                     .send(Model {
                         id: "mock-1".into(),
+                        supports_images: false,
                     })
                     .await;
             })

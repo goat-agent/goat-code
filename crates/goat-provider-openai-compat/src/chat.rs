@@ -82,6 +82,32 @@ fn role_label(role: MessageRole) -> &'static str {
     }
 }
 
+fn text_and_images_content(message: &Message) -> serde_json::Value {
+    let images: Vec<(&String, &String)> = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image { media_type, data } => Some((media_type, data)),
+            _ => None,
+        })
+        .collect();
+    let text = message.text_content();
+    if images.is_empty() {
+        return serde_json::Value::String(text);
+    }
+    let mut content = Vec::new();
+    if !text.is_empty() {
+        content.push(json!({ "type": "text", "text": text }));
+    }
+    for (media_type, data) in images {
+        content.push(json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{media_type};base64,{data}") },
+        }));
+    }
+    serde_json::Value::Array(content)
+}
+
 fn to_chat_messages(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for message in messages {
@@ -131,7 +157,7 @@ fn to_chat_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         } else {
             out.push(json!({
                 "role": role_label(message.role),
-                "content": message.text_content(),
+                "content": text_and_images_content(message),
             }));
         }
     }
@@ -319,7 +345,12 @@ impl Provider for OpenAiCompatProvider {
         Capabilities {
             tools: true,
             auth: self.auth,
+            images: true,
         }
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        crate::vision::known_openai_compatible_vision_model(model)
     }
 
     fn efforts(&self, _model: &str) -> Vec<Effort> {
@@ -380,6 +411,7 @@ impl Provider for OpenAiCompatProvider {
             format!("{}/models", self.base_url),
             self.bearer.clone(),
             None,
+            crate::vision::known_openai_compatible_vision_model,
             out,
         )
     }
