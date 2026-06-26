@@ -2,8 +2,9 @@ use std::io;
 
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::supports_keyboard_enhancement,
@@ -18,10 +19,11 @@ pub fn init(mouse_capture: bool) -> io::Result<(DefaultTerminal, Option<Picker>)
         execute!(
             io::stdout(),
             EnableBracketedPaste,
+            EnableFocusChange,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         )?;
     } else {
-        execute!(io::stdout(), EnableBracketedPaste)?;
+        execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
     }
     if mouse_capture {
         execute!(io::stdout(), EnableMouseCapture)?;
@@ -42,11 +44,17 @@ pub fn restore() {
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableFocusChange,
             DisableMouseCapture,
             PopKeyboardEnhancementFlags,
         );
     } else {
-        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            DisableFocusChange,
+            DisableMouseCapture
+        );
     }
     ratatui::restore();
 }
