@@ -66,6 +66,7 @@ mod tests {
         let op = Op::SubmitMessage {
             id: TaskId(1),
             text: "hi".to_owned(),
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&op).unwrap();
         assert_eq!(json, r#"{"type":"SubmitMessage","id":"1","text":"hi"}"#);
@@ -89,6 +90,7 @@ mod tests {
     fn transcript_entry_user_serializes_with_type() {
         let entry = TranscriptEntry::User {
             text: "hello".to_owned(),
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert_eq!(json, r#"{"type":"User","text":"hello"}"#);

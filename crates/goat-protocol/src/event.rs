@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AccountEntry, LoginProvider, Mode, ModelEntry, ModelTarget, RateLimitSnapshot, SkillInfo,
-    TaskId, ThreadSummary, ToolCall, ToolCallId, ToolOutcome, TranscriptEntry, Usage,
+    AccountEntry, InputAttachment, LoginProvider, Mode, ModelEntry, ModelTarget, RateLimitSnapshot,
+    SkillInfo, TaskId, ThreadSummary, ToolCall, ToolCallId, ToolOutcome, TranscriptEntry, Usage,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -131,10 +131,14 @@ pub enum Event {
     UserMessage {
         id: TaskId,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<InputAttachment>,
     },
     MessageDequeued {
         id: TaskId,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<InputAttachment>,
     },
     CompactionStarted {
         id: TaskId,

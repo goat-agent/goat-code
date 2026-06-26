@@ -64,6 +64,7 @@ mod tests {
             op: Op::SubmitMessage {
                 id: TaskId(0),
                 text: "hi".to_owned(),
+                attachments: Vec::new(),
             },
         };
         client.send(&frame).await.unwrap();

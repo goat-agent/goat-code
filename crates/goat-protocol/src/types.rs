@@ -161,6 +161,13 @@ pub struct ToolImageData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct InputAttachment {
+    pub media_type: String,
+    pub data: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolOutcome {
     pub ok: bool,
     pub summary: Option<String>,
@@ -259,6 +266,8 @@ pub struct ModelEntry {
     pub accounts: Vec<AccountChoice>,
     pub context_window: Option<u32>,
     #[serde(default)]
+    pub supports_images: bool,
+    #[serde(default)]
     pub efforts: Vec<Effort>,
 }
 
@@ -277,6 +286,8 @@ pub struct ThreadSummary {
 pub enum TranscriptEntry {
     User {
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<InputAttachment>,
     },
     Assistant {
         text: String,

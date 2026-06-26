@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{LoginCredential, Mode, ModelTarget, PlanDecision, TaskId, ToolCallId};
+use crate::{
+    InputAttachment, LoginCredential, Mode, ModelTarget, PlanDecision, TaskId, ToolCallId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
@@ -8,6 +10,8 @@ pub enum Op {
     SubmitMessage {
         id: TaskId,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<InputAttachment>,
     },
     SubmitShell {
         id: TaskId,

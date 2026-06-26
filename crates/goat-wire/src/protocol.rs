@@ -2,7 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use goat_protocol::{Event, ModelTarget, Op, TranscriptEntry};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 fn id_json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     <String as schemars::JsonSchema>::json_schema(generator)
