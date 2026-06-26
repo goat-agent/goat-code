@@ -110,6 +110,29 @@ fn plain_lines_styled(text: &str, style: ratatui::style::Style) -> Vec<Line<'sta
         .collect()
 }
 
+fn line_width(line: &Line<'static>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
+fn user_panel_rows(mut rows: Vec<Line<'static>>, theme: Theme, width: u16) -> Vec<Line<'static>> {
+    let panel = theme.user_panel();
+    let target = usize::from(width);
+    for line in &mut rows {
+        line.style = line.style.patch(panel);
+        for span in &mut line.spans {
+            span.style = span.style.patch(panel);
+        }
+        let pad = target.saturating_sub(line_width(line));
+        if pad > 0 {
+            line.spans.push(Span::styled(" ".repeat(pad), panel));
+        }
+    }
+    rows
+}
+
 pub(super) fn format_elapsed(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
@@ -334,11 +357,12 @@ pub(super) fn item_rows(
                     theme.muted(),
                 )));
             }
-            hang(
+            let rows = hang(
                 &lines,
                 Span::styled(symbols::marker::USER, theme.role_user()),
                 width,
-            )
+            );
+            user_panel_rows(rows, theme, width)
         }
         Item::Agent(text) => {
             let rendered = markdown::render(text, theme, hl);

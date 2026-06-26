@@ -737,6 +737,40 @@ mod tests {
     }
 
     #[test]
+    fn user_rows_render_full_width_background() {
+        let mut t = Transcript::default();
+        t.push_user("hello\nworld");
+        commit(&mut t, "answer");
+        let theme = Theme::dark();
+        let panel_bg = theme.user_panel().bg;
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                t.render(
+                    frame,
+                    frame.area(),
+                    &super::RenderCtx {
+                        theme,
+                        scroll: 0,
+                        spinner: symbols::SPINNER[0],
+                        working: None,
+                        queued: &[],
+                        hl: &PlainHighlighter,
+                        picker: None,
+                    },
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..2 {
+            for x in 0..20 {
+                assert_eq!(buffer[(x, y)].style().bg, panel_bg);
+            }
+        }
+        assert_ne!(buffer[(0, 3)].style().bg, panel_bg);
+    }
+
+    #[test]
     fn content_height_exceeds_u16_for_huge_transcripts() {
         let mut t = Transcript::default();
         t.push_user("x\n".repeat(70_000));
