@@ -254,9 +254,14 @@ pub(super) fn item_signature(item: &Item) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     match item {
-        Item::User(text) => {
+        Item::User(message) => {
             0u8.hash(&mut hasher);
-            text.hash(&mut hasher);
+            message.text.hash(&mut hasher);
+            for attachment in &message.attachments {
+                attachment.label.hash(&mut hasher);
+                attachment.media_type.hash(&mut hasher);
+                attachment.data.hash(&mut hasher);
+            }
         }
         Item::Agent(text) => {
             1u8.hash(&mut hasher);
@@ -321,11 +326,20 @@ pub(super) fn item_rows(
     hl: &dyn Highlighter,
 ) -> Vec<Line<'static>> {
     match item {
-        Item::User(text) => hang(
-            &plain_lines(text, theme),
-            Span::styled(symbols::marker::USER, theme.role_user()),
-            width,
-        ),
+        Item::User(message) => {
+            let mut lines = plain_lines(&message.text, theme);
+            for attachment in &message.attachments {
+                lines.push(Line::from(Span::styled(
+                    format!("[image: {}]", attachment.label),
+                    theme.muted(),
+                )));
+            }
+            hang(
+                &lines,
+                Span::styled(symbols::marker::USER, theme.role_user()),
+                width,
+            )
+        }
         Item::Agent(text) => {
             let rendered = markdown::render(text, theme, hl);
             let end = rendered

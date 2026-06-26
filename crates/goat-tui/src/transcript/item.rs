@@ -1,4 +1,10 @@
-use goat_protocol::{TaskId, ToolCallId, ToolDisplay, ToolOutcome};
+use goat_protocol::{InputAttachment, TaskId, ToolCallId, ToolDisplay, ToolOutcome};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UserMessage {
+    pub text: String,
+    pub attachments: Vec<InputAttachment>,
+}
 
 pub(crate) struct Working {
     pub elapsed: Option<u64>,
@@ -21,7 +27,7 @@ pub(crate) enum ShellStatus {
 
 #[derive(Debug)]
 pub(crate) enum Item {
-    User(String),
+    User(UserMessage),
     Agent(String),
     Tool {
         id: ToolCallId,

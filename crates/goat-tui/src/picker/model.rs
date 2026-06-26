@@ -323,6 +323,7 @@ mod tests {
             model: model.to_owned(),
             accounts: choices,
             context_window: None,
+            supports_images: true,
             efforts: Vec::new(),
         }
     }
