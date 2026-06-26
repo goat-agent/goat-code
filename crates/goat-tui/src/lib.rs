@@ -10,6 +10,7 @@ pub mod highlight;
 mod keymap;
 pub(crate) mod layout;
 pub mod markdown;
+mod notification;
 mod overlay;
 mod picker;
 mod screenshot;
