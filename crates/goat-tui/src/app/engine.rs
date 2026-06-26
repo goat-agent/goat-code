@@ -53,7 +53,10 @@ impl App {
                 self.follow = true;
                 for entry in entries {
                     match entry {
-                        TranscriptEntry::User { text } => self.transcript.push_user(text),
+                        TranscriptEntry::User { text, attachments } => {
+                            self.transcript
+                                .push_user_with_attachments(text, attachments);
+                        }
                         TranscriptEntry::Assistant { text } => {
                             self.transcript.commit_text(&text);
                         }
@@ -136,31 +139,41 @@ impl App {
                 }
                 self.dirty = true;
             }
-            EngineEvent::UserMessage { id, text } => {
+            EngineEvent::UserMessage {
+                id,
+                text,
+                attachments,
+            } => {
                 let sent_by_us = self
                     .queued
                     .iter()
-                    .position(|(queued_id, _)| *queued_id == id)
+                    .position(|(queued_id, _, _)| *queued_id == id)
                     .map(|pos| self.queued.remove(pos))
                     .is_some();
                 if !sent_by_us && self.turn.active.is_none() {
                     self.reset_agents();
                     self.follow = true;
                 }
-                self.transcript.push_user(text);
+                self.transcript
+                    .push_user_with_attachments(text, attachments);
                 self.dirty = true;
             }
-            EngineEvent::MessageDequeued { id, text } => {
+            EngineEvent::MessageDequeued {
+                id,
+                text,
+                attachments,
+            } => {
                 if let Some(pos) = self
                     .queued
                     .iter()
-                    .position(|(queued_id, _)| *queued_id == id)
+                    .position(|(queued_id, _, _)| *queued_id == id)
                 {
                     self.queued.remove(pos);
                 }
                 let draft = self.composer.text();
                 self.composer.clear();
                 self.composer.insert_str(&text);
+                self.composer.push_attachments(attachments);
                 if !draft.trim().is_empty() {
                     self.composer.insert_str("\n");
                     self.composer.insert_str(&draft);

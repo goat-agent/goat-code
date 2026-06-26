@@ -441,6 +441,7 @@ impl Manager {
                 .send(Op::SubmitMessage {
                     id: goat_protocol::TaskId(0),
                     text: message,
+                    attachments: Vec::new(),
                 })
                 .await
                 .map_err(|_| "engine closed".to_owned());

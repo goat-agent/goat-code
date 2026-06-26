@@ -3,7 +3,9 @@ mod keys;
 
 use std::{collections::HashMap, path::Path, time::Duration};
 
-use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
+use crossterm::event::{
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use futures::StreamExt;
 use goat_commands::{CommandEffect, CommandRegistry};
 use goat_protocol::{
@@ -86,6 +88,12 @@ pub(crate) enum AppEvent {
     Input(CtEvent),
     Tick,
     Engine(EngineEvent),
+    AttachmentPaste {
+        text: String,
+        result: Result<Vec<goat_protocol::InputAttachment>, String>,
+        fallback: bool,
+    },
+    ClipboardImage(Result<goat_protocol::InputAttachment, String>),
     EngineClosed,
     Presence(usize),
 }
@@ -102,7 +110,7 @@ pub struct App {
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
     pub(crate) clear_arm: Option<u16>,
-    pub(crate) queued: Vec<(TaskId, String)>,
+    pub(crate) queued: Vec<(TaskId, String, Vec<goat_protocol::InputAttachment>)>,
     pub(crate) should_quit: bool,
     pub(crate) dirty: bool,
     pub(crate) scroll: usize,
@@ -256,7 +264,16 @@ impl App {
                         picker.insert_str(&text);
                     }
                     _ => {
-                        self.composer.insert_str(&text);
+                        match crate::attachment::attachments_from_paste(&text) {
+                            Ok(attachments) => self.composer.push_attachments(attachments),
+                            Err(
+                                crate::attachment::AttachError::NotImages
+                                | crate::attachment::AttachError::Empty,
+                            ) => {
+                                self.composer.insert_str(&text);
+                            }
+                            Err(err) => self.push_toast(NotifyKind::Error, err.to_string()),
+                        }
                         self.update_command_menu();
                     }
                 }
@@ -298,6 +315,29 @@ impl App {
                 self.promote_pending_ask();
                 self.dirty = true;
                 ops
+            }
+            AppEvent::AttachmentPaste {
+                text,
+                result,
+                fallback,
+            } => {
+                match result {
+                    Ok(attachments) => self.composer.push_attachments(attachments),
+                    Err(_message) if fallback => self.composer.insert_str(&text),
+                    Err(message) => self.push_toast(NotifyKind::Error, message),
+                }
+                self.update_command_menu();
+                self.dirty = true;
+                Vec::new()
+            }
+            AppEvent::ClipboardImage(result) => {
+                match result {
+                    Ok(attachment) => self.composer.push_attachment(attachment),
+                    Err(message) => self.push_toast(NotifyKind::Error, message),
+                }
+                self.update_command_menu();
+                self.dirty = true;
+                Vec::new()
             }
             AppEvent::EngineClosed => {
                 self.should_quit = true;
@@ -564,8 +604,9 @@ impl App {
             return self.submit_shell(command);
         }
         let text = self.composer.take();
+        let attachments = self.composer.take_attachments();
         let trimmed = text.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() && attachments.is_empty() {
             return Vec::new();
         }
         if trimmed.starts_with('/') {
@@ -574,7 +615,17 @@ impl App {
                 return self.dispatch_slash_command(&cmd);
             }
         }
-        self.submit_text(text)
+        if !attachments.is_empty() && !self.current_model_supports_images() {
+            self.composer.set_plain_text(&text);
+            self.composer.push_attachments(attachments);
+            self.push_toast(
+                NotifyKind::Error,
+                "current model does not support image input".to_owned(),
+            );
+            self.dirty = true;
+            return Vec::new();
+        }
+        self.submit_text_with_attachments(text, attachments)
     }
 
     pub(crate) fn submit_shell(&mut self, command: String) -> Vec<Op> {
@@ -588,6 +639,14 @@ impl App {
     }
 
     pub(crate) fn submit_text(&mut self, text: String) -> Vec<Op> {
+        self.submit_text_with_attachments(text, Vec::new())
+    }
+
+    pub(crate) fn submit_text_with_attachments(
+        &mut self,
+        text: String,
+        attachments: Vec<goat_protocol::InputAttachment>,
+    ) -> Vec<Op> {
         let id = TaskId(self.next_task);
         self.next_task += 1;
         self.follow = true;
@@ -596,8 +655,12 @@ impl App {
             self.turn.active = Some(id);
             self.reset_agents();
         }
-        self.queued.push((id, text.clone()));
-        vec![Op::SubmitMessage { id, text }]
+        self.queued.push((id, text.clone(), attachments.clone()));
+        vec![Op::SubmitMessage {
+            id,
+            text,
+            attachments,
+        }]
     }
 
     pub(crate) fn queued_labels(&self) -> Vec<String> {
@@ -606,12 +669,19 @@ impl App {
         }
         self.queued
             .iter()
-            .filter(|(id, _)| self.turn.active != Some(*id))
-            .map(|(_, text)| {
+            .filter(|(id, _, _)| self.turn.active != Some(*id))
+            .map(|(_, text, attachments)| {
                 text.lines()
                     .find(|line| !line.trim().is_empty())
-                    .unwrap_or("")
-                    .to_owned()
+                    .map_or_else(
+                        || {
+                            attachments
+                                .first()
+                                .map(|a| format!("[image: {}]", a.label))
+                                .unwrap_or_default()
+                        },
+                        str::to_owned,
+                    )
             })
             .collect()
     }
@@ -620,15 +690,35 @@ impl App {
         if self.queued.is_empty() {
             return;
         }
-        let restored: Vec<String> = self.queued.drain(..).map(|(_, text)| text).collect();
+        let restored: Vec<(String, Vec<goat_protocol::InputAttachment>)> = self
+            .queued
+            .drain(..)
+            .map(|(_, text, attachments)| (text, attachments))
+            .collect();
         let draft = self.composer.text();
         self.composer.clear();
-        self.composer.insert_str(&restored.join("\n"));
+        for (index, (text, attachments)) in restored.into_iter().enumerate() {
+            if index > 0 {
+                self.composer.insert_str("\n");
+            }
+            self.composer.insert_str(&text);
+            self.composer.push_attachments(attachments);
+        }
         if !draft.trim().is_empty() {
             self.composer.insert_str("\n");
             self.composer.insert_str(&draft);
         }
         self.dirty = true;
+    }
+
+    pub(crate) fn current_model_supports_images(&self) -> bool {
+        let Some(model) = &self.model else {
+            return false;
+        };
+        self.models
+            .iter()
+            .find(|entry| entry.provider == model.provider && entry.model == model.model)
+            .is_some_and(|entry| entry.supports_images)
     }
 
     pub(crate) fn current_efforts(&self) -> Vec<Effort> {
@@ -1043,6 +1133,8 @@ async fn event_loop(
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(TICK);
 
+    let (attach_tx, mut attach_rx) = tokio::sync::mpsc::channel(8);
+
     for op in initial_ops {
         if ops.send(op).await.is_err() {
             app.should_quit = true;
@@ -1053,13 +1145,20 @@ async fn event_loop(
     while !app.should_quit {
         let event = tokio::select! {
             maybe = input.next() => match maybe {
-                Some(Ok(ev)) => AppEvent::Input(ev),
+                Some(Ok(ev)) => match prepare_input_event(ev, &attach_tx) {
+                    Some(event) => event,
+                    None => continue,
+                },
                 Some(Err(_)) | None => break,
             },
             _ = ticker.tick() => AppEvent::Tick,
             maybe = events.recv() => match maybe {
                 Some(ev) => AppEvent::Engine(ev),
                 None => AppEvent::EngineClosed,
+            },
+            maybe = attach_rx.recv() => match maybe {
+                Some(event) => event,
+                None => AppEvent::Tick,
             },
             Some(count) = presence.recv() => AppEvent::Presence(count),
         };
@@ -1090,6 +1189,54 @@ async fn event_loop(
     Ok(())
 }
 
+fn prepare_input_event(ev: CtEvent, tx: &tokio::sync::mpsc::Sender<AppEvent>) -> Option<AppEvent> {
+    match &ev {
+        CtEvent::Paste(text) => {
+            let text = text.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let fallback = !crate::attachment::paste_contains_only_image_paths(&text);
+                let result = tokio::task::spawn_blocking({
+                    let text = text.clone();
+                    move || {
+                        crate::attachment::attachments_from_paste(&text)
+                            .map_err(|err| err.to_string())
+                    }
+                })
+                .await
+                .unwrap_or_else(|err| Err(err.to_string()));
+                let _ = tx
+                    .send(AppEvent::AttachmentPaste {
+                        text,
+                        result,
+                        fallback,
+                    })
+                    .await;
+            });
+            None
+        }
+        CtEvent::Key(key)
+            if key.kind == KeyEventKind::Press
+                && key
+                    .modifiers
+                    .intersects(KeyModifiers::SUPER | KeyModifiers::META)
+                && matches!(key.code, KeyCode::Char('v' | 'V')) =>
+        {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(|| {
+                    crate::attachment::attachment_from_clipboard().map_err(|err| err.to_string())
+                })
+                .await
+                .unwrap_or_else(|err| Err(err.to_string()));
+                let _ = tx.send(AppEvent::ClipboardImage(result)).await;
+            });
+            None
+        }
+        _ => Some(AppEvent::Input(ev)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
@@ -1113,6 +1260,7 @@ mod tests {
                 },
             }],
             context_window: None,
+            supports_images: true,
             efforts: Vec::new(),
         }
     }
@@ -1162,6 +1310,7 @@ mod tests {
         app.on_engine(EngineEvent::UserMessage {
             id,
             text: "hello".to_owned(),
+            attachments: Vec::new(),
         });
         assert_eq!(user_lines(&app), 1);
         assert!(app.queued.is_empty());
@@ -1177,6 +1326,7 @@ mod tests {
         app.on_engine(EngineEvent::UserMessage {
             id: TaskId(42),
             text: "from another window".to_owned(),
+            attachments: Vec::new(),
         });
         assert_eq!(user_lines(&app), 1);
         assert!(app.follow);
@@ -1190,6 +1340,7 @@ mod tests {
         app.on_engine(EngineEvent::UserMessage {
             id: TaskId(2),
             text: "mid turn".to_owned(),
+            attachments: Vec::new(),
         });
         assert_eq!(user_lines(&app), 1);
         assert!(!app.follow, "mid-turn echo does not force follow");
@@ -1219,6 +1370,7 @@ mod tests {
         app.on_engine(EngineEvent::UserMessage {
             id,
             text: "hello".to_owned(),
+            attachments: Vec::new(),
         });
         app.on_engine(EngineEvent::TaskStarted { id });
         app.on_engine(EngineEvent::TaskDone {
@@ -2020,6 +2172,7 @@ mod tests {
             entries: vec![
                 TranscriptEntry::User {
                     text: "hello".to_owned(),
+                    attachments: Vec::new(),
                 },
                 TranscriptEntry::Assistant {
                     text: "hi there".to_owned(),
@@ -2063,6 +2216,7 @@ mod tests {
         app.on_engine(EngineEvent::UserMessage {
             id: top,
             text: "go".to_owned(),
+            attachments: Vec::new(),
         });
         app.on_engine(EngineEvent::ToolStarted {
             id: top,

@@ -66,6 +66,7 @@ pub fn build(store: &CredentialStore, account: &str) -> ResponsesProvider {
         AuthMethod::ApiKey,
     )
     .with_model_filter(is_chat_model)
+    .with_vision_filter(goat_provider_openai_compat::known_openai_vision_model)
     .with_catalog(CATALOG)
     .with_context_windows(CONTEXT_WINDOWS)
     .with_search_model(SEARCH_MODEL)

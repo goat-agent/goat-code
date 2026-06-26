@@ -316,7 +316,10 @@ async fn fetch_models(client: &reqwest::Client, access: &str, account: Option<&s
         .filter(|model| model.get("visibility").and_then(serde_json::Value::as_str) == Some("list"))
         .filter_map(|model| {
             let id = model.get("slug").and_then(serde_json::Value::as_str)?;
-            Some(Model { id: id.to_owned() })
+            Some(Model {
+                id: id.to_owned(),
+                supports_images: goat_provider_openai_compat::known_openai_vision_model(id),
+            })
         })
         .collect()
 }
@@ -451,7 +454,12 @@ impl Provider for CodexProvider {
         Capabilities {
             tools: true,
             auth: AuthMethod::OAuth,
+            images: true,
         }
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        goat_provider_openai_compat::known_openai_vision_model(model)
     }
 
     fn supports_web_search(&self) -> bool {

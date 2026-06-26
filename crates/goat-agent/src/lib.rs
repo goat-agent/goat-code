@@ -150,7 +150,13 @@ pub(crate) struct TurnIds {
     pub(crate) user_message_db_id: Option<i64>,
 }
 
-pub(crate) type SteeringQueue = std::sync::Mutex<std::collections::VecDeque<(TaskId, String)>>;
+pub(crate) struct UserInput {
+    pub(crate) id: TaskId,
+    pub(crate) text: String,
+    pub(crate) attachments: Vec<goat_protocol::InputAttachment>,
+}
+
+pub(crate) type SteeringQueue = std::sync::Mutex<std::collections::VecDeque<UserInput>>;
 
 enum Report<'a> {
     Top {
@@ -313,10 +319,14 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
 
     while let Some(op) = ops.recv().await {
         match op {
-            Op::SubmitMessage { id, text } => {
+            Op::SubmitMessage {
+                id,
+                text,
+                attachments,
+            } => {
                 let ctx = ctx!();
                 if let Flow::Shutdown =
-                    turn::handle_turn(&ctx, id, text, &mut state, &mut ops).await
+                    turn::handle_turn(&ctx, id, text, attachments, &mut state, &mut ops).await
                 {
                     break;
                 }
@@ -487,6 +497,7 @@ mod tests {
             Capabilities {
                 tools: false,
                 auth: AuthMethod::None,
+                images: false,
             }
         }
 
@@ -522,6 +533,7 @@ mod tests {
             Capabilities {
                 tools: true,
                 auth: AuthMethod::None,
+                images: true,
             }
         }
 
@@ -579,6 +591,7 @@ mod tests {
             Capabilities {
                 tools: false,
                 auth: AuthMethod::None,
+                images: false,
             }
         }
 
@@ -617,6 +630,7 @@ mod tests {
             Capabilities {
                 tools: true,
                 auth: AuthMethod::None,
+                images: true,
             }
         }
 
@@ -681,12 +695,14 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "first".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
         ops.send(Op::SubmitMessage {
             id: TaskId(2),
             text: "also do this".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -698,7 +714,7 @@ mod tests {
         while let Some(event) = events.recv().await {
             match event {
                 Event::TaskStarted { .. } => task_starts += 1,
-                Event::UserMessage { id, text } => user_messages.push((id, text)),
+                Event::UserMessage { id, text, .. } => user_messages.push((id, text)),
                 Event::TextDone { text, .. } => text_dones.push(text),
                 Event::TaskDone { interrupted, .. } => {
                     assert!(!interrupted);
@@ -733,12 +749,14 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "first".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
         ops.send(Op::SubmitMessage {
             id: TaskId(2),
             text: "typo message".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -750,7 +768,7 @@ mod tests {
         let mut user_messages = Vec::new();
         while let Some(event) = events.recv().await {
             match event {
-                Event::MessageDequeued { id, text } => dequeued.push((id, text)),
+                Event::MessageDequeued { id, text, .. } => dequeued.push((id, text)),
                 Event::UserMessage { id, .. } => user_messages.push(id),
                 Event::TaskDone { .. } => break,
                 _ => {}
@@ -773,6 +791,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "first".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -780,7 +799,7 @@ mod tests {
         let mut order = Vec::new();
         while let Some(event) = events.recv().await {
             match event {
-                Event::UserMessage { id, text } => {
+                Event::UserMessage { id, text, .. } => {
                     order.push(("user", id, Some(text)));
                 }
                 Event::TaskStarted { id } => order.push(("started", id, None)),
@@ -806,6 +825,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "first".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -823,6 +843,7 @@ mod tests {
                         ops.send(Op::SubmitMessage {
                             id: TaskId(2),
                             text: "follow up".to_owned(),
+                            attachments: Vec::new(),
                         })
                         .await
                         .unwrap();
@@ -855,6 +876,7 @@ mod tests {
             Capabilities {
                 tools: false,
                 auth: AuthMethod::None,
+                images: false,
             }
         }
 
@@ -927,6 +949,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "long running work".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1015,6 +1038,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "long running work".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1079,6 +1103,7 @@ mod tests {
             Capabilities {
                 tools: false,
                 auth: AuthMethod::None,
+                images: false,
             }
         }
 
@@ -1141,6 +1166,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "go".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1179,6 +1205,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "go".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1217,6 +1244,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(4),
             text: "go".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1268,6 +1296,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "do it".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1317,6 +1346,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "do it".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1382,6 +1412,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "hi".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1403,7 +1434,7 @@ mod tests {
                 | Event::ThreadBound { .. }
                 | Event::RateLimits { .. } => {}
                 Event::TaskStarted { .. } => started = true,
-                Event::UserMessage { id, text } => user_echo = Some((id, text)),
+                Event::UserMessage { id, text, .. } => user_echo = Some((id, text)),
                 Event::TextDelta { chunk, .. } => deltas.push_str(&chunk),
                 Event::TaskDone { interrupted, .. } => {
                     assert!(!interrupted);
@@ -1426,6 +1457,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(9),
             text: "hi".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1465,6 +1497,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "hi".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1612,6 +1645,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "hello there".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1622,7 +1656,7 @@ mod tests {
             if let Event::ConversationRestored { entries, .. } = event {
                 assert!(entries.iter().any(|entry| matches!(
                     entry,
-                    goat_protocol::TranscriptEntry::User { text } if text == "hello there"
+                    goat_protocol::TranscriptEntry::User { text, .. } if text == "hello there"
                 )));
                 return;
             }
@@ -1703,6 +1737,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "first".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1713,6 +1748,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(2),
             text: "second".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();

@@ -308,7 +308,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match op {
-            Op::SubmitMessage { id, text } => {
+            Op::SubmitMessage { id, text, .. } => {
                 assert_eq!(id, TaskId(1));
                 assert_eq!(text, "hi");
             }

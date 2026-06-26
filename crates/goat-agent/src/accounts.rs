@@ -328,11 +328,13 @@ fn model_entry(
     accounts: &[String],
     efforts: Vec<Effort>,
     context_window: Option<u32>,
+    supports_images: bool,
 ) -> ModelEntry {
     ModelEntry {
         provider: provider_id.to_owned(),
         model: model.to_owned(),
         context_window,
+        supports_images,
         efforts,
         accounts: accounts
             .iter()
@@ -364,6 +366,7 @@ fn catalog_only(registry: &Registry, credentials: &CredentialStore) -> Vec<Model
                 &accounts,
                 provider.efforts(id),
                 provider.context_window(id),
+                provider.supports_images(id),
             ));
         }
     }
@@ -408,6 +411,7 @@ async fn discover_provider(provider: Arc<dyn Provider>, accounts: Vec<String>) -
             &accounts,
             provider.efforts(id),
             provider.context_window(id),
+            provider.supports_images(id),
         ));
     }
     for info in discovered {
@@ -422,6 +426,7 @@ async fn discover_provider(provider: Arc<dyn Provider>, accounts: Vec<String>) -
             &accounts,
             efforts,
             ctx_win,
+            info.supports_images || provider.supports_images(&info.id),
         ));
     }
     entries

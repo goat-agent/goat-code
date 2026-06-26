@@ -1,3 +1,4 @@
+use goat_protocol::InputAttachment;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -23,6 +24,7 @@ pub struct Composer {
     lines: Vec<Vec<char>>,
     row: usize,
     col: usize,
+    attachments: Vec<InputAttachment>,
     shell: bool,
     history: Vec<HistEntry>,
     hist_cursor: Option<usize>,
@@ -35,6 +37,7 @@ impl Default for Composer {
             lines: vec![Vec::new()],
             row: 0,
             col: 0,
+            attachments: Vec::new(),
             shell: false,
             history: Vec::new(),
             hist_cursor: None,
@@ -59,7 +62,25 @@ fn prompt_cols() -> u16 {
 
 impl Composer {
     pub fn is_empty(&self) -> bool {
+        self.lines.iter().all(Vec::is_empty) && self.attachments.is_empty()
+    }
+
+    pub fn text_empty(&self) -> bool {
         self.lines.iter().all(Vec::is_empty)
+    }
+
+    pub fn push_attachment(&mut self, attachment: InputAttachment) {
+        self.attachments.push(attachment);
+        self.hist_cursor = None;
+    }
+
+    pub fn push_attachments(&mut self, attachments: Vec<InputAttachment>) {
+        self.attachments.extend(attachments);
+        self.hist_cursor = None;
+    }
+
+    pub fn take_attachments(&mut self) -> Vec<InputAttachment> {
+        std::mem::take(&mut self.attachments)
     }
 
     pub fn shell(&self) -> bool {
@@ -80,7 +101,8 @@ impl Composer {
             .lines
             .iter()
             .map(|line| wrap::wrap_chars(line, wrap_width).len())
-            .sum();
+            .sum::<usize>()
+            + self.attachments.len();
         u16::try_from(total)
             .unwrap_or(u16::MAX)
             .saturating_add(2)
@@ -437,7 +459,7 @@ impl Composer {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        if self.is_empty() {
+        if self.text_empty() && self.attachments.is_empty() {
             let placeholder = if self.shell {
                 SHELL_PLACEHOLDER
             } else {
@@ -469,6 +491,14 @@ impl Composer {
                     Span::styled(body, theme.base()),
                 ]));
             }
+        }
+
+        for attachment in &self.attachments {
+            let prompt = if rows.is_empty() { marker } else { "  " };
+            rows.push(Line::from(vec![
+                Span::styled(prompt, marker_style),
+                Span::styled(format!("[image: {}]", attachment.label), theme.muted()),
+            ]));
         }
 
         let (cursor_row, cursor_col) = self.visual_cursor(wrap_width);

@@ -3,7 +3,7 @@ mod render;
 
 use std::cell::RefCell;
 
-use goat_protocol::{TaskId, ToolCall, ToolCallId, ToolOutcome};
+use goat_protocol::{InputAttachment, TaskId, ToolCall, ToolCallId, ToolOutcome};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -13,7 +13,7 @@ use ratatui::{
 
 use crate::{highlight::Highlighter, markdown, symbols, theme::Theme};
 
-pub(crate) use item::{Item, ShellStatus, ToolStatus, Working};
+pub(crate) use item::{Item, ShellStatus, ToolStatus, UserMessage, Working};
 use render::{build_static_lines, hang, is_blank, queued_rows, stable_prefix_len, working_rows};
 
 pub(crate) struct RenderCtx<'a> {
@@ -81,9 +81,21 @@ impl Transcript {
         self.streaming = None;
     }
 
-    pub fn push_user(&mut self, text: impl Into<String>) {
+    #[cfg(test)]
+    pub(crate) fn push_user(&mut self, text: impl Into<String>) {
+        self.push_user_with_attachments(text, Vec::new());
+    }
+
+    pub fn push_user_with_attachments(
+        &mut self,
+        text: impl Into<String>,
+        attachments: Vec<InputAttachment>,
+    ) {
         self.bump_version();
-        self.items.push(Item::User(text.into()));
+        self.items.push(Item::User(UserMessage {
+            text: text.into(),
+            attachments,
+        }));
     }
 
     pub fn push_delta(&mut self, chunk: &str) {
@@ -408,7 +420,7 @@ mod tests {
         SHELL_BLOCK_CAP, build_static_lines, format_elapsed, sanitize_shell_output, shell_rows,
         stable_prefix_len,
     };
-    use super::{Item, ShellStatus, ToolStatus, Transcript, Working};
+    use super::{Item, ShellStatus, ToolStatus, Transcript, UserMessage, Working};
     use crate::{highlight::PlainHighlighter, markdown, symbols, theme::Theme};
     use ratatui::text::Line;
 
@@ -468,7 +480,10 @@ mod tests {
     fn memoized_rebuild_matches_fresh_rebuild() {
         let theme = Theme::dark();
         let mut items = vec![
-            Item::User("hello".to_owned()),
+            Item::User(UserMessage {
+                text: "hello".to_owned(),
+                attachments: Vec::new(),
+            }),
             Item::Agent("# title\n\nbody text".to_owned()),
             Item::Tool {
                 id: ToolCallId(1),

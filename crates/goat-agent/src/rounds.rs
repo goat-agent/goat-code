@@ -69,10 +69,10 @@ async fn drain_steering(ctx: &Ctx<'_>, run: &Run<'_>, conversation: &mut Convers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop_front();
-        let Some((msg_id, text)) = entry else {
+        let Some(input) = entry else {
             break;
         };
-        let message = Message::text(MessageRole::User, text.clone());
+        let message = crate::turn::user_message(&input.text, &input.attachments);
         let db_id = match run.ids() {
             Some(ids) => persist_message(ctx, ids, &message).await,
             None => None,
@@ -80,7 +80,11 @@ async fn drain_steering(ctx: &Ctx<'_>, run: &Run<'_>, conversation: &mut Convers
         conversation.push(message, db_id);
         let _ = ctx
             .events
-            .send(Event::UserMessage { id: msg_id, text })
+            .send(Event::UserMessage {
+                id: input.id,
+                text: input.text,
+                attachments: input.attachments,
+            })
             .await;
     }
 }
