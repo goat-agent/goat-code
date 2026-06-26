@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use goat_protocol::{Event, Mode, ModelTarget, Op, TaskId};
-use goat_provider::{Message, MessageRole, Provider, ToolDefinition};
+use goat_protocol::{Event, InputAttachment, Mode, ModelTarget, Op, TaskId};
+use goat_provider::{ContentBlock, Message, MessageRole, Provider, ToolDefinition};
 use goat_store::Store;
 use goat_tool::{SandboxPolicy, ToolContext, ToolError};
 use goat_tools::ToolRegistry;
@@ -22,6 +22,25 @@ use crate::{
     threads::resolve_thread_cwd,
     tools_exec::{TransitionTool, build_tool_defs},
 };
+
+pub(crate) fn user_message(text: &str, attachments: &[InputAttachment]) -> Message {
+    let mut content = Vec::new();
+    if !text.is_empty() {
+        content.push(ContentBlock::Text {
+            text: text.to_owned(),
+        });
+    }
+    for attachment in attachments {
+        content.push(ContentBlock::Image {
+            media_type: attachment.media_type.clone(),
+            data: attachment.data.clone(),
+        });
+    }
+    Message {
+        role: MessageRole::User,
+        content,
+    }
+}
 
 fn top_regime(
     ctx: &Ctx<'_>,
@@ -168,7 +187,7 @@ pub(crate) async fn handle_idle_op(
 
 enum TurnFlow {
     Idle,
-    Done(std::collections::VecDeque<(TaskId, String)>),
+    Done(std::collections::VecDeque<crate::UserInput>),
     Shutdown,
 }
 
@@ -176,31 +195,42 @@ pub(crate) async fn handle_turn(
     ctx: &Ctx<'_>,
     id: TaskId,
     text: String,
+    attachments: Vec<InputAttachment>,
     state: &mut SessionState,
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
-    run_turn_chain(ctx, id, text, std::collections::VecDeque::new(), state, ops).await
+    run_turn_chain(
+        ctx,
+        crate::UserInput {
+            id,
+            text,
+            attachments,
+        },
+        std::collections::VecDeque::new(),
+        state,
+        ops,
+    )
+    .await
 }
 
 async fn run_turn_chain(
     ctx: &Ctx<'_>,
-    id: TaskId,
-    text: String,
-    seed: std::collections::VecDeque<(TaskId, String)>,
+    input: crate::UserInput,
+    seed: std::collections::VecDeque<crate::UserInput>,
     state: &mut SessionState,
     ops: &mut mpsc::Receiver<Op>,
 ) -> Flow {
-    let mut next = Some((id, text, seed));
+    let mut next = Some((input, seed));
     let mut pending: Vec<Op> = Vec::new();
-    while let Some((turn_id, turn_text, turn_seed)) = next.take() {
-        let (flow, deferred) = run_one_turn(ctx, turn_id, turn_text, turn_seed, state, ops).await;
+    while let Some((turn_input, turn_seed)) = next.take() {
+        let (flow, deferred) = run_one_turn(ctx, turn_input, turn_seed, state, ops).await;
         pending.extend(deferred);
         match flow {
             TurnFlow::Shutdown => return Flow::Shutdown,
             TurnFlow::Idle => {}
             TurnFlow::Done(mut leftover) => {
-                if let Some((next_id, next_text)) = leftover.pop_front() {
-                    next = Some((next_id, next_text, leftover));
+                if let Some(next_input) = leftover.pop_front() {
+                    next = Some((next_input, leftover));
                 }
             }
         }
@@ -289,11 +319,11 @@ pub(crate) async fn handle_shell(
                 biased;
                 output = &mut work => break ShellEnd::Done(output),
                 maybe_op = ops.recv() => match maybe_op {
-                    Some(Op::SubmitMessage { id: msg_id, text: msg_text }) => {
+                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, attachments }) => {
                         steering
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push_back((msg_id, msg_text));
+                            .push_back(crate::UserInput { id: msg_id, text: msg_text, attachments });
                     }
                     Some(Op::DequeueMessage { id: msg_id }) => {
                         let removed = {
@@ -302,15 +332,16 @@ pub(crate) async fn handle_shell(
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             queue
                                 .iter()
-                                .rposition(|(queued_id, _)| *queued_id == msg_id)
+                                .rposition(|queued| queued.id == msg_id)
                                 .and_then(|index| queue.remove(index))
                         };
-                        if let Some((queued_id, queued_text)) = removed {
+                        if let Some(queued) = removed {
                             let _ = ctx
                                 .events
                                 .send(Event::MessageDequeued {
-                                    id: queued_id,
-                                    text: queued_text,
+                                    id: queued.id,
+                                    text: queued.text,
+                                    attachments: queued.attachments,
                                 })
                                 .await;
                         }
@@ -367,11 +398,8 @@ pub(crate) async fn handle_shell(
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
     drop(steering);
-    if let Some((next_id, next_text)) = captured.pop_front() {
-        return Box::pin(run_turn_chain(
-            ctx, next_id, next_text, captured, state, ops,
-        ))
-        .await;
+    if let Some(next_input) = captured.pop_front() {
+        return Box::pin(run_turn_chain(ctx, next_input, captured, state, ops)).await;
     }
     Flow::Continue
 }
@@ -462,11 +490,11 @@ pub(crate) async fn handle_compact(
                 biased;
                 outcome = &mut work => break outcome,
                 maybe_op = ops.recv() => match maybe_op {
-                    Some(Op::SubmitMessage { id: msg_id, text: msg_text }) => {
+                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, attachments }) => {
                         steering
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push_back((msg_id, msg_text));
+                            .push_back(crate::UserInput { id: msg_id, text: msg_text, attachments });
                     }
                     Some(Op::DequeueMessage { id: msg_id }) => {
                         let removed = {
@@ -475,15 +503,16 @@ pub(crate) async fn handle_compact(
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             queue
                                 .iter()
-                                .rposition(|(queued_id, _)| *queued_id == msg_id)
+                                .rposition(|queued| queued.id == msg_id)
                                 .and_then(|index| queue.remove(index))
                         };
-                        if let Some((queued_id, queued_text)) = removed {
+                        if let Some(queued) = removed {
                             let _ = ctx
                                 .events
                                 .send(Event::MessageDequeued {
-                                    id: queued_id,
-                                    text: queued_text,
+                                    id: queued.id,
+                                    text: queued.text,
+                                    attachments: queued.attachments,
                                 })
                                 .await;
                         }
@@ -534,11 +563,8 @@ pub(crate) async fn handle_compact(
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
     drop(steering);
-    if let Some((next_id, next_text)) = captured.pop_front() {
-        return Box::pin(run_turn_chain(
-            ctx, next_id, next_text, captured, state, ops,
-        ))
-        .await;
+    if let Some(next_input) = captured.pop_front() {
+        return Box::pin(run_turn_chain(ctx, next_input, captured, state, ops)).await;
     }
     Flow::Continue
 }
@@ -546,12 +572,14 @@ pub(crate) async fn handle_compact(
 #[allow(clippy::too_many_lines)]
 async fn run_one_turn(
     ctx: &Ctx<'_>,
-    id: TaskId,
-    text: String,
-    seed: std::collections::VecDeque<(TaskId, String)>,
+    input: crate::UserInput,
+    seed: std::collections::VecDeque<crate::UserInput>,
     state: &mut SessionState,
     ops: &mut mpsc::Receiver<Op>,
 ) -> (TurnFlow, Vec<Op>) {
+    let id = input.id;
+    let text = input.text;
+    let attachments = input.attachments;
     let Some(resolved) = state.target.clone() else {
         emit_task_error(
             ctx,
@@ -571,7 +599,17 @@ async fn run_one_turn(
         return (TurnFlow::Idle, Vec::new());
     };
 
-    let ids = init_db_turn(ctx, id, &text, &resolved, &mut state.thread_id).await;
+    let message = user_message(&text, &attachments);
+    let ids = init_db_turn(
+        ctx,
+        id,
+        &message,
+        &text,
+        &attachments,
+        &resolved,
+        &mut state.thread_id,
+    )
+    .await;
     if state.mode.is_plan() && state.plan_path.is_none() {
         state.plan_path = plan::resolve_plan_path(ids.stored_thread, &text);
         if let Some(tid) = ids.stored_thread
@@ -611,15 +649,13 @@ async fn run_one_turn(
     } else if state.conversation.set_system(system) {
         state.tracker.invalidate();
     }
-    state.conversation.push(
-        Message::text(MessageRole::User, text.clone()),
-        ids.user_message_db_id,
-    );
+    state.conversation.push(message, ids.user_message_db_id);
     if ctx
         .events
         .send(Event::UserMessage {
             id,
             text: text.clone(),
+            attachments: attachments.clone(),
         })
         .await
         .is_err()
@@ -685,11 +721,11 @@ async fn run_one_turn(
                                 .await;
                         }
                     }
-                    Some(Op::SubmitMessage { id: msg_id, text: msg_text }) => {
+                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, attachments }) => {
                         steering
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push_back((msg_id, msg_text));
+                            .push_back(crate::UserInput { id: msg_id, text: msg_text, attachments });
                     }
                     Some(Op::DequeueMessage { id: msg_id }) => {
                         let removed = {
@@ -698,15 +734,16 @@ async fn run_one_turn(
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             queue
                                 .iter()
-                                .rposition(|(queued_id, _)| *queued_id == msg_id)
+                                .rposition(|queued| queued.id == msg_id)
                                 .and_then(|index| queue.remove(index))
                         };
-                        if let Some((queued_id, queued_text)) = removed {
+                        if let Some(queued) = removed {
                             let _ = ctx
                                 .events
                                 .send(Event::MessageDequeued {
-                                    id: queued_id,
-                                    text: queued_text,
+                                    id: queued.id,
+                                    text: queued.text,
+                                    attachments: queued.attachments,
                                 })
                                 .await;
                         }
@@ -773,7 +810,11 @@ async fn run_one_turn(
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             );
             let mut queue = std::collections::VecDeque::new();
-            queue.push_back((engine_id, transition.inject));
+            queue.push_back(crate::UserInput {
+                id: engine_id,
+                text: transition.inject,
+                attachments: Vec::new(),
+            });
             queue.append(&mut leftover);
             return (TurnFlow::Done(queue), deferred);
         }

@@ -114,20 +114,25 @@ pub(crate) async fn ensure_thread(
 pub(crate) async fn init_db_turn(
     ctx: &Ctx<'_>,
     id: TaskId,
+    message: &Message,
     text: &str,
+    attachments: &[goat_protocol::InputAttachment],
     target: &ModelTarget,
     thread_id: &mut Option<i64>,
 ) -> TurnIds {
-    let stored_thread =
-        ensure_thread(ctx.store, ctx.cwd, thread_id, target, thread_title(text)).await;
+    let title = if text.trim().is_empty() {
+        attachments
+            .first()
+            .map(|attachment| format!("Image: {}", attachment.label))
+    } else {
+        thread_title(text)
+    };
+    let stored_thread = ensure_thread(ctx.store, ctx.cwd, thread_id, target, title).await;
     if let Some(tid) = stored_thread {
         let _ = ctx.events.send(Event::ThreadBound { thread_id: tid }).await;
     }
     let (turn_db_id, user_message_db_id) = if let Some(tid) = stored_thread {
-        let body = serde_json::to_string(&vec![ContentBlock::Text {
-            text: text.to_owned(),
-        }])
-        .unwrap_or_else(|_| text.to_owned());
+        let body = serde_json::to_string(&message.content).unwrap_or_else(|_| text.to_owned());
         let user_message_db_id = match ctx
             .store
             .create_message(NewMessage {

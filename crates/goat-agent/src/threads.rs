@@ -203,7 +203,10 @@ pub(crate) async fn handle_resume(
                     Some((command, output)) => {
                         entries.push(TranscriptEntry::Shell { command, output });
                     }
-                    None => entries.push(TranscriptEntry::User { text: text.clone() }),
+                    None => entries.push(TranscriptEntry::User {
+                        text: text.clone(),
+                        attachments: Vec::new(),
+                    }),
                 }
             }
             parsed.push((stored.id, MessageRole::User, content));
@@ -218,7 +221,22 @@ pub(crate) async fn handle_resume(
         for block in &content {
             match block {
                 ContentBlock::Text { text } => match role {
-                    MessageRole::User => entries.push(TranscriptEntry::User { text: text.clone() }),
+                    MessageRole::User => entries.push(TranscriptEntry::User {
+                        text: text.clone(),
+                        attachments: content
+                            .iter()
+                            .filter_map(|block| match block {
+                                ContentBlock::Image { media_type, data } => {
+                                    Some(goat_protocol::InputAttachment {
+                                        media_type: media_type.clone(),
+                                        data: data.clone(),
+                                        label: "image".to_owned(),
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                    }),
                     MessageRole::Assistant => {
                         entries.push(TranscriptEntry::Assistant { text: text.clone() });
                     }
