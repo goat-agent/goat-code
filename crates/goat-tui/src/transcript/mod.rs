@@ -413,7 +413,7 @@ impl Transcript {
 
 #[cfg(test)]
 mod tests {
-    use goat_protocol::{TaskId, ToolCall, ToolCallId, ToolOutcome};
+    use goat_protocol::{InputAttachment, TaskId, ToolCall, ToolCallId, ToolOutcome};
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::render::{
@@ -736,8 +736,12 @@ mod tests {
         assert!(buffer_row(&terminal, 0).starts_with(symbols::SPINNER[3]));
     }
 
+    fn cell_bg(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Option<ratatui::style::Color> {
+        terminal.backend().buffer()[(x, y)].style().bg
+    }
+
     #[test]
-    fn user_rows_render_full_width_background() {
+    fn user_rows_render_padded_panel_background() {
         let mut t = Transcript::default();
         t.push_user("hello\nworld");
         commit(&mut t, "answer");
@@ -761,13 +765,52 @@ mod tests {
                 );
             })
             .unwrap();
-        let buffer = terminal.backend().buffer();
-        for y in 0..2 {
-            for x in 0..20 {
-                assert_eq!(buffer[(x, y)].style().bg, panel_bg);
-            }
-        }
-        assert_ne!(buffer[(0, 3)].style().bg, panel_bg);
+        assert_eq!(cell_bg(&terminal, 0, 0), panel_bg);
+        assert_eq!(cell_bg(&terminal, 8, 0), panel_bg);
+        assert_ne!(cell_bg(&terminal, 9, 0), panel_bg);
+        assert_eq!(cell_bg(&terminal, 0, 1), panel_bg);
+        assert_eq!(cell_bg(&terminal, 8, 1), panel_bg);
+        assert_ne!(cell_bg(&terminal, 9, 1), panel_bg);
+        assert_ne!(cell_bg(&terminal, 0, 3), panel_bg);
+    }
+
+    #[test]
+    fn user_rows_keep_attachment_inside_padded_panel() {
+        let mut t = Transcript::default();
+        t.push_user_with_attachments(
+            "hi",
+            vec![InputAttachment {
+                media_type: "image/png".to_owned(),
+                data: "data".to_owned(),
+                label: "demo.png".to_owned(),
+            }],
+        );
+        let theme = Theme::dark();
+        let panel_bg = theme.user_panel().bg;
+        let mut terminal = Terminal::new(TestBackend::new(24, 3)).unwrap();
+        terminal
+            .draw(|frame| {
+                t.render(
+                    frame,
+                    frame.area(),
+                    &super::RenderCtx {
+                        theme,
+                        scroll: 0,
+                        spinner: symbols::SPINNER[0],
+                        working: None,
+                        queued: &[],
+                        hl: &PlainHighlighter,
+                        picker: None,
+                    },
+                );
+            })
+            .unwrap();
+        assert!(buffer_row(&terminal, 1).contains("[image: demo.png]"));
+        assert_eq!(cell_bg(&terminal, 0, 0), panel_bg);
+        assert_eq!(cell_bg(&terminal, 20, 0), panel_bg);
+        assert_eq!(cell_bg(&terminal, 20, 1), panel_bg);
+        assert_ne!(cell_bg(&terminal, 21, 0), panel_bg);
+        assert_ne!(cell_bg(&terminal, 21, 1), panel_bg);
     }
 
     #[test]
