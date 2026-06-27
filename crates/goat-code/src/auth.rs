@@ -2,7 +2,9 @@ use std::io::Write;
 use std::time::Duration;
 
 use color_eyre::eyre::eyre;
-use goat_auth::{Credential, CredentialKey, CredentialKind, CredentialStore, SecretString};
+use goat_auth::{
+    Credential, CredentialKey, CredentialKind, CredentialService, CredentialStore, SecretString,
+};
 use goat_provider::{AuthMethod, ProviderId};
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use tokio::sync::mpsc;
@@ -17,17 +19,22 @@ pub async fn run(command: AuthCommand) -> color_eyre::Result<()> {
             provider,
             account,
             key,
+            service,
         } => {
             let account = account.as_deref().unwrap_or(DEFAULT_ACCOUNT);
-            login(&store, &provider, account, key).await
+            login(&store, &provider, account, key, service.into()).await
         }
         AuthCommand::List => {
             list(&store);
             Ok(())
         }
-        AuthCommand::Logout { provider, account } => {
+        AuthCommand::Logout {
+            provider,
+            account,
+            service,
+        } => {
             let account = account.as_deref().unwrap_or(DEFAULT_ACCOUNT);
-            logout(&store, &provider, account)
+            logout(&store, &provider, account, service.into())
         }
     }
 }
@@ -37,7 +44,11 @@ async fn login(
     provider: &str,
     account: &str,
     key: Option<String>,
+    service: CredentialService,
 ) -> color_eyre::Result<()> {
+    if service == CredentialService::Search {
+        return login_search(store, provider, account, key);
+    }
     let registry = Registry::new(store);
     let method = registry
         .all()
@@ -46,10 +57,7 @@ async fn login(
         .map(|p| p.capabilities().auth)
         .ok_or_else(|| eyre!("unknown provider: {provider}"))?;
 
-    let credential_key = CredentialKey {
-        provider: provider.to_owned(),
-        account: account.to_owned(),
-    };
+    let credential_key = CredentialKey::model(provider, account);
 
     let use_oauth = match method {
         AuthMethod::None => {
@@ -98,6 +106,38 @@ async fn login(
     Ok(())
 }
 
+fn login_search(
+    store: &CredentialStore,
+    provider: &str,
+    account: &str,
+    key: Option<String>,
+) -> color_eyre::Result<()> {
+    match provider {
+        "brave" | "tavily" => {}
+        "duckduckgo" | "browser" | "searxng" => {
+            println!("{provider} search accounts do not require secret credentials");
+            return Ok(());
+        }
+        other => return Err(eyre!("unknown search provider: {other}")),
+    }
+    let secret = match key {
+        Some(key) => key,
+        None => prompt(&format!("enter API key for search {provider}: "))?,
+    };
+    let secret = secret.trim().to_owned();
+    if secret.is_empty() {
+        return Err(eyre!("no API key provided"));
+    }
+    let credential_key = CredentialKey::search(provider, account);
+    store
+        .store(
+            &credential_key,
+            Credential::ApiKey(SecretString::from(secret)),
+        )
+        .map_err(|err| eyre!(err.to_string()))?;
+    println!("stored search credential for {provider} ({account})");
+    Ok(())
+}
 async fn verify(store: &CredentialStore, provider: &str, account: &str) {
     let registry = Registry::load(store, account);
     let Some(provider) = registry.get(&ProviderId::from(provider)) else {
@@ -131,14 +171,25 @@ fn list(store: &CredentialStore) {
             CredentialKind::ApiKey => "api_key",
             CredentialKind::OAuth => "oauth",
         };
-        println!("{}/{}  {kind}", key.provider, key.account);
+        println!(
+            "{}/{}  {}/{}",
+            service_name(key.service),
+            key.provider,
+            key.account,
+            kind
+        );
     }
 }
 
-fn logout(store: &CredentialStore, provider: &str, account: &str) -> color_eyre::Result<()> {
-    let key = CredentialKey {
-        provider: provider.to_owned(),
-        account: account.to_owned(),
+fn logout(
+    store: &CredentialStore,
+    provider: &str,
+    account: &str,
+    service: CredentialService,
+) -> color_eyre::Result<()> {
+    let key = match service {
+        CredentialService::Model => CredentialKey::model(provider, account),
+        CredentialService::Search => CredentialKey::search(provider, account),
     };
     if store.remove(&key).map_err(|err| eyre!(err.to_string()))? {
         println!("removed credential for {provider} ({account})");
@@ -148,6 +199,12 @@ fn logout(store: &CredentialStore, provider: &str, account: &str) -> color_eyre:
     Ok(())
 }
 
+fn service_name(service: CredentialService) -> &'static str {
+    match service {
+        CredentialService::Model => "model",
+        CredentialService::Search => "search",
+    }
+}
 fn prompt(message: &str) -> color_eyre::Result<String> {
     print!("{message}");
     std::io::stdout().flush()?;

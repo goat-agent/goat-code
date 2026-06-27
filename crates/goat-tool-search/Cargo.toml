@@ -10,11 +10,18 @@ publish = false
 [dependencies]
 goat-protocol = { workspace = true }
 goat-tool = { workspace = true }
+goat-config = { workspace = true }
+goat-auth = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "net"] }
+chromiumoxide = { workspace = true }
+futures = { workspace = true }
+tempfile = { workspace = true }
 ignore = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

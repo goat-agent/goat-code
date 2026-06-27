@@ -286,7 +286,7 @@ impl App {
             }
             EngineEvent::TaskDone { interrupted, .. } => {
                 if !self.focused {
-                    self.bell_pending = true;
+                    self.queue_notification(crate::notification::Notification::Completion);
                 }
                 self.transcript.complete(interrupted);
                 self.reset_active_state();
@@ -307,7 +307,7 @@ impl App {
                 call, questions, ..
             } => {
                 if !self.focused {
-                    self.bell_pending = true;
+                    self.queue_notification(crate::notification::Notification::Attention);
                 }
                 let picker = AskPicker::new(questions);
                 if matches!(self.overlay, Overlay::None | Overlay::Commands(_)) {

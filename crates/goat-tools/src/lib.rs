@@ -65,7 +65,15 @@ mod tests {
     fn builtin_registers_all_tools() {
         let registry = ToolRegistry::builtin();
         for name in [
-            "Read", "Write", "Edit", "Bash", "Grep", "Glob", "Skill", "WebFetch",
+            "Read",
+            "Write",
+            "Edit",
+            "Bash",
+            "Grep",
+            "Glob",
+            "Skill",
+            "WebFetch",
+            "WebSearch",
         ] {
             assert!(registry.get(name).is_some(), "missing tool: {name}");
         }
@@ -79,7 +87,7 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted);
-        assert_eq!(specs.len(), 8);
+        assert_eq!(specs.len(), 9);
     }
 
     #[test]

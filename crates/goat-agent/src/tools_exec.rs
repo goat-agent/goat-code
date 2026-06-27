@@ -139,40 +139,42 @@ async fn execute_tool(
     tool_ctx: &ToolContext,
     token: &CancellationToken,
 ) -> ToolExecResult {
-    let step: Option<Result<ToolOutput, String>> =
-        if prep.name == WEB_SEARCH_TOOL_NAME && env.provider.supports_web_search() {
-            Some(
-                run_web_search(env, prep.input_json, token)
-                    .await
-                    .map(ToolOutput::text),
-            )
-        } else if prep.name == ENTER_PLAN_TOOL_NAME && env.transition.is_some() {
-            Some(run_enter_plan(env).map(ToolOutput::text))
-        } else if prep.name == PROPOSE_PLAN_TOOL_NAME && env.transition.is_some() {
-            Some(
-                run_propose_plan(ctx, run, env, ToolCallId(prep.tui_id), token)
-                    .await
-                    .map(ToolOutput::text),
-            )
-        } else if prep.name == ASK_TOOL_NAME && env.allow_delegate {
-            Some(run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token).await)
-        } else if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
-            let permit = tokio::select! {
-                biased;
-                () = token.cancelled() => None,
-                acquired = ctx.semaphore.acquire() => acquired.ok(),
-            };
-            match permit {
-                Some(_permit) if !token.is_cancelled() => Some(
-                    run_delegation(ctx, env, prep.input_json, run.id, token)
-                        .await
-                        .map(ToolOutput::text),
-                ),
-                _ => None,
-            }
-        } else {
-            run_regular_tool(ctx, prep.name, prep.input_json, tool_ctx, token).await
+    let step: Option<Result<ToolOutput, String>> = if prep.name == WEB_SEARCH_TOOL_NAME
+        && env.provider.supports_web_search()
+        && ctx.tools.get(WEB_SEARCH_TOOL_NAME).is_none()
+    {
+        Some(
+            run_web_search(env, prep.input_json, token)
+                .await
+                .map(ToolOutput::text),
+        )
+    } else if prep.name == ENTER_PLAN_TOOL_NAME && env.transition.is_some() {
+        Some(run_enter_plan(env).map(ToolOutput::text))
+    } else if prep.name == PROPOSE_PLAN_TOOL_NAME && env.transition.is_some() {
+        Some(
+            run_propose_plan(ctx, run, env, ToolCallId(prep.tui_id), token)
+                .await
+                .map(ToolOutput::text),
+        )
+    } else if prep.name == ASK_TOOL_NAME && env.allow_delegate {
+        Some(run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token).await)
+    } else if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
+        let permit = tokio::select! {
+            biased;
+            () = token.cancelled() => None,
+            acquired = ctx.semaphore.acquire() => acquired.ok(),
         };
+        match permit {
+            Some(_permit) if !token.is_cancelled() => Some(
+                run_delegation(ctx, env, prep.input_json, run.id, token)
+                    .await
+                    .map(ToolOutput::text),
+            ),
+            _ => None,
+        }
+    } else {
+        run_regular_tool(ctx, prep.name, prep.input_json, tool_ctx, token).await
+    };
     let Some(result) = step else {
         let outcome = ToolOutcome {
             ok: false,
@@ -307,7 +309,7 @@ pub(crate) fn build_tool_defs(
             input_schema: spec.parameters,
         })
         .collect();
-    if provider.supports_web_search() {
+    if provider.supports_web_search() && ctx.tools.get(WEB_SEARCH_TOOL_NAME).is_none() {
         defs.push(web_search_tool_def());
     }
     if allow_delegate {

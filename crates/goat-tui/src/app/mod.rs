@@ -133,7 +133,7 @@ pub struct App {
     pub(crate) context_window: HashMap<(String, String), u32>,
     pub(crate) compaction_threshold: Option<u32>,
     pub(crate) focused: bool,
-    pub(crate) bell_pending: bool,
+    pub(crate) notification_pending: Option<crate::notification::Notification>,
     pub(crate) mode: goat_protocol::Mode,
     pub(crate) picker: Option<ratatui_image::picker::Picker>,
 }
@@ -211,7 +211,7 @@ impl App {
             context_window: HashMap::new(),
             compaction_threshold: None,
             focused: true,
-            bell_pending: false,
+            notification_pending: None,
             mode: goat_protocol::Mode::Normal,
             picker: None,
         }
@@ -921,8 +921,12 @@ impl App {
         })
     }
 
-    pub(crate) fn take_bell(&mut self) -> bool {
-        std::mem::take(&mut self.bell_pending)
+    pub(crate) fn take_notification(&mut self) -> Option<crate::notification::Notification> {
+        self.notification_pending.take()
+    }
+
+    pub(crate) fn queue_notification(&mut self, notification: crate::notification::Notification) {
+        self.notification_pending = Some(notification);
     }
 
     pub(crate) fn compacting_status(&self) -> Option<String> {
@@ -1176,11 +1180,8 @@ async fn event_loop(
             }
         }
 
-        if app.take_bell() {
-            use std::io::Write as _;
-            let mut out = std::io::stdout();
-            let _ = out.write_all(b"\x07");
-            let _ = out.flush();
+        if let Some(notification) = app.take_notification() {
+            crate::notification::spawn(notification);
         }
         if app.take_dirty() {
             terminal.draw(|frame| view::render(frame, &mut app))?;
@@ -1379,6 +1380,65 @@ mod tests {
         });
         assert_eq!(user_lines(&app), 1);
         assert!(app.composer.text().trim().is_empty());
+    }
+
+    #[test]
+    fn task_done_queues_notification_only_when_unfocused() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::TaskDone {
+            id: TaskId(1),
+            interrupted: false,
+        });
+        assert_eq!(app.take_notification(), None);
+
+        app.update(super::AppEvent::Input(crossterm::event::Event::FocusLost));
+        app.on_engine(EngineEvent::TaskDone {
+            id: TaskId(2),
+            interrupted: false,
+        });
+        assert_eq!(
+            app.take_notification(),
+            Some(crate::notification::Notification::Completion)
+        );
+
+        app.update(super::AppEvent::Input(crossterm::event::Event::FocusGained));
+        app.on_engine(EngineEvent::TaskDone {
+            id: TaskId(3),
+            interrupted: false,
+        });
+        assert_eq!(app.take_notification(), None);
+    }
+
+    #[test]
+    fn ask_started_queues_attention_notification_only_when_unfocused() {
+        use goat_protocol::{AskQuestion, ToolCallId};
+
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::AskStarted {
+            id: TaskId(1),
+            call: ToolCallId(1),
+            questions: vec![AskQuestion {
+                question: "continue?".to_owned(),
+                options: Vec::new(),
+                multiple: false,
+            }],
+        });
+        assert_eq!(app.take_notification(), None);
+
+        app.update(super::AppEvent::Input(crossterm::event::Event::FocusLost));
+        app.on_engine(EngineEvent::AskStarted {
+            id: TaskId(2),
+            call: ToolCallId(2),
+            questions: vec![AskQuestion {
+                question: "continue?".to_owned(),
+                options: Vec::new(),
+                multiple: false,
+            }],
+        });
+        assert_eq!(
+            app.take_notification(),
+            Some(crate::notification::Notification::Attention)
+        );
     }
 
     #[test]

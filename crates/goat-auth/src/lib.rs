@@ -53,10 +53,38 @@ impl From<&str> for SecretString {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialService {
+    #[default]
+    Model,
+    Search,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CredentialKey {
+    #[serde(default)]
+    pub service: CredentialService,
     pub provider: String,
     pub account: String,
+}
+
+impl CredentialKey {
+    pub fn model(provider: impl Into<String>, account: impl Into<String>) -> Self {
+        Self {
+            service: CredentialService::Model,
+            provider: provider.into(),
+            account: account.into(),
+        }
+    }
+
+    pub fn search(provider: impl Into<String>, account: impl Into<String>) -> Self {
+        Self {
+            service: CredentialService::Search,
+            provider: provider.into(),
+            account: account.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -474,8 +502,8 @@ impl CredentialStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        Credential, CredentialKey, CredentialKind, CredentialStore, Pkce, SecretString, TokenSet,
-        ensure_valid, now_secs,
+        Credential, CredentialKey, CredentialKind, CredentialService, CredentialStore, Pkce,
+        SecretString, TokenSet, ensure_valid, now_secs,
     };
 
     #[tokio::test]
@@ -485,10 +513,7 @@ mod tests {
         let path = std::env::temp_dir().join("goat-auth-singleflight-test.json");
         let _ = std::fs::remove_file(&path);
         let store = CredentialStore::new(path.clone());
-        let key = CredentialKey {
-            provider: "goat-singleflight".into(),
-            account: "a".into(),
-        };
+        let key = CredentialKey::model("goat-singleflight", "a");
         let expired = TokenSet {
             access_token: SecretString::from("old"),
             refresh_token: Some(SecretString::from("refresh")),
@@ -523,6 +548,15 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_key_defaults_to_model_service() {
+        let key: CredentialKey =
+            serde_json::from_str(r#"{"provider":"openai","account":"default"}"#).unwrap();
+        assert_eq!(key.service, CredentialService::Model);
+        assert_eq!(key.provider, "openai");
+        assert_eq!(key.account, "default");
     }
 
     #[test]
@@ -563,10 +597,7 @@ mod tests {
         let path = std::env::temp_dir().join("goat-auth-perms-test.json");
         let _ = std::fs::remove_file(&path);
         let store = CredentialStore::new(path.clone());
-        let key = CredentialKey {
-            provider: "p".into(),
-            account: "a".into(),
-        };
+        let key = CredentialKey::model("p", "a");
         store
             .file_set(&key, Credential::ApiKey(SecretString::from("secret")))
             .unwrap();
@@ -591,10 +622,7 @@ mod tests {
         let path = std::env::temp_dir().join("goat-auth-file-roundtrip-test.json");
         let _ = std::fs::remove_file(&path);
         let store = CredentialStore::new(path.clone());
-        let key = CredentialKey {
-            provider: "p".into(),
-            account: "a".into(),
-        };
+        let key = CredentialKey::model("p", "a");
         store
             .file_set(&key, Credential::ApiKey(SecretString::from("k")))
             .unwrap();
@@ -608,10 +636,7 @@ mod tests {
         let path = std::env::temp_dir().join("goat-auth-env-pref-test.json");
         let _ = std::fs::remove_file(&path);
         let store = CredentialStore::new(path);
-        let key = CredentialKey {
-            provider: "goat-test-noexist".into(),
-            account: "x".into(),
-        };
+        let key = CredentialKey::model("goat-test-noexist", "x");
         let cred = store.resolve(&key, Some("PATH")).unwrap();
         assert!(matches!(cred, Credential::ApiKey(_)));
     }
@@ -621,10 +646,7 @@ mod tests {
         let path = std::env::temp_dir().join("goat-auth-absent-test.json");
         let _ = std::fs::remove_file(&path);
         let store = CredentialStore::new(path);
-        let key = CredentialKey {
-            provider: "goat-test-absent-xyz".into(),
-            account: "none".into(),
-        };
+        let key = CredentialKey::model("goat-test-absent-xyz", "none");
         assert!(
             store
                 .resolve(&key, Some("GOAT_DEFINITELY_NOT_SET_VAR_42"))
@@ -637,10 +659,7 @@ mod tests {
         let path = std::env::temp_dir().join("goat-auth-corrupt-test.json");
         std::fs::write(&path, "{ not valid json").unwrap();
         let store = CredentialStore::new(path.clone());
-        let key = CredentialKey {
-            provider: "p".into(),
-            account: "a".into(),
-        };
+        let key = CredentialKey::model("p", "a");
         let result = store.store(&key, Credential::ApiKey(SecretString::from("k")));
         assert!(matches!(result, Err(super::AuthError::Corrupt { .. })));
         let on_disk = std::fs::read_to_string(&path).unwrap();
@@ -654,10 +673,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let store = CredentialStore::new(path.clone());
         assert!(store.entries().is_empty());
-        let key = CredentialKey {
-            provider: "p".into(),
-            account: "a".into(),
-        };
+        let key = CredentialKey::model("p", "a");
         store
             .store(&key, Credential::ApiKey(SecretString::from("k")))
             .unwrap();

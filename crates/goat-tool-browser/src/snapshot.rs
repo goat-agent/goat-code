@@ -10,6 +10,8 @@ pub const SNAPSHOT_JS: &str = r"(() => {
 
   document.querySelectorAll('[data-goat-ref]').forEach(e => e.removeAttribute('data-goat-ref'));
 
+  const clean = (s) => (s || '').trim().replace(/\s+/g, ' ');
+
   const visible = (el) => {
     const s = getComputedStyle(el);
     if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
@@ -51,8 +53,6 @@ pub const SNAPSHOT_JS: &str = r"(() => {
     return false;
   };
 
-  const clean = (s) => (s || '').trim().replace(/\s+/g, ' ');
-
   const nameOf = (el) => {
     const aria = el.getAttribute('aria-label');
     if (aria) return clean(aria);
@@ -72,18 +72,28 @@ pub const SNAPSHOT_JS: &str = r"(() => {
 
   const statesOf = (el) => {
     const s = [];
-    if (el.disabled) s.push('disabled');
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') s.push('disabled');
+    if (el.readOnly) s.push('readonly');
     if (el.checked || el.getAttribute('aria-checked') === 'true') s.push('checked');
     if (el.getAttribute('aria-expanded') === 'true') s.push('expanded');
     if (el.required) s.push('required');
+    const r = el.getBoundingClientRect();
+    if (r.bottom >= 0 && r.right >= 0 && r.top <= innerHeight && r.left <= innerWidth) s.push('in_viewport');
     return s;
+  };
+
+  const sensitive = (el) => {
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (type === 'password') return true;
+    const hay = [type, el.name, el.id, el.getAttribute('autocomplete'), el.getAttribute('placeholder'), el.getAttribute('aria-label')].join(' ').toLowerCase();
+    return /(password|passwd|passcode|token|secret|api.?key|otp|mfa|2fa|card|credit|cvc|cvv)/.test(hay);
   };
 
   const valueOf = (el) => {
     const tag = el.tagName.toLowerCase();
     if (tag === 'input' || tag === 'textarea') {
-      const t = (el.getAttribute('type') || 'text').toLowerCase();
-      if (t === 'password') return el.value ? '***' : '';
+      if (sensitive(el)) return el.value ? '***' : '';
       return (el.value || '').slice(0, 40);
     }
     if (tag === 'select') {
@@ -135,7 +145,15 @@ pub const SNAPSHOT_JS: &str = r"(() => {
   };
 
   if (document.body) walk(document.body, 0);
-  return { title: document.title || '', nodes: out, truncated: truncated };
+  const doc = document.scrollingElement || document.documentElement;
+  return {
+    title: document.title || '',
+    nodes: out,
+    truncated: truncated,
+    scrollY: Math.round(scrollY),
+    viewportHeight: Math.round(innerHeight),
+    documentHeight: Math.round(doc ? doc.scrollHeight : 0)
+  };
 })()";
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +164,12 @@ pub struct RawSnapshot {
     pub nodes: Vec<RawNode>,
     #[serde(default)]
     pub truncated: bool,
+    #[serde(default, rename = "scrollY")]
+    pub scroll_y: i64,
+    #[serde(default, rename = "viewportHeight")]
+    pub viewport_height: i64,
+    #[serde(default, rename = "documentHeight")]
+    pub document_height: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,39 +191,120 @@ pub struct RawNode {
     pub text: Option<String>,
 }
 
-pub fn format_snapshot(url: &str, raw: &RawSnapshot, max_bytes: usize) -> String {
-    let mut out = format!("Page: {}\nURL: {url}\n\n", raw.title);
-    for node in &raw.nodes {
-        let indent = "  ".repeat(node.depth);
-        if node.role.is_empty() {
-            if let Some(text) = &node.text {
-                let _ = writeln!(out, "{indent}- text: {text}");
-            }
-            continue;
-        }
+pub struct BrowserSnapshot<'a> {
+    pub snapshot_id: &'a str,
+    pub url: &'a str,
+    pub state: &'a str,
+    pub load: &'a str,
+    pub profile: &'a str,
+    pub last_action: Option<&'a str>,
+    pub switched: bool,
+    pub raw: &'a RawSnapshot,
+}
+
+pub struct RefParts {
+    pub snapshot_id: Option<String>,
+    pub reference: String,
+}
+
+pub fn format_snapshot(snapshot: &BrowserSnapshot<'_>, max_bytes: usize) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "snapshot_id: {}", snapshot.snapshot_id);
+    let _ = writeln!(out, "url: {}", snapshot.url);
+    let _ = writeln!(out, "title: {}", snapshot.raw.title);
+    let _ = writeln!(out, "state: {}", snapshot.state);
+    let _ = writeln!(out, "load: {}", snapshot.load);
+    let _ = writeln!(out, "scroll: {}", scroll_state(snapshot.raw));
+    let _ = writeln!(out, "profile: {}", snapshot.profile);
+    if snapshot.switched {
+        out.push_str("tabs: switched_to_new_tab\n");
+    }
+    if let Some(last_action) = snapshot.last_action {
+        let _ = writeln!(out, "\nlast_action: {last_action}");
+    }
+    out.push_str("\nuntrusted_context:\n");
+    let mut context = 0usize;
+    for node in &snapshot.raw.nodes {
         if node.role == "heading" {
             let level = node.level.unwrap_or(0);
+            let indent = "  ".repeat(node.depth);
             let _ = writeln!(out, "{indent}- heading \"{}\" [level={level}]", node.name);
+            context += 1;
+        } else if node.role.is_empty()
+            && let Some(text) = &node.text
+        {
+            let indent = "  ".repeat(node.depth);
+            let _ = writeln!(out, "{indent}- text \"{text}\"");
+            context += 1;
+        }
+    }
+    if context == 0 {
+        out.push_str("- none\n");
+    }
+    out.push_str("\nactions:\n");
+    let mut actions = 0usize;
+    for node in &snapshot.raw.nodes {
+        if node.role.is_empty() || node.role == "heading" {
             continue;
         }
-        let reference = node.reference.as_deref().unwrap_or("");
+        let Some(reference) = node.reference.as_deref() else {
+            continue;
+        };
+        let indent = "  ".repeat(node.depth);
         let _ = write!(
             out,
-            "{indent}- {} \"{}\" [ref={reference}]",
-            node.role, node.name
+            "{indent}- {} \"{}\" [ref={}:{}]",
+            node.role, node.name, snapshot.snapshot_id, reference
         );
         if let Some(value) = &node.value {
             let _ = write!(out, " value=\"{value}\"");
         }
         if !node.states.is_empty() {
-            let _ = write!(out, " ({})", node.states.join(", "));
+            let _ = write!(out, " {}", node.states.join(" "));
         }
         out.push('\n');
+        actions += 1;
     }
-    if raw.truncated {
-        out.push_str("[page tree truncated at 800 nodes]\n");
+    if actions == 0 {
+        out.push_str("- none\n");
+    }
+    out.push_str("\nwarnings:\n");
+    out.push_str("- page_content_untrusted\n");
+    out.push_str("- refs_expire_after_next_snapshot\n");
+    if snapshot.raw.truncated {
+        out.push_str("- snapshot_truncated\n");
+    }
+    if snapshot.raw.nodes.iter().any(|node| {
+        node.text
+            .as_deref()
+            .is_some_and(|text| text.starts_with("[iframe:"))
+    }) {
+        out.push_str("- iframe_omitted\n");
     }
     truncate_bytes(out, max_bytes)
+}
+
+fn scroll_state(raw: &RawSnapshot) -> String {
+    if raw.document_height <= 0 || raw.viewport_height <= 0 {
+        return "unknown".to_owned();
+    }
+    let at_top = raw.scroll_y <= 8;
+    let at_bottom = raw.scroll_y + raw.viewport_height >= raw.document_height - 8;
+    let position = if at_top {
+        "top"
+    } else if at_bottom {
+        "bottom"
+    } else {
+        "middle"
+    };
+    let mut parts = vec![position];
+    if !at_top {
+        parts.push("more_above");
+    }
+    if !at_bottom {
+        parts.push("more_below");
+    }
+    parts.join(" ")
 }
 
 fn truncate_bytes(mut s: String, max_bytes: usize) -> String {
@@ -211,14 +316,35 @@ fn truncate_bytes(mut s: String, max_bytes: usize) -> String {
     s
 }
 
+pub fn parse_ref(s: &str) -> Option<RefParts> {
+    if let Some((snapshot_id, reference)) = s.split_once(':') {
+        if is_valid_snapshot_id(snapshot_id) && is_valid_ref(reference) {
+            return Some(RefParts {
+                snapshot_id: Some(snapshot_id.to_owned()),
+                reference: reference.to_owned(),
+            });
+        }
+        return None;
+    }
+    is_valid_ref(s).then(|| RefParts {
+        snapshot_id: None,
+        reference: s.to_owned(),
+    })
+}
+
 pub fn is_valid_ref(s: &str) -> bool {
     s.strip_prefix('e')
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
+fn is_valid_snapshot_id(s: &str) -> bool {
+    s.strip_prefix('s')
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RawNode, RawSnapshot, format_snapshot, is_valid_ref};
+    use super::{BrowserSnapshot, RawNode, RawSnapshot, format_snapshot, is_valid_ref, parse_ref};
 
     fn node(depth: usize, role: &str, name: &str, reference: Option<&str>) -> RawNode {
         RawNode {
@@ -233,20 +359,43 @@ mod tests {
         }
     }
 
+    fn raw(nodes: Vec<RawNode>) -> RawSnapshot {
+        RawSnapshot {
+            title: "Dashboard".to_owned(),
+            nodes,
+            truncated: false,
+            scroll_y: 0,
+            viewport_height: 100,
+            document_height: 200,
+        }
+    }
+
+    fn render(raw: &RawSnapshot) -> String {
+        format_snapshot(
+            &BrowserSnapshot {
+                snapshot_id: "s1",
+                url: "https://x.com",
+                state: "usable",
+                load: "complete",
+                profile: "persistent",
+                last_action: None,
+                switched: false,
+                raw,
+            },
+            64 * 1024,
+        )
+    }
+
     #[test]
     fn renders_header_and_elements() {
-        let raw = RawSnapshot {
-            title: "Dashboard".to_owned(),
-            nodes: vec![
-                node(0, "button", "Submit", Some("e1")),
-                node(1, "link", "Home", Some("e2")),
-            ],
-            truncated: false,
-        };
-        let out = format_snapshot("https://x.com", &raw, 64 * 1024);
-        assert!(out.starts_with("Page: Dashboard\nURL: https://x.com\n"));
-        assert!(out.contains("- button \"Submit\" [ref=e1]"));
-        assert!(out.contains("  - link \"Home\" [ref=e2]"));
+        let raw = raw(vec![
+            node(0, "button", "Submit", Some("e1")),
+            node(1, "link", "Home", Some("e2")),
+        ]);
+        let out = render(&raw);
+        assert!(out.starts_with("snapshot_id: s1\nurl: https://x.com\n"));
+        assert!(out.contains("- button \"Submit\" [ref=s1:e1]"));
+        assert!(out.contains("  - link \"Home\" [ref=s1:e2]"));
     }
 
     #[test]
@@ -255,18 +404,14 @@ mod tests {
         email.value = Some("jo@x.com".to_owned());
         let mut check = node(0, "checkbox", "Remember", Some("e2"));
         check.states = vec!["checked".to_owned(), "disabled".to_owned()];
-        let raw = RawSnapshot {
-            title: String::new(),
-            nodes: vec![email, check],
-            truncated: false,
-        };
-        let out = format_snapshot("about:blank", &raw, 64 * 1024);
-        assert!(out.contains("- textbox \"Email\" [ref=e1] value=\"jo@x.com\""));
-        assert!(out.contains("- checkbox \"Remember\" [ref=e2] (checked, disabled)"));
+        let raw = raw(vec![email, check]);
+        let out = render(&raw);
+        assert!(out.contains("- textbox \"Email\" [ref=s1:e1] value=\"jo@x.com\""));
+        assert!(out.contains("- checkbox \"Remember\" [ref=s1:e2] checked disabled"));
     }
 
     #[test]
-    fn renders_heading_and_text() {
+    fn renders_heading_and_text_as_untrusted_context() {
         let heading = RawNode {
             level: Some(1),
             ..node(0, "heading", "Welcome", None)
@@ -275,25 +420,18 @@ mod tests {
             text: Some("Body copy.".to_owned()),
             ..node(1, "", "", None)
         };
-        let raw = RawSnapshot {
-            title: "T".to_owned(),
-            nodes: vec![heading, text],
-            truncated: false,
-        };
-        let out = format_snapshot("about:blank", &raw, 64 * 1024);
-        assert!(out.contains("- heading \"Welcome\" [level=1]"));
-        assert!(out.contains("  - text: Body copy."));
+        let raw = raw(vec![heading, text]);
+        let out = render(&raw);
+        assert!(out.contains("untrusted_context:\n- heading \"Welcome\" [level=1]"));
+        assert!(out.contains("  - text \"Body copy.\""));
     }
 
     #[test]
     fn marks_truncation() {
-        let raw = RawSnapshot {
-            title: "T".to_owned(),
-            nodes: vec![node(0, "button", "Go", Some("e1"))],
-            truncated: true,
-        };
-        let out = format_snapshot("about:blank", &raw, 64 * 1024);
-        assert!(out.contains("[page tree truncated at 800 nodes]"));
+        let mut raw = raw(vec![node(0, "button", "Go", Some("e1"))]);
+        raw.truncated = true;
+        let out = render(&raw);
+        assert!(out.contains("- snapshot_truncated"));
     }
 
     #[test]
@@ -301,12 +439,20 @@ mod tests {
         let nodes = (1..=200)
             .map(|i| node(0, "button", "행동하기버튼", Some("e1")).with_name_index(i))
             .collect();
-        let raw = RawSnapshot {
-            title: "T".to_owned(),
-            nodes,
-            truncated: false,
-        };
-        let out = format_snapshot("about:blank", &raw, 256);
+        let raw = raw(nodes);
+        let out = format_snapshot(
+            &BrowserSnapshot {
+                snapshot_id: "s1",
+                url: "about:blank",
+                state: "usable",
+                load: "complete",
+                profile: "persistent",
+                last_action: None,
+                switched: false,
+                raw: &raw,
+            },
+            256,
+        );
         assert!(out.len() <= 256 + "\n[snapshot truncated]\n".len());
         assert!(out.contains("[snapshot truncated]"));
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
@@ -317,9 +463,18 @@ mod tests {
         for good in ["e1", "e12", "e007"] {
             assert!(is_valid_ref(good), "{good} should be valid");
         }
-        for bad in ["e", "1", "e1']", "", "x1", "e1 "] {
+        for bad in ["e", "1", "e1'", "", "x1", "e1 "] {
             assert!(!is_valid_ref(bad), "{bad} should be invalid");
         }
+    }
+
+    #[test]
+    fn parses_snapshot_refs() {
+        let parsed = parse_ref("s12:e7").unwrap();
+        assert_eq!(parsed.snapshot_id.as_deref(), Some("s12"));
+        assert_eq!(parsed.reference, "e7");
+        assert!(parse_ref("x12:e7").is_none());
+        assert!(parse_ref("s12:x7").is_none());
     }
 
     impl RawNode {
