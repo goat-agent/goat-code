@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, path::resolve_in_cwd};
+use goat_protocol::ToolDisplay;
+use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display};
 use serde::Deserialize;
 
 pub struct ReadTool;
@@ -33,43 +34,71 @@ impl Tool for ReadTool {
         })
     }
 
+    fn display_input(&self, input: &str) -> ToolDisplay {
+        match serde_json::from_str::<Input>(input) {
+            Ok(args) => ToolDisplay::primary(display::flatten(&args.path)),
+            Err(_) => display::generic(input),
+        }
+    }
+
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
-            let resolved = resolve_in_cwd(&ctx.cwd, &args.path)?;
+            let resolved = ctx.resolve(&args.path)?;
             if !resolved.exists() {
                 return Err(ToolError::NotFound { path: args.path });
             }
-            let bytes = tokio::fs::read(&resolved)
+            let file = tokio::fs::File::open(&resolved)
                 .await
                 .map_err(|source| ToolError::Io {
                     path: args.path.clone(),
                     source,
                 })?;
-            let text = String::from_utf8_lossy(&bytes);
+            let mut reader = tokio::io::BufReader::new(file);
 
             let start = args.offset.unwrap_or(1).max(1);
+            let max_bytes = ctx.max_output_bytes;
             let mut out = String::new();
             let mut lineno = 0usize;
             let mut emitted = 0usize;
-            for line in text.lines() {
-                lineno += 1;
-                if lineno < start {
-                    continue;
-                }
+            let mut truncated = false;
+            let mut buf = Vec::new();
+            loop {
                 if let Some(limit) = args.limit
                     && emitted >= limit
                 {
                     break;
                 }
+                buf.clear();
+                let read = tokio::io::AsyncBufReadExt::read_until(&mut reader, b'\n', &mut buf)
+                    .await
+                    .map_err(|source| ToolError::Io {
+                        path: args.path.clone(),
+                        source,
+                    })?;
+                if read == 0 {
+                    break;
+                }
+                lineno += 1;
+                if lineno < start {
+                    continue;
+                }
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end_matches(['\n', '\r']);
                 let _ = writeln!(out, "{lineno:>6}\t{line}");
                 emitted += 1;
+                if out.len() > max_bytes {
+                    truncated = true;
+                    break;
+                }
             }
 
-            let max_bytes = ctx.max_output_bytes;
             if out.len() > max_bytes {
                 let boundary = out.floor_char_boundary(max_bytes);
                 out.truncate(boundary);
+                truncated = true;
+            }
+            if truncated {
                 out.push_str("\n[output truncated]\n");
             }
             Ok(ToolOutput::text(out))
@@ -86,6 +115,22 @@ mod tests {
 
     fn ctx(dir: &std::path::Path) -> ToolContext {
         ToolContext::new(dir).unwrap()
+    }
+
+    #[test]
+    fn display_shows_path_without_range() {
+        let display = ReadTool.display_input(r#"{"path":"a.txt","offset":120,"limit":50}"#);
+        assert_eq!(display.primary, "a.txt");
+        assert_eq!(display.detail, None);
+    }
+
+    #[tokio::test]
+    async fn read_has_no_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let ctx = ctx(dir.path());
+        let out = ReadTool.run(r#"{"path":"a.txt"}"#, &ctx).await.unwrap();
+        assert_eq!(out.summary, None);
     }
 
     #[tokio::test]

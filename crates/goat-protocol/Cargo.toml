@@ -9,6 +9,10 @@ publish = false
 
 [dependencies]
 serde = { workspace = true }
+schemars = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

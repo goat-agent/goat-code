@@ -1,12 +1,19 @@
 mod app;
+mod ask;
+mod attachment;
 mod command;
 mod composer;
 mod config;
+mod files;
+mod help;
 pub mod highlight;
 mod keymap;
+pub(crate) mod layout;
 pub mod markdown;
+mod notification;
 mod overlay;
 mod picker;
+mod screenshot;
 pub mod symbols;
 mod theme;
 mod toast;
@@ -14,6 +21,7 @@ mod transcript;
 mod tui;
 pub(crate) mod usage;
 mod view;
+mod wrap;
 
 pub use app::run;
 pub use theme::Theme;

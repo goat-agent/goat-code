@@ -5,6 +5,7 @@ use goat_provider_openai_compat::ResponsesProvider;
 pub const PROVIDER_ID: &str = "openai";
 const BASE_URL: &str = "https://api.openai.com/v1";
 const ENV_VAR: &str = "OPENAI_API_KEY";
+const SEARCH_MODEL: &str = "gpt-4.1";
 
 const CATALOG: &[&str] = &[
     "gpt-5.5",
@@ -62,8 +63,10 @@ pub fn build(store: &CredentialStore, account: &str) -> ResponsesProvider {
         AuthMethod::ApiKey,
     )
     .with_model_filter(is_chat_model)
+    .with_vision_filter(goat_provider_openai_compat::known_openai_vision_model)
     .with_catalog(CATALOG)
     .with_context_windows(CONTEXT_WINDOWS)
+    .with_search_model(SEARCH_MODEL)
 }
 
 #[cfg(test)]

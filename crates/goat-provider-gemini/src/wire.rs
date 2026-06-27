@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use goat_provider::{ContentBlock, Effort, MessageRole, Request, StreamEvent, ToolDefinition};
+use goat_provider::{
+    ContentBlock, Effort, MessageRole, Request, StreamEvent, ToolDefinition, Usage,
+};
 use serde_json::{Value, json};
 
 pub fn gemini_efforts(model: &str) -> Vec<Effort> {
@@ -19,11 +21,6 @@ fn is_25(model: &str) -> bool {
 fn is_25_pro(model: &str) -> bool {
     let id = model.to_ascii_lowercase();
     id.contains("2.5") && id.contains("pro")
-}
-
-fn is_3x_pro(model: &str) -> bool {
-    let id = model.to_ascii_lowercase();
-    (id.contains("3.") || id.starts_with("gemini-3")) && id.contains("pro")
 }
 
 pub fn generation_config(model: &str, effort: Option<Effort>) -> Option<Value> {
@@ -54,20 +51,11 @@ pub fn generation_config(model: &str, effort: Option<Effort>) -> Option<Value> {
             }
         }))
     } else {
-        let level = if is_3x_pro(model) {
-            match effort {
-                Effort::Off => "minimal",
-                Effort::Low => "low",
-                Effort::Medium => "medium",
-                Effort::High | Effort::Xhigh | Effort::Max => "high",
-            }
-        } else {
-            match effort {
-                Effort::Off => "minimal",
-                Effort::Low => "low",
-                Effort::Medium => "medium",
-                Effort::High | Effort::Xhigh | Effort::Max => "high",
-            }
+        let level = match effort {
+            Effort::Off => "MINIMAL",
+            Effort::Low => "LOW",
+            Effort::Medium => "MEDIUM",
+            Effort::High | Effort::Xhigh | Effort::Max => "HIGH",
         };
         Some(json!({ "thinkingConfig": { "thinkingLevel": level } }))
     }
@@ -132,11 +120,16 @@ fn content_block_to_part(
             (None, json!({ "thought": true, "thoughtSignature": data }))
         }
         ContentBlock::ToolUse { id, name, input } => {
+            let args = if input.is_object() {
+                input.clone()
+            } else {
+                json!({})
+            };
             let fc = if is_synthetic_id(id) {
                 *synthetic_counter += 1;
-                json!({ "functionCall": { "name": name, "args": input } })
+                json!({ "functionCall": { "name": name, "args": args } })
             } else {
-                json!({ "functionCall": { "name": name, "args": input, "id": id } })
+                json!({ "functionCall": { "name": name, "args": args, "id": id } })
             };
             (None, fc)
         }
@@ -179,6 +172,7 @@ pub struct InnerRequest {
     pub contents: Vec<Value>,
     pub system_instruction: Option<Value>,
     pub tools: Option<Value>,
+    pub tool_config: Option<Value>,
     pub generation_config: Option<Value>,
 }
 
@@ -237,6 +231,8 @@ pub fn build_request(req: &Request) -> InnerRequest {
         }
     }
 
+    let contents = coalesce_user_text_contents(contents);
+
     let system_instruction = if system_parts.is_empty() {
         None
     } else {
@@ -249,27 +245,64 @@ pub fn build_request(req: &Request) -> InnerRequest {
         Some(tool_declarations(&req.tools))
     };
 
+    let tool_config = (tools.is_some()
+        && matches!(req.tool_choice, goat_provider::ToolChoice::None))
+    .then(|| json!({ "functionCallingConfig": { "mode": "NONE" } }));
+
     let gen_cfg = generation_config(&req.model, req.effort);
 
     InnerRequest {
         contents,
         system_instruction,
         tools,
+        tool_config,
         generation_config: gen_cfg,
     }
 }
 
-pub fn inner_request_to_value(inner: &InnerRequest) -> Value {
+fn is_plain_user_content(content: &Value) -> bool {
+    content.get("role").and_then(Value::as_str) == Some("user")
+        && content
+            .get("parts")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| {
+                parts
+                    .iter()
+                    .all(|part| part.get("functionResponse").is_none())
+            })
+}
+
+fn coalesce_user_text_contents(contents: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for mut content in contents {
+        if let Some(last) = out.last_mut()
+            && is_plain_user_content(last)
+            && is_plain_user_content(&content)
+            && let (Some(Value::Array(dst)), Some(Value::Array(src))) =
+                (last.get_mut("parts"), content.get_mut("parts"))
+        {
+            dst.append(src);
+            continue;
+        }
+        out.push(content);
+    }
+    out
+}
+
+pub fn inner_request_to_value(inner: InnerRequest) -> Value {
     let mut obj = serde_json::Map::new();
-    obj.insert("contents".to_owned(), Value::Array(inner.contents.clone()));
-    if let Some(si) = &inner.system_instruction {
-        obj.insert("systemInstruction".to_owned(), si.clone());
+    obj.insert("contents".to_owned(), Value::Array(inner.contents));
+    if let Some(si) = inner.system_instruction {
+        obj.insert("systemInstruction".to_owned(), si);
     }
-    if let Some(tools) = &inner.tools {
-        obj.insert("tools".to_owned(), tools.clone());
+    if let Some(tools) = inner.tools {
+        obj.insert("tools".to_owned(), tools);
     }
-    if let Some(gc) = &inner.generation_config {
-        obj.insert("generationConfig".to_owned(), gc.clone());
+    if let Some(tool_config) = inner.tool_config {
+        obj.insert("toolConfig".to_owned(), tool_config);
+    }
+    if let Some(gc) = inner.generation_config {
+        obj.insert("generationConfig".to_owned(), gc);
     }
     Value::Object(obj)
 }
@@ -355,6 +388,27 @@ pub fn extract_finish_reason(value: &Value, oauth: bool) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+pub fn parse_usage(value: &Value, oauth: bool) -> Option<Usage> {
+    let payload = if oauth {
+        value.get("response").unwrap_or(value)
+    } else {
+        value
+    };
+    let meta = payload.get("usageMetadata")?;
+    let count = |key: &str| -> u32 {
+        meta.get(key)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0)
+    };
+    Some(Usage {
+        input_tokens: count("promptTokenCount"),
+        output_tokens: count("candidatesTokenCount") + count("thoughtsTokenCount"),
+        cache_read_tokens: count("cachedContentTokenCount"),
+        cache_write_tokens: 0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use goat_provider::{ContentBlock, Effort, Message, MessageRole, Request, ToolDefinition};
@@ -362,12 +416,14 @@ mod tests {
 
     use super::{
         build_request, gemini_efforts, generation_config, inner_request_to_value, parse_chunk,
+        parse_usage,
     };
 
     fn make_request(messages: Vec<Message>) -> Request {
         Request {
             model: "gemini-2.5-flash".to_owned(),
             messages,
+            tool_choice: goat_provider::ToolChoice::Auto,
             tools: vec![],
             effort: None,
         }
@@ -382,7 +438,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         assert_eq!(v["contents"][0]["role"], "user");
         assert_eq!(v["contents"][0]["parts"][0]["text"], "hello");
     }
@@ -396,7 +452,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         assert!(v.get("systemInstruction").is_some());
         assert_eq!(v["systemInstruction"]["parts"][0]["text"], "be helpful");
         assert!(v["contents"].as_array().is_none_or(Vec::is_empty));
@@ -411,7 +467,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         assert_eq!(v["contents"][0]["role"], "model");
     }
 
@@ -425,7 +481,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let part = &v["contents"][0]["parts"][0];
         assert_eq!(part["thought"], true);
         assert_eq!(part["text"], "ponder");
@@ -442,7 +498,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let part = &v["contents"][0]["parts"][0];
         assert!(part.get("thoughtSignature").is_none());
     }
@@ -458,7 +514,7 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let fc = &v["contents"][0]["parts"][0]["functionCall"];
         assert_eq!(fc["name"], "my_tool");
         assert_eq!(fc["id"], "real-id-123");
@@ -475,10 +531,62 @@ mod tests {
             }],
         }]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let fc = &v["contents"][0]["parts"][0]["functionCall"];
         assert!(fc.get("id").is_none());
         assert_eq!(fc["name"], "my_tool");
+    }
+
+    #[test]
+    fn consecutive_user_text_contents_merge() {
+        let req = make_request(vec![
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text {
+                    text: "first".to_owned(),
+                }],
+            },
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text {
+                    text: "second".to_owned(),
+                }],
+            },
+        ]);
+        let inner = build_request(&req);
+        let v = inner_request_to_value(inner);
+        assert_eq!(v["contents"].as_array().unwrap().len(), 1);
+        assert_eq!(v["contents"][0]["role"], "user");
+        assert_eq!(v["contents"][0]["parts"][0]["text"], "first");
+        assert_eq!(v["contents"][0]["parts"][1]["text"], "second");
+    }
+
+    #[test]
+    fn function_response_content_does_not_merge() {
+        let req = make_request(vec![
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::Text {
+                    text: "run it".to_owned(),
+                }],
+            },
+            Message {
+                role: MessageRole::User,
+                content: vec![ContentBlock::text_result(
+                    "real-id-1".to_owned(),
+                    "done",
+                    false,
+                )],
+            },
+        ]);
+        let inner = build_request(&req);
+        let v = inner_request_to_value(inner);
+        assert_eq!(v["contents"].as_array().unwrap().len(), 2);
+        assert!(
+            v["contents"][1]["parts"][0]
+                .get("functionResponse")
+                .is_some()
+        );
     }
 
     #[test]
@@ -502,7 +610,7 @@ mod tests {
             },
         ]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let fr = &v["contents"][1]["parts"][0]["functionResponse"];
         assert_eq!(fr["name"], "read_file");
         assert_eq!(fr["id"], "real-id-1");
@@ -526,7 +634,7 @@ mod tests {
             },
         ]);
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let fr = &v["contents"][1]["parts"][0]["functionResponse"];
         assert!(fr.get("id").is_none());
         assert_eq!(fr["name"], "write_file");
@@ -560,14 +668,14 @@ mod tests {
     #[test]
     fn generation_config_3x_flash_uses_level() {
         let cfg = generation_config("gemini-3.5-flash", Some(Effort::Medium)).unwrap();
-        assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "medium");
+        assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "MEDIUM");
         assert!(cfg["thinkingConfig"].get("thinkingBudget").is_none());
     }
 
     #[test]
     fn generation_config_3x_off_maps_to_minimal() {
         let cfg = generation_config("gemini-3.5-flash", Some(Effort::Off)).unwrap();
-        assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "minimal");
+        assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], "MINIMAL");
     }
 
     #[test]
@@ -649,6 +757,7 @@ mod tests {
         let req = Request {
             model: "gemini-2.5-flash".to_owned(),
             messages: vec![],
+            tool_choice: goat_provider::ToolChoice::Auto,
             tools: vec![ToolDefinition {
                 name: "fn1".to_owned(),
                 description: "does fn1".to_owned(),
@@ -657,9 +766,42 @@ mod tests {
             effort: None,
         };
         let inner = build_request(&req);
-        let v = inner_request_to_value(&inner);
+        let v = inner_request_to_value(inner);
         let decl = &v["tools"][0]["functionDeclarations"][0];
         assert_eq!(decl["name"], "fn1");
         assert!(decl["parameters"].get("$schema").is_none());
+    }
+
+    #[test]
+    fn parse_usage_sums_candidates_and_thoughts() {
+        let chunk = json!({
+            "usageMetadata": {
+                "promptTokenCount": 100,
+                "candidatesTokenCount": 40,
+                "thoughtsTokenCount": 25,
+                "cachedContentTokenCount": 10
+            }
+        });
+        let usage = parse_usage(&chunk, false).expect("usage");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 65);
+        assert_eq!(usage.cache_read_tokens, 10);
+        assert_eq!(usage.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn parse_usage_oauth_unwraps_response() {
+        let chunk = json!({
+            "response": { "usageMetadata": { "promptTokenCount": 7 } }
+        });
+        let usage = parse_usage(&chunk, true).expect("usage");
+        assert_eq!(usage.input_tokens, 7);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn parse_usage_absent_returns_none() {
+        let chunk = json!({ "candidates": [] });
+        assert!(parse_usage(&chunk, false).is_none());
     }
 }

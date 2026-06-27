@@ -4,7 +4,8 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, RateLimitSnapshot, Request, StreamEvent, ToolDefinition, Usage,
+    ProviderId, RateLimitSnapshot, Request, SearchResult, StreamError, StreamEvent, ToolChoice,
+    ToolDefinition, Usage, WebSearchOutput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -26,6 +27,8 @@ struct ResponsesRequest<'a> {
     parallel_tool_calls: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    include: Vec<&'a str>,
     store: bool,
     stream: bool,
 }
@@ -63,6 +66,18 @@ fn text_item(role: &str, content_kind: &str, text: &str) -> serde_json::Value {
     })
 }
 
+fn reasoning_input_item(data: &str) -> Option<serde_json::Value> {
+    let blob = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    let id = blob.get("id")?.as_str()?;
+    let encrypted_content = blob.get("encrypted_content")?.as_str()?;
+    Some(json!({
+        "type": "reasoning",
+        "id": id,
+        "summary": [],
+        "encrypted_content": encrypted_content,
+    }))
+}
+
 fn append_message_items(
     message: &Message,
     role: &str,
@@ -87,7 +102,7 @@ fn append_message_items(
                     "type": "function_call",
                     "call_id": id,
                     "name": name,
-                    "arguments": args.to_string(),
+                    "arguments": common::tool_arguments(args),
                 }));
             }
             ContentBlock::ToolResult {
@@ -113,9 +128,30 @@ fn append_message_items(
                     "output": output,
                 }));
             }
-            ContentBlock::Image { .. }
-            | ContentBlock::Thinking { .. }
-            | ContentBlock::RedactedThinking { .. } => {}
+            ContentBlock::RedactedThinking { data } => {
+                if let Some(item) = reasoning_input_item(data) {
+                    if !text.is_empty() {
+                        input.push(text_item(role, content_kind, &text));
+                        text.clear();
+                    }
+                    input.push(item);
+                }
+            }
+            ContentBlock::Image { media_type, data } => {
+                if !text.is_empty() {
+                    input.push(text_item(role, content_kind, &text));
+                    text.clear();
+                }
+                input.push(json!({
+                    "type": "message",
+                    "role": role,
+                    "content": [{
+                        "type": "input_image",
+                        "image_url": format!("data:{media_type};base64,{data}"),
+                    }],
+                }));
+            }
+            ContentBlock::Thinking { .. } => {}
         }
     }
     if !text.is_empty() {
@@ -130,6 +166,7 @@ pub fn build_body(
     default_instructions: Option<&str>,
     store: bool,
     effort: Option<Effort>,
+    choice: ToolChoice,
 ) -> serde_json::Value {
     let mut instructions = String::new();
     let mut input: Vec<serde_json::Value> = Vec::new();
@@ -165,14 +202,25 @@ pub fn build_body(
         .collect();
     let has_tools = !tools.is_empty();
     let reasoning = effort.map(|effort| json!({ "effort": effort_wire(effort) }));
+    let include = if reasoning.is_some() {
+        vec!["reasoning.encrypted_content"]
+    } else {
+        Vec::new()
+    };
+    let tool_choice = match (has_tools, choice) {
+        (false, _) => None,
+        (true, ToolChoice::None) => Some("none"),
+        (true, ToolChoice::Auto) => Some("auto"),
+    };
     let request = ResponsesRequest {
         model,
         instructions,
         input,
         tools,
-        tool_choice: if has_tools { Some("auto") } else { None },
+        tool_choice,
         parallel_tool_calls: has_tools,
         reasoning,
+        include,
         store,
         stream: true,
     };
@@ -203,7 +251,7 @@ pub async fn run_request(
         Err(err) => {
             let _ = events
                 .send(StreamEvent::Failed {
-                    message: err.to_string(),
+                    error: common::transport(&err),
                 })
                 .await;
             return;
@@ -211,10 +259,11 @@ pub async fn run_request(
     };
     if !resp.status().is_success() {
         let status = resp.status();
+        let headers = resp.headers().clone();
         let detail = resp.text().await.unwrap_or_default();
         let _ = events
             .send(StreamEvent::Failed {
-                message: format!("{status}: {detail}"),
+                error: common::classify_http(status, &headers, &detail),
             })
             .await;
         return;
@@ -253,6 +302,14 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Str
                     }
                 }
                 "response.output_item.done" | "response.function_call_arguments.done" => {
+                    if let Some(data) = parse_reasoning_item(&event.data)
+                        && events
+                            .send(StreamEvent::RedactedThinking { data })
+                            .await
+                            .is_err()
+                    {
+                        return;
+                    }
                     if let Some(item_id) = parse_item_id(&event.data)
                         && let Some((call_id, name, input)) = tool_calls.remove(&item_id)
                         && events
@@ -276,7 +333,7 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Str
                 "response.failed" | "error" => {
                     let _ = events
                         .send(StreamEvent::Failed {
-                            message: event.data,
+                            error: common::classify_stream_error(&event.data),
                         })
                         .await;
                     return;
@@ -286,7 +343,7 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Str
             Err(err) => {
                 let _ = events
                     .send(StreamEvent::Failed {
-                        message: err.to_string(),
+                        error: goat_provider::StreamError::transport(err.to_string()),
                     })
                     .await;
                 return;
@@ -312,20 +369,12 @@ struct ResponseUsage {
     output_tokens: Option<u32>,
     #[serde(default)]
     input_tokens_details: InputTokenDetails,
-    #[serde(default)]
-    output_tokens_details: OutputTokenDetails,
 }
 
 #[derive(Default, Deserialize)]
 struct InputTokenDetails {
     #[serde(default)]
     cached_tokens: u32,
-}
-
-#[derive(Default, Deserialize)]
-struct OutputTokenDetails {
-    #[serde(default)]
-    reasoning_tokens: u32,
 }
 
 fn parse_completed_usage(data: &str) -> Option<Usage> {
@@ -335,7 +384,7 @@ fn parse_completed_usage(data: &str) -> Option<Usage> {
         input_tokens: u.input_tokens.unwrap_or(0),
         output_tokens: u.output_tokens.unwrap_or(0),
         cache_read_tokens: u.input_tokens_details.cached_tokens,
-        cache_write_tokens: u.output_tokens_details.reasoning_tokens,
+        cache_write_tokens: 0,
     })
 }
 
@@ -380,6 +429,33 @@ fn parse_function_call_item(data: &str) -> Option<FunctionCallItem> {
     })
 }
 
+fn parse_reasoning_item(data: &str) -> Option<String> {
+    let item = serde_json::from_str::<ReasoningItemEvent>(data).ok()?.item;
+    if item.kind != "reasoning" {
+        return None;
+    }
+    let encrypted_content = item.encrypted_content?;
+    serde_json::to_string(&json!({
+        "id": item.id,
+        "encrypted_content": encrypted_content,
+    }))
+    .ok()
+}
+
+#[derive(Deserialize)]
+struct ReasoningItemEvent {
+    item: ReasoningItem,
+}
+
+#[derive(Deserialize)]
+struct ReasoningItem {
+    #[serde(rename = "type")]
+    kind: String,
+    id: String,
+    #[serde(default)]
+    encrypted_content: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct ArgumentsDelta {
     item_id: String,
@@ -410,9 +486,11 @@ pub struct ResponsesProvider {
     auth: AuthMethod,
     client: reqwest::Client,
     model_filter: Option<fn(&str) -> bool>,
+    vision_filter: fn(&str) -> bool,
     catalog: &'static [&'static str],
     rate_limits_parser: Option<fn(&reqwest::header::HeaderMap) -> Option<RateLimitSnapshot>>,
     context_windows: &'static [(&'static str, u32)],
+    search_model: Option<&'static str>,
 }
 
 impl ResponsesProvider {
@@ -429,10 +507,18 @@ impl ResponsesProvider {
             auth,
             client: common::http_client(),
             model_filter: None,
+            vision_filter: crate::vision::known_openai_vision_model,
             catalog: &[],
             rate_limits_parser: None,
             context_windows: &[],
+            search_model: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_search_model(mut self, model: &'static str) -> Self {
+        self.search_model = Some(model);
+        self
     }
 
     #[must_use]
@@ -442,9 +528,20 @@ impl ResponsesProvider {
     }
 
     #[must_use]
+    pub fn with_vision_filter(mut self, filter: fn(&str) -> bool) -> Self {
+        self.vision_filter = filter;
+        self
+    }
+
+    #[must_use]
     pub fn with_catalog(mut self, catalog: &'static [&'static str]) -> Self {
         self.catalog = catalog;
         self
+    }
+
+    #[must_use]
+    pub fn supports_images(&self, model: &str) -> bool {
+        (self.vision_filter)(model)
     }
 
     #[must_use]
@@ -461,6 +558,102 @@ impl ResponsesProvider {
         self.context_windows = windows;
         self
     }
+}
+
+fn build_web_search_body(
+    model: &str,
+    instructions: Option<&str>,
+    query: &str,
+) -> serde_json::Value {
+    let mut body = json!({
+        "model": model,
+        "input": [text_item("user", "input_text", query)],
+        "tools": [{ "type": "web_search" }],
+        "tool_choice": "auto",
+    });
+    if let Some(instructions) = instructions {
+        body["instructions"] = json!(instructions);
+    }
+    body
+}
+
+pub async fn run_web_search(
+    client: &reqwest::Client,
+    url: &str,
+    bearer: Option<&str>,
+    account_id: Option<&str>,
+    model: &str,
+    instructions: Option<&str>,
+    query: &str,
+) -> Result<WebSearchOutput, StreamError> {
+    let body = build_web_search_body(model, instructions, query);
+    let mut builder = client.post(url).json(&body);
+    if let Some(token) = bearer {
+        builder = builder.bearer_auth(token);
+    }
+    if let Some(account) = account_id {
+        builder = builder.header("chatgpt-account-id", account);
+    }
+    let resp = builder
+        .send()
+        .await
+        .map_err(|err| common::transport(&err))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(common::classify_http(status, &headers, &detail));
+    }
+    let value: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|err| StreamError::other(format!("invalid search response: {err}")))?;
+    Ok(WebSearchOutput::from_results(parse_responses_citations(
+        &value,
+    )))
+}
+
+fn parse_responses_citations(value: &serde_json::Value) -> Vec<SearchResult> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let Some(output) = value.get("output").and_then(|output| output.as_array()) else {
+        return out;
+    };
+    for item in output {
+        let Some(content) = item.get("content").and_then(|content| content.as_array()) else {
+            continue;
+        };
+        for part in content {
+            let Some(annotations) = part
+                .get("annotations")
+                .and_then(|annotations| annotations.as_array())
+            else {
+                continue;
+            };
+            for annotation in annotations {
+                if annotation.get("type").and_then(|kind| kind.as_str()) != Some("url_citation") {
+                    continue;
+                }
+                let url = annotation
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                if url.is_empty() || !seen.insert(url.to_owned()) {
+                    continue;
+                }
+                out.push(SearchResult {
+                    title: annotation
+                        .get("title")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    url: url.to_owned(),
+                    snippet: String::new(),
+                });
+            }
+        }
+    }
+    out
 }
 
 impl Provider for ResponsesProvider {
@@ -485,7 +678,29 @@ impl Provider for ResponsesProvider {
         Capabilities {
             tools: true,
             auth: self.auth,
+            images: true,
         }
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        (self.vision_filter)(model)
+    }
+
+    fn supports_web_search(&self) -> bool {
+        self.search_model.is_some()
+    }
+
+    fn web_search(&self, query: String) -> JoinHandle<Result<WebSearchOutput, StreamError>> {
+        let client = self.client.clone();
+        let url = format!("{}/responses", self.base_url);
+        let bearer = self.bearer.clone();
+        let model = self.search_model;
+        tokio::spawn(async move {
+            let Some(model) = model else {
+                return Err(StreamError::other("web search is not supported"));
+            };
+            run_web_search(&client, &url, bearer.as_deref(), None, model, None, &query).await
+        })
     }
 
     fn catalog(&self) -> &'static [&'static str] {
@@ -516,6 +731,7 @@ impl Provider for ResponsesProvider {
                 None,
                 false,
                 req.effort,
+                req.tool_choice,
             );
             run_request(
                 &client,
@@ -536,6 +752,7 @@ impl Provider for ResponsesProvider {
             format!("{}/models", self.base_url),
             self.bearer.clone(),
             self.model_filter,
+            self.vision_filter,
             out,
         )
     }
@@ -544,10 +761,51 @@ impl Provider for ResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_body, parse_arguments_delta, parse_function_call_item, parse_item_id,
-        parse_output_delta,
+        build_body, build_web_search_body, parse_arguments_delta, parse_completed_usage,
+        parse_function_call_item, parse_item_id, parse_output_delta, parse_reasoning_item,
+        parse_responses_citations,
     };
     use goat_provider::{ContentBlock, Message, MessageRole, ToolDefinition};
+
+    #[test]
+    fn web_search_body_uses_list_input() {
+        let body = build_web_search_body("gpt-search", Some("base"), "find this");
+        assert_eq!(body["model"], "gpt-search");
+        assert_eq!(body["instructions"], "base");
+        assert!(body["input"].is_array());
+        assert_eq!(body["input"][0]["type"], "message");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(body["input"][0]["content"][0]["text"], "find this");
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn web_search_body_omits_empty_instructions() {
+        let body = build_web_search_body("gpt-search", None, "find this");
+        assert!(body.get("instructions").is_none());
+    }
+
+    #[test]
+    fn extracts_url_citations() {
+        let value = serde_json::json!({
+            "output": [
+                { "type": "web_search_call", "status": "completed" },
+                { "type": "message", "content": [
+                    { "type": "output_text", "text": "see sources", "annotations": [
+                        { "type": "url_citation", "url": "https://a.example", "title": "A" },
+                        { "type": "url_citation", "url": "https://a.example", "title": "A dup" },
+                        { "type": "url_citation", "url": "https://b.example", "title": "B" }
+                    ]}
+                ]}
+            ]
+        });
+        let results = parse_responses_citations(&value);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, "https://a.example");
+        assert_eq!(results[1].url, "https://b.example");
+    }
     use serde_json::json;
 
     #[test]
@@ -559,7 +817,15 @@ mod tests {
     #[test]
     fn default_instructions_used_when_no_system_message() {
         let messages = vec![Message::text(MessageRole::User, "hi")];
-        let body = build_body("gpt-5.5", &messages, &[], Some("base"), false, None);
+        let body = build_body(
+            "gpt-5.5",
+            &messages,
+            &[],
+            Some("base"),
+            false,
+            None,
+            goat_provider::ToolChoice::Auto,
+        );
         assert_eq!(body["instructions"], "base");
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
@@ -571,14 +837,30 @@ mod tests {
             Message::text(MessageRole::System, "be terse"),
             Message::text(MessageRole::User, "hi"),
         ];
-        let body = build_body("gpt-5.5", &messages, &[], Some("base"), false, None);
+        let body = build_body(
+            "gpt-5.5",
+            &messages,
+            &[],
+            Some("base"),
+            false,
+            None,
+            goat_provider::ToolChoice::Auto,
+        );
         assert_eq!(body["instructions"], "be terse");
     }
 
     #[test]
     fn instructions_omitted_when_empty_and_no_default() {
         let messages = vec![Message::text(MessageRole::User, "hi")];
-        let body = build_body("gpt-5.5", &messages, &[], None, false, None);
+        let body = build_body(
+            "gpt-5.5",
+            &messages,
+            &[],
+            None,
+            false,
+            None,
+            goat_provider::ToolChoice::Auto,
+        );
         assert!(body.get("instructions").is_none());
     }
 
@@ -590,7 +872,15 @@ mod tests {
             input_schema: json!({ "type": "object" }),
         }];
         let messages = vec![Message::text(MessageRole::User, "hi")];
-        let body = build_body("gpt-5.5", &messages, &tools, None, false, None);
+        let body = build_body(
+            "gpt-5.5",
+            &messages,
+            &tools,
+            None,
+            false,
+            None,
+            goat_provider::ToolChoice::Auto,
+        );
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "read_file");
         assert_eq!(body["tools"][0]["parameters"]["type"], "object");
@@ -610,7 +900,15 @@ mod tests {
             role: MessageRole::User,
             content: vec![ContentBlock::text_result("call_1", "file body", false)],
         };
-        let body = build_body("gpt-5.5", &[assistant, result], &[], None, false, None);
+        let body = build_body(
+            "gpt-5.5",
+            &[assistant, result],
+            &[],
+            None,
+            false,
+            None,
+            goat_provider::ToolChoice::Auto,
+        );
         assert_eq!(body["input"][0]["type"], "function_call");
         assert_eq!(body["input"][0]["call_id"], "call_1");
         assert_eq!(body["input"][0]["name"], "read_file");
@@ -623,7 +921,15 @@ mod tests {
     #[test]
     fn reasoning_included_only_when_effort_present() {
         let messages = vec![Message::text(MessageRole::User, "hi")];
-        let plain = build_body("gpt-5.5", &messages, &[], None, false, None);
+        let plain = build_body(
+            "gpt-5.5",
+            &messages,
+            &[],
+            None,
+            false,
+            None,
+            goat_provider::ToolChoice::Auto,
+        );
         assert!(plain.get("reasoning").is_none());
         let high = build_body(
             "gpt-5.5",
@@ -632,6 +938,7 @@ mod tests {
             None,
             false,
             Some(goat_provider::Effort::High),
+            goat_provider::ToolChoice::Auto,
         );
         assert_eq!(high["reasoning"]["effort"], "high");
         let off = build_body(
@@ -641,8 +948,47 @@ mod tests {
             None,
             false,
             Some(goat_provider::Effort::Off),
+            goat_provider::ToolChoice::Auto,
         );
         assert_eq!(off["reasoning"]["effort"], "none");
+        assert!(plain.get("include").is_none());
+        assert_eq!(high["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn reasoning_item_round_trips_through_input() {
+        let done =
+            r#"{"item":{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"ENC"}}"#;
+        let data = parse_reasoning_item(done).expect("reasoning item");
+        let message = Message {
+            role: MessageRole::Assistant,
+            content: vec![
+                ContentBlock::RedactedThinking { data },
+                ContentBlock::Text {
+                    text: "answer".to_owned(),
+                },
+            ],
+        };
+        let body = build_body(
+            "gpt-5.5",
+            &[message],
+            &[],
+            None,
+            false,
+            Some(goat_provider::Effort::High),
+            goat_provider::ToolChoice::Auto,
+        );
+        assert_eq!(body["input"][0]["type"], "reasoning");
+        assert_eq!(body["input"][0]["id"], "rs_1");
+        assert_eq!(body["input"][0]["encrypted_content"], "ENC");
+        assert!(body["input"][0]["summary"].is_array());
+        assert_eq!(body["input"][1]["type"], "message");
+    }
+
+    #[test]
+    fn reasoning_item_without_encrypted_content_is_ignored() {
+        let done = r#"{"item":{"type":"reasoning","id":"rs_1","summary":[]}}"#;
+        assert!(parse_reasoning_item(done).is_none());
     }
 
     #[test]
@@ -667,5 +1013,20 @@ mod tests {
         assert_eq!(parse_item_id(done).as_deref(), Some("fc_1"));
         let done_item = r#"{"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file"}}"#;
         assert_eq!(parse_item_id(done_item).as_deref(), Some("fc_1"));
+    }
+
+    #[test]
+    fn completed_usage_does_not_map_reasoning_to_cache_write() {
+        let data = r#"{"response":{"usage":{
+            "input_tokens":100,
+            "output_tokens":50,
+            "input_tokens_details":{"cached_tokens":20},
+            "output_tokens_details":{"reasoning_tokens":30}
+        }}}"#;
+        let usage = parse_completed_usage(data).expect("usage");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_read_tokens, 20);
+        assert_eq!(usage.cache_write_tokens, 0);
     }
 }

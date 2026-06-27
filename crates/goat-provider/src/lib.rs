@@ -5,6 +5,7 @@ pub use goat_auth::{TokenSet, now_secs};
 pub use goat_protocol::{AuthMethod, Effort, RateLimitSnapshot, RateWindow, Usage};
 
 use std::fmt;
+use std::fmt::Write as _;
 
 fn deser_tool_result_content<'de, D>(d: D) -> Result<Vec<ContentBlock>, D::Error>
 where
@@ -138,6 +139,16 @@ impl Message {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
+    #[serde(default)]
+    pub supports_images: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    None,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,12 +159,59 @@ pub struct Request {
     pub tools: Vec<ToolDefinition>,
     #[serde(default)]
     pub effort: Option<Effort>,
+    #[serde(default)]
+    pub tool_choice: ToolChoice,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub tools: bool,
     pub auth: AuthMethod,
+    pub images: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSearchOutput {
+    pub content: String,
+    pub results: Vec<SearchResult>,
+}
+
+impl WebSearchOutput {
+    #[must_use]
+    pub fn from_results(results: Vec<SearchResult>) -> Self {
+        Self {
+            content: format_search_results(&results),
+            results,
+        }
+    }
+}
+
+#[must_use]
+pub fn format_search_results(results: &[SearchResult]) -> String {
+    if results.is_empty() {
+        return "No results found.".to_owned();
+    }
+    let mut out = String::new();
+    for (index, result) in results.iter().enumerate() {
+        let title = if result.title.is_empty() {
+            &result.url
+        } else {
+            &result.title
+        };
+        let _ = write!(out, "{}. {title}\n   {}", index + 1, result.url);
+        if !result.snippet.is_empty() {
+            let _ = write!(out, " · {}", result.snippet);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -177,7 +235,7 @@ pub enum StreamEvent {
     },
     Completed,
     Failed {
-        message: String,
+        error: StreamError,
     },
     Usage {
         usage: Usage,
@@ -185,6 +243,75 @@ pub enum StreamEvent {
     RateLimits {
         snapshot: RateLimitSnapshot,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
+pub enum StreamError {
+    #[error("rate limited: {message}")]
+    RateLimited {
+        retry_after: Option<std::time::Duration>,
+        message: String,
+    },
+    #[error("provider overloaded: {message}")]
+    Overloaded { message: String },
+    #[error("context window exceeded: {message}")]
+    ContextOverflow { message: String },
+    #[error("authentication failed: {message}")]
+    Auth { message: String },
+    #[error("invalid request: {message}")]
+    InvalidRequest { message: String },
+    #[error("connection failed: {message}")]
+    Transport { message: String },
+    #[error("{message}")]
+    Other { message: String },
+}
+
+impl StreamError {
+    pub fn rate_limited(
+        message: impl Into<String>,
+        retry_after: Option<std::time::Duration>,
+    ) -> Self {
+        Self::RateLimited {
+            retry_after,
+            message: message.into(),
+        }
+    }
+
+    pub fn overloaded(message: impl Into<String>) -> Self {
+        Self::Overloaded {
+            message: message.into(),
+        }
+    }
+
+    pub fn context_overflow(message: impl Into<String>) -> Self {
+        Self::ContextOverflow {
+            message: message.into(),
+        }
+    }
+
+    pub fn auth(message: impl Into<String>) -> Self {
+        Self::Auth {
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            message: message.into(),
+        }
+    }
+
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::Transport {
+            message: message.into(),
+        }
+    }
+
+    pub fn other(message: impl Into<String>) -> Self {
+        Self::Other {
+            message: message.into(),
+        }
+    }
 }
 
 pub trait Provider: Send + Sync + 'static {
@@ -206,6 +333,19 @@ pub trait Provider: Send + Sync + 'static {
     }
     fn context_window(&self, _model: &str) -> Option<u32> {
         None
+    }
+
+    fn supports_images(&self, _model: &str) -> bool {
+        self.capabilities().images
+    }
+
+    fn supports_web_search(&self) -> bool {
+        false
+    }
+
+    fn web_search(&self, query: String) -> JoinHandle<Result<WebSearchOutput, StreamError>> {
+        let _ = query;
+        tokio::spawn(async { Err(StreamError::other("web search is not supported")) })
     }
 
     fn login(&self, status: mpsc::Sender<String>) -> JoinHandle<Result<TokenSet, String>> {
@@ -234,6 +374,7 @@ mod tests {
             Capabilities {
                 tools: false,
                 auth: AuthMethod::None,
+                images: false,
             }
         }
 
@@ -249,6 +390,7 @@ mod tests {
                 let _ = out
                     .send(Model {
                         id: "mock-1".into(),
+                        supports_images: false,
                     })
                     .await;
             })
@@ -267,6 +409,7 @@ mod tests {
                 messages: vec![Message::text(MessageRole::User, "hi")],
                 tools: vec![],
                 effort: None,
+                tool_choice: super::ToolChoice::Auto,
             },
             tx,
         );
@@ -292,5 +435,41 @@ mod tests {
         let info = rx.recv().await.unwrap();
         assert_eq!(info.id, "mock-1");
         handle.await.unwrap();
+    }
+
+    #[test]
+    fn content_blocks_round_trip_through_json() {
+        use super::ContentBlock;
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "hello".into(),
+            },
+            ContentBlock::Thinking {
+                text: "step one".into(),
+                signature: "sig-abc".into(),
+            },
+            ContentBlock::RedactedThinking {
+                data: "opaque".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "Read".into(),
+                input: serde_json::json!({"path": "src/lib.rs"}),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "call-1".into(),
+                content: vec![ContentBlock::Text {
+                    text: "result".into(),
+                }],
+                is_error: false,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "base64data".into(),
+            },
+        ];
+        let json = serde_json::to_string(&blocks).unwrap();
+        let restored: Vec<ContentBlock> = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, blocks);
     }
 }

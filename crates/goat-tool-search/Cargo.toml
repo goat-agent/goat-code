@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+goat-protocol = { workspace = true }
 goat-tool = { workspace = true }
 goat-config = { workspace = true }
 goat-auth = { workspace = true }
@@ -20,7 +21,6 @@ tempfile = { workspace = true }
 ignore = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
-sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

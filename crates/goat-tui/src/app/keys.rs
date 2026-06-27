@@ -1,11 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use goat_protocol::Op;
+use goat_protocol::{Op, PlanDecision};
 
-use super::{App, CLEAR_ARM_TICKS, Overlay, QUIT_ARM_TICKS};
+use super::{App, CLEAR_ARM_TICKS, Overlay, PlanFocus, QUIT_ARM_TICKS};
 use crate::{
+    ask::AskOutcome,
     config::ConfigOutcome,
     keymap,
-    picker::{AskOutcome, EffortOutcome, PickerOutcome, ThreadOutcome},
+    picker::{EffortOutcome, PickerOutcome, ThreadOutcome},
 };
 
 impl App {
@@ -18,13 +19,22 @@ impl App {
             Overlay::Config(_) => return self.on_config_key(key),
             Overlay::Agents(_) => return self.on_agent_selector_key(key),
             Overlay::Ask(_, _) => return self.on_ask_picker_key(key),
+            Overlay::Plan(_) => return self.on_plan_overlay_key(key),
             Overlay::Commands(_) => {
                 if let Some(result) = self.on_command_menu_key(key) {
                     return result;
                 }
             }
-            Overlay::Usage => return self.on_usage_key(key),
+            Overlay::Files(_) => {
+                if let Some(result) = self.on_file_menu_key(key) {
+                    return result;
+                }
+            }
+            Overlay::Usage | Overlay::Help => return self.on_usage_key(key),
             Overlay::None => {}
+        }
+        if matches!(key.code, KeyCode::BackTab) {
+            return self.plan_command(None);
         }
         if let Some(ch) = keymap::ctrl_key(&key) {
             if ch == 'c' {
@@ -60,25 +70,28 @@ impl App {
         match key.code {
             KeyCode::Tab => {
                 if let Overlay::Commands(menu) = &self.overlay
-                    && let Some(name) = menu.selected_name()
+                    && let Some(completion) = menu.selected_completion()
                 {
-                    let completed = format!("/{name} ");
-                    self.composer.clear();
-                    self.composer.insert_str(&completed);
+                    let text = self.composer.text();
+                    let completed = completion.apply(&text);
+                    self.composer.set_plain_text(&completed);
+                    self.update_command_menu();
                 }
-                self.overlay = Overlay::None;
                 Some(Vec::new())
             }
             KeyCode::Enter => {
                 if let Overlay::Commands(menu) = &self.overlay
-                    && let Some(name) = menu.selected_name()
+                    && let Some(completion) = menu.selected_command_completion()
                 {
-                    let completed = format!("/{name}");
-                    self.overlay = Overlay::None;
-                    self.composer.clear();
-                    return Some(self.dispatch_slash_command(&completed));
+                    let text = self.composer.text();
+                    let completed = completion.apply(&text);
+                    self.composer.set_plain_text(&completed);
+                    self.update_command_menu();
+                    return Some(Vec::new());
                 }
-                None
+                self.overlay = Overlay::None;
+                self.dirty = true;
+                Some(self.submit())
             }
             KeyCode::Esc => {
                 self.overlay = Overlay::None;
@@ -100,16 +113,52 @@ impl App {
         }
     }
 
+    pub(crate) fn on_file_menu_key(&mut self, key: KeyEvent) -> Option<Vec<Op>> {
+        match key.code {
+            KeyCode::Tab | KeyCode::Enter => {
+                if let Overlay::Files(menu) = &self.overlay
+                    && let Some(path) = menu.selected()
+                {
+                    self.composer.replace_at_query(&path);
+                }
+                self.overlay = Overlay::None;
+                self.dirty = true;
+                Some(Vec::new())
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                self.dirty = true;
+                Some(Vec::new())
+            }
+            KeyCode::Up => {
+                if let Overlay::Files(menu) = &mut self.overlay {
+                    menu.move_up();
+                }
+                self.dirty = true;
+                Some(Vec::new())
+            }
+            KeyCode::Down => {
+                if let Overlay::Files(menu) = &mut self.overlay {
+                    menu.move_down();
+                }
+                self.dirty = true;
+                Some(Vec::new())
+            }
+            _ => None,
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(crate) fn on_normal_key(&mut self, key: KeyEvent) -> Vec<Op> {
         match key.code {
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
+                self.scroll = self.scroll.saturating_sub(self.page_rows());
+                self.follow = false;
                 self.dirty = true;
                 Vec::new()
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10);
+                self.scroll = self.scroll.saturating_add(self.page_rows());
                 self.dirty = true;
                 Vec::new()
             }
@@ -128,8 +177,16 @@ impl App {
                 self.submit()
             }
             KeyCode::Backspace => {
-                self.composer.backspace();
-                self.update_command_menu();
+                if self.composer.is_empty() && self.composer.shell() {
+                    self.composer.exit_shell();
+                } else if self.composer.is_empty()
+                    && let Some((id, _, _)) = self.queued.last()
+                {
+                    return vec![Op::DequeueMessage { id: *id }];
+                } else {
+                    self.composer.backspace();
+                    self.update_command_menu();
+                }
                 self.dirty = true;
                 Vec::new()
             }
@@ -158,11 +215,22 @@ impl App {
                 Vec::new()
             }
             KeyCode::Home => {
-                self.dirty |= self.composer.move_home();
+                if self.composer.is_empty() {
+                    self.scroll = 0;
+                    self.follow = false;
+                    self.dirty = true;
+                } else {
+                    self.dirty |= self.composer.move_home();
+                }
                 Vec::new()
             }
             KeyCode::End => {
-                self.dirty |= self.composer.move_end();
+                if self.composer.is_empty() {
+                    self.follow = true;
+                    self.dirty = true;
+                } else {
+                    self.dirty |= self.composer.move_end();
+                }
                 Vec::new()
             }
             KeyCode::Up => {
@@ -187,13 +255,14 @@ impl App {
             }
             KeyCode::Esc => {
                 self.dirty = true;
-                if let Some(id) = self.active {
+                if let Some(id) = self.turn.active {
                     self.clear_arm = None;
                     return vec![Op::Interrupt { id }];
                 }
                 self.overlay = Overlay::None;
                 if self.composer.is_empty() {
                     self.clear_arm = None;
+                    self.composer.exit_shell();
                     return Vec::new();
                 }
                 if self.clear_arm.take().is_some() {
@@ -201,6 +270,11 @@ impl App {
                 } else {
                     self.clear_arm = Some(CLEAR_ARM_TICKS);
                 }
+                Vec::new()
+            }
+            KeyCode::Char('!') if self.composer.is_empty() && !self.composer.shell() => {
+                self.composer.enter_shell();
+                self.dirty = true;
                 Vec::new()
             }
             KeyCode::Char(c) => {
@@ -394,7 +468,7 @@ impl App {
         if let Some(ch) = keymap::ctrl_key(&key) {
             if ch == 'c' {
                 self.overlay = Overlay::None;
-                if let Some(id) = self.active {
+                if let Some(id) = self.turn.active {
                     return vec![Op::Interrupt { id }];
                 }
             }
@@ -428,7 +502,7 @@ impl App {
                 };
                 if let Some((call, answers)) = outcome {
                     self.overlay = Overlay::None;
-                    if let Some(id) = self.active {
+                    if let Some(id) = self.turn.active {
                         return vec![Op::Answer { id, call, answers }];
                     }
                 }
@@ -441,7 +515,11 @@ impl App {
             KeyCode::Enter => return self.ask_enter(),
             KeyCode::Char(c) => {
                 if let Overlay::Ask(ref mut picker, _) = self.overlay {
-                    picker.on_char(c);
+                    if c == ' ' && picker.wants_toggle() {
+                        picker.toggle();
+                    } else {
+                        picker.on_char(c);
+                    }
                 }
             }
             _ => {}
@@ -462,7 +540,7 @@ impl App {
             return Vec::new();
         }
         self.overlay = Overlay::None;
-        if let Some(id) = self.active {
+        if let Some(id) = self.turn.active {
             return vec![Op::Interrupt { id }];
         }
         Vec::new()
@@ -479,9 +557,163 @@ impl App {
         };
         if let Some((call, answers)) = submit {
             self.overlay = Overlay::None;
-            if let Some(id) = self.active {
+            if let Some(id) = self.turn.active {
                 return vec![Op::Answer { id, call, answers }];
             }
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn on_plan_overlay_key(&mut self, key: KeyEvent) -> Vec<Op> {
+        self.dirty = true;
+        if let Some(ch) = keymap::ctrl_key(&key) {
+            if ch == 'c' {
+                return self.plan_dismiss();
+            }
+            return Vec::new();
+        }
+        let in_feedback = matches!(&self.overlay, Overlay::Plan(p) if p.feedback.is_some());
+        if in_feedback {
+            match key.code {
+                KeyCode::Esc => {
+                    if let Overlay::Plan(ref mut plan) = self.overlay {
+                        plan.feedback = None;
+                    }
+                }
+                KeyCode::Enter => {
+                    let feedback = if let Overlay::Plan(ref plan) = self.overlay {
+                        plan.feedback.clone()
+                    } else {
+                        None
+                    };
+                    if let Some(feedback) = feedback {
+                        return self.plan_reject(feedback);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Overlay::Plan(ref mut plan) = self.overlay
+                        && let Some(feedback) = plan.feedback.as_mut()
+                    {
+                        feedback.pop();
+                    }
+                }
+                KeyCode::PageUp => self.plan_scroll_up(10),
+                KeyCode::PageDown => self.plan_scroll_down(10),
+                KeyCode::Char(c) => {
+                    if let Overlay::Plan(ref mut plan) = self.overlay
+                        && let Some(feedback) = plan.feedback.as_mut()
+                    {
+                        feedback.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Esc => return self.plan_dismiss(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Overlay::Plan(ref mut plan) = self.overlay {
+                    plan.focus = PlanFocus::Approve;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Overlay::Plan(ref mut plan) = self.overlay {
+                    plan.focus = PlanFocus::Reject;
+                }
+            }
+            KeyCode::PageUp => self.plan_scroll_up(10),
+            KeyCode::PageDown => self.plan_scroll_down(10),
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                if let Overlay::Plan(ref mut plan) = self.overlay {
+                    plan.focus = match plan.focus {
+                        PlanFocus::Approve => PlanFocus::Reject,
+                        PlanFocus::Reject => PlanFocus::Approve,
+                    };
+                }
+            }
+            KeyCode::Char('a') => return self.plan_approve(),
+            KeyCode::Char('r') => {
+                if let Overlay::Plan(ref mut plan) = self.overlay {
+                    plan.feedback = Some(String::new());
+                }
+            }
+            KeyCode::Enter => {
+                let focus = if let Overlay::Plan(ref plan) = self.overlay {
+                    Some(plan.focus)
+                } else {
+                    None
+                };
+                match focus {
+                    Some(PlanFocus::Approve) => return self.plan_approve(),
+                    Some(PlanFocus::Reject) => {
+                        if let Overlay::Plan(ref mut plan) = self.overlay {
+                            plan.feedback = Some(String::new());
+                        }
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn plan_scroll_up(&mut self, lines: u16) {
+        if let Overlay::Plan(ref mut plan) = self.overlay {
+            plan.scroll = plan.scroll.saturating_sub(lines);
+        }
+    }
+
+    fn plan_scroll_down(&mut self, lines: u16) {
+        if let Overlay::Plan(ref mut plan) = self.overlay {
+            plan.scroll = plan.scroll.saturating_add(lines);
+        }
+    }
+
+    fn plan_approve(&mut self) -> Vec<Op> {
+        let ids = if let Overlay::Plan(ref plan) = self.overlay {
+            Some((plan.id, plan.call))
+        } else {
+            None
+        };
+        if let Some((id, call)) = ids {
+            self.overlay = Overlay::None;
+            return vec![Op::ResolvePlan {
+                id,
+                call,
+                decision: PlanDecision::Approve {},
+            }];
+        }
+        Vec::new()
+    }
+
+    fn plan_reject(&mut self, feedback: String) -> Vec<Op> {
+        let ids = if let Overlay::Plan(ref plan) = self.overlay {
+            Some((plan.id, plan.call))
+        } else {
+            None
+        };
+        if let Some((id, call)) = ids {
+            self.overlay = Overlay::None;
+            return vec![Op::ResolvePlan {
+                id,
+                call,
+                decision: PlanDecision::Reject { feedback },
+            }];
+        }
+        Vec::new()
+    }
+
+    fn plan_dismiss(&mut self) -> Vec<Op> {
+        let id = if let Overlay::Plan(ref plan) = self.overlay {
+            Some(plan.id)
+        } else {
+            None
+        };
+        self.overlay = Overlay::None;
+        if let Some(id) = id {
+            return vec![Op::Interrupt { id }];
         }
         Vec::new()
     }
@@ -489,10 +721,15 @@ impl App {
     pub(crate) fn on_ctrl_c(&mut self) -> Vec<Op> {
         self.dirty = true;
         self.clear_arm = None;
+        if self.turn.active_shell
+            && let Some(id) = self.turn.active
+        {
+            return vec![Op::Interrupt { id }];
+        }
         if self.quit_arm.is_some() {
             self.should_quit = true;
         } else {
-            self.composer.clear();
+            self.composer.discard();
             self.quit_arm = Some(QUIT_ARM_TICKS);
         }
         Vec::new()
@@ -514,11 +751,12 @@ impl App {
                 }
             }
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
+                self.scroll = self.scroll.saturating_sub(self.page_rows());
+                self.follow = false;
                 self.dirty = true;
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10);
+                self.scroll = self.scroll.saturating_add(self.page_rows());
                 self.dirty = true;
             }
             _ => {}
@@ -530,6 +768,22 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                 self.overlay = Overlay::None;
+                self.dirty = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.usage.scroll = self.usage.scroll.saturating_sub(1);
+                self.dirty = true;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.usage.scroll = self.usage.scroll.saturating_add(1);
+                self.dirty = true;
+            }
+            KeyCode::PageUp => {
+                self.usage.scroll = self.usage.scroll.saturating_sub(8);
+                self.dirty = true;
+            }
+            KeyCode::PageDown => {
+                self.usage.scroll = self.usage.scroll.saturating_add(8);
                 self.dirty = true;
             }
             _ => {}

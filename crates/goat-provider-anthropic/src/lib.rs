@@ -1,48 +1,62 @@
 use std::collections::HashMap;
 
 use eventsource_stream::Eventsource;
+mod auth;
+mod error;
 use futures::StreamExt;
-use goat_auth::{
-    Credential, CredentialKey, CredentialStore, Pkce, TokenSet, ensure_valid, random_state,
-};
+use goat_auth::{CredentialKey, CredentialStore, TokenSet};
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, RateLimitSnapshot, RateWindow, Request, StreamEvent, Usage,
+    ProviderId, RateLimitSnapshot, RateWindow, Request, SearchResult, StreamError, StreamEvent,
+    Usage, WebSearchOutput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle};
 
+pub use auth::AnthropicAuthError;
+use auth::{Auth, current_auth, do_login};
+
 pub const PROVIDER_ID: &str = "anthropic";
 const BASE_URL: &str = "https://api.anthropic.com/v1";
-const ENV_VAR: &str = "ANTHROPIC_API_KEY";
+pub(crate) const ENV_VAR: &str = "ANTHROPIC_API_KEY";
 const VERSION: &str = "2023-06-01";
+const WEB_SEARCH_MODEL: &str = "claude-haiku-4-5-20251001";
 const MAX_TOKENS: u32 = 16384;
 
-const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const OAUTH_AUTHORIZE: &str = "https://claude.ai/oauth/authorize";
-const OAUTH_TOKEN: &str = "https://platform.claude.com/v1/oauth/token";
-const OAUTH_SCOPE: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+pub(crate) const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+pub(crate) const OAUTH_AUTHORIZE: &str = "https://claude.ai/oauth/authorize";
+pub(crate) const OAUTH_TOKEN: &str = "https://platform.claude.com/v1/oauth/token";
+pub(crate) const OAUTH_SCOPE: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const OAUTH_BETA: &str = "oauth-2025-04-20,claude-code-20250219";
 const OAUTH_USER_AGENT: &str = "claude-cli/2.1.119 (external, cli)";
-const OAUTH_TOKEN_UA: &str = "axios/1.13.6";
+pub(crate) const OAUTH_TOKEN_UA: &str = "axios/1.13.6";
 const CLAUDE_CODE_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
-#[derive(Debug, thiserror::Error)]
-pub enum AnthropicAuthError {
-    #[error("http error: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("url error: {0}")]
-    Url(String),
-    #[error("token error: {0}")]
-    Token(String),
-    #[error("auth error: {0}")]
-    Auth(#[from] goat_auth::AuthError),
+fn anthropic_context_window(model: &str) -> u32 {
+    let id = model.to_ascii_lowercase();
+    if id.contains("fable")
+        || id.contains("opus-4-8")
+        || id.contains("opus-4-7")
+        || id.contains("opus-4-6")
+        || id.contains("sonnet-4-6")
+    {
+        1_000_000
+    } else {
+        200_000
+    }
 }
 
-const ANTHROPIC_CONTEXT_WINDOW: u32 = 200_000;
+fn anthropic_supports_images(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    id.starts_with("claude-")
+        && !id.contains("text")
+        && !id.contains("embedding")
+        && !id.contains("search")
+}
 
 const CATALOG: &[&str] = &[
+    "claude-fable-5",
     "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-haiku-4-5-20251001",
@@ -80,136 +94,6 @@ pub fn build(store: &CredentialStore, account: &str) -> AnthropicProvider {
     AnthropicProvider::new(store.clone(), key)
 }
 
-enum Auth {
-    ApiKey(String),
-    OAuth(String),
-}
-
-fn authorize_url(
-    challenge: &str,
-    state: &str,
-    redirect_uri: &str,
-) -> Result<String, AnthropicAuthError> {
-    reqwest::Url::parse_with_params(
-        OAUTH_AUTHORIZE,
-        &[
-            ("code", "true"),
-            ("client_id", OAUTH_CLIENT_ID),
-            ("response_type", "code"),
-            ("redirect_uri", redirect_uri),
-            ("scope", OAUTH_SCOPE),
-            ("code_challenge", challenge),
-            ("code_challenge_method", "S256"),
-            ("state", state),
-        ],
-    )
-    .map(|url| url.to_string())
-    .map_err(|err| AnthropicAuthError::Url(err.to_string()))
-}
-
-async fn do_login(status: &mpsc::Sender<String>) -> Result<TokenSet, AnthropicAuthError> {
-    let pkce = Pkce::generate();
-    let state = random_state();
-    let (listener, port) = goat_auth::bind_loopback().await?;
-    let redirect = format!("http://localhost:{port}/callback");
-    let url = authorize_url(&pkce.challenge, &state, &redirect)?;
-    let _ = status
-        .send(format!(
-            "opening browser to sign in\u{2026} if it does not open, visit:\n{url}"
-        ))
-        .await;
-    let _ = open::that(&url);
-    let code = goat_auth::capture_on(listener, &state).await?;
-    exchange_code(&code, &pkce.verifier, &state, &redirect).await
-}
-
-fn auth_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .expect("reqwest client")
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: Option<i64>,
-}
-
-async fn exchange_code(
-    code: &str,
-    verifier: &str,
-    state: &str,
-    redirect_uri: &str,
-) -> Result<TokenSet, AnthropicAuthError> {
-    let response = auth_client()
-        .post(OAUTH_TOKEN)
-        .header("Accept", "application/json, text/plain, */*")
-        .header("User-Agent", OAUTH_TOKEN_UA)
-        .json(&json!({
-            "grant_type": "authorization_code",
-            "code": code,
-            "state": state,
-            "client_id": OAUTH_CLIENT_ID,
-            "redirect_uri": redirect_uri,
-            "code_verifier": verifier,
-        }))
-        .send()
-        .await?;
-    parse_token_response(response)
-        .await
-        .map(|t| TokenSet::from_parts(t.access_token, t.refresh_token, t.expires_in, None))
-}
-
-async fn do_refresh(refresh_token: String) -> Result<TokenSet, String> {
-    let response = auth_client()
-        .post(OAUTH_TOKEN)
-        .header("Accept", "application/json, text/plain, */*")
-        .header("User-Agent", OAUTH_TOKEN_UA)
-        .json(&json!({
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": OAUTH_CLIENT_ID,
-        }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    parse_token_response(response)
-        .await
-        .map(|t| {
-            TokenSet::from_parts(
-                t.access_token,
-                t.refresh_token,
-                t.expires_in,
-                Some(&refresh_token),
-            )
-        })
-        .map_err(|e| e.to_string())
-}
-
-async fn parse_token_response(
-    response: reqwest::Response,
-) -> Result<TokenResponse, AnthropicAuthError> {
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(AnthropicAuthError::Token(format!("{status}: {body}")));
-    }
-    response.json().await.map_err(AnthropicAuthError::Http)
-}
-
-async fn current_auth(store: &CredentialStore, key: &CredentialKey) -> Option<Auth> {
-    match store.resolve(key, Some(ENV_VAR))? {
-        Credential::ApiKey(secret) => Some(Auth::ApiKey(secret.expose().to_owned())),
-        Credential::OAuth(tokens) => {
-            let tokens = ensure_valid(tokens, store, key, do_refresh).await?;
-            Some(Auth::OAuth(tokens.access_token.expose().to_owned()))
-        }
-    }
-}
-
 fn build_system(system: &str, oauth: bool) -> Option<serde_json::Value> {
     if oauth {
         let mut blocks = vec![json!({ "type": "text", "text": CLAUDE_CODE_SYSTEM })];
@@ -220,7 +104,64 @@ fn build_system(system: &str, oauth: bool) -> Option<serde_json::Value> {
     } else if system.is_empty() {
         None
     } else {
-        Some(serde_json::Value::String(system.to_owned()))
+        Some(serde_json::Value::Array(vec![json!({
+            "type": "text",
+            "text": system,
+        })]))
+    }
+}
+
+fn cache_marker() -> serde_json::Value {
+    json!({ "type": "ephemeral" })
+}
+
+fn mark_last_cacheable_block(message: &mut serde_json::Value) -> bool {
+    let Some(blocks) = message
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    for block in blocks.iter_mut().rev() {
+        let kind = block
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if kind == "thinking" || kind == "redacted_thinking" {
+            continue;
+        }
+        if let Some(object) = block.as_object_mut() {
+            object.insert("cache_control".to_owned(), cache_marker());
+            return true;
+        }
+    }
+    false
+}
+
+fn apply_cache_control(
+    system: &mut Option<serde_json::Value>,
+    messages: &mut [serde_json::Value],
+    tools: &mut [serde_json::Value],
+) {
+    if let Some(tool) = tools.last_mut()
+        && let Some(object) = tool.as_object_mut()
+    {
+        object.insert("cache_control".to_owned(), cache_marker());
+    }
+    if let Some(serde_json::Value::Array(blocks)) = system
+        && let Some(last) = blocks.last_mut()
+        && let Some(object) = last.as_object_mut()
+    {
+        object.insert("cache_control".to_owned(), cache_marker());
+    }
+    let mut marked = 0;
+    for message in messages.iter_mut().rev() {
+        if marked == 2 {
+            break;
+        }
+        if mark_last_cacheable_block(message) {
+            marked += 1;
+        }
     }
 }
 
@@ -235,6 +176,8 @@ struct MessagesRequest<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<serde_json::Value>,
@@ -248,7 +191,8 @@ struct ThinkingConfig {
 
 fn uses_effort_param(model: &str) -> bool {
     let id = model.to_ascii_lowercase();
-    id.contains("opus-4-8")
+    id.contains("fable")
+        || id.contains("opus-4-8")
         || id.contains("opus-4-7")
         || id.contains("opus-4-6")
         || id.contains("sonnet-4-6")
@@ -293,23 +237,65 @@ fn thinking_config(model: &str, effort: Option<Effort>) -> ThinkingConfig {
     }
 }
 
+const UNIFIED_PREFIX: &str = "anthropic-ratelimit-unified-";
+const UNIFIED_SUFFIX: &str = "-utilization";
+
+fn unified_label(period: &str) -> String {
+    match period {
+        "5h" => "5h".to_owned(),
+        "7d" => "weekly".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn representative_period(claim: &str) -> String {
+    match claim {
+        "five_hour" => "5h".to_owned(),
+        "seven_day" => "7d".to_owned(),
+        other => other.replace('_', ""),
+    }
+}
+
 fn parse_anthropic_unified_ratelimits(
     headers: &reqwest::header::HeaderMap,
 ) -> Option<RateLimitSnapshot> {
-    let mut windows = Vec::new();
-
-    if let Some(window) = parse_unified_window(headers, "5h", "5h") {
-        windows.push(window);
+    let mut periods: Vec<String> = Vec::new();
+    for name in headers.keys() {
+        let key = name.as_str();
+        if let Some(rest) = key.strip_prefix(UNIFIED_PREFIX)
+            && let Some(period) = rest.strip_suffix(UNIFIED_SUFFIX)
+            && !period.is_empty()
+            && !periods.iter().any(|p| p == period)
+        {
+            periods.push(period.to_owned());
+        }
     }
-    if let Some(window) = parse_unified_window(headers, "7d", "weekly") {
-        windows.push(window);
+    periods.sort_by_key(|p| match p.as_str() {
+        "5h" => 0,
+        "7d" => 1,
+        _ => 2,
+    });
+
+    let mut windows = Vec::new();
+    for period in &periods {
+        if let Some(window) = parse_unified_window(headers, period, &unified_label(period)) {
+            windows.push(window);
+        }
     }
 
     if windows.is_empty() {
-        None
-    } else {
-        Some(RateLimitSnapshot { windows })
+        return None;
     }
+
+    let representative = headers
+        .get("anthropic-ratelimit-unified-representative-claim")
+        .and_then(|v| v.to_str().ok())
+        .map(|claim| unified_label(&representative_period(claim)));
+
+    Some(RateLimitSnapshot {
+        windows,
+        representative,
+    })
 }
 
 fn parse_unified_window(
@@ -376,7 +362,7 @@ fn gregorian_to_unix(year: i64, month: i64, day: i64, h: i64, m: i64, s: i64) ->
 
 fn anthropic_efforts(model: &str) -> Vec<Effort> {
     let id = model.to_ascii_lowercase();
-    if id.contains("opus-4-8") || id.contains("opus-4-7") {
+    if id.contains("fable") || id.contains("opus-4-8") || id.contains("opus-4-7") {
         vec![
             Effort::Low,
             Effort::Medium,
@@ -413,7 +399,7 @@ fn content_block_json(block: &ContentBlock) -> serde_json::Value {
             "type": "tool_use",
             "id": id,
             "name": name,
-            "input": input,
+            "input": if input.is_object() { input.clone() } else { json!({}) },
         }),
         ContentBlock::ToolResult {
             tool_use_id,
@@ -680,7 +666,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
                 "error" => {
                     let _ = events
                         .send(StreamEvent::Failed {
-                            message: event.data,
+                            error: error::classify_sse_error(&event.data),
                         })
                         .await;
                     return;
@@ -690,7 +676,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
             Err(err) => {
                 let _ = events
                     .send(StreamEvent::Failed {
-                        message: err.to_string(),
+                        error: goat_provider::StreamError::transport(err.to_string()),
                     })
                     .await;
                 return;
@@ -698,6 +684,47 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
         }
     }
     let _ = events.send(StreamEvent::Completed).await;
+}
+
+fn parse_web_search_results(value: &serde_json::Value) -> Vec<SearchResult> {
+    let mut out = Vec::new();
+    let Some(content) = value.get("content").and_then(|content| content.as_array()) else {
+        return out;
+    };
+    for block in content {
+        if block.get("type").and_then(|kind| kind.as_str()) != Some("web_search_tool_result") {
+            continue;
+        }
+        let Some(results) = block.get("content").and_then(|content| content.as_array()) else {
+            continue;
+        };
+        for result in results {
+            if result.get("type").and_then(|kind| kind.as_str()) != Some("web_search_result") {
+                continue;
+            }
+            let url = result
+                .get("url")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if url.is_empty() {
+                continue;
+            }
+            out.push(SearchResult {
+                title: result
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                url: url.to_owned(),
+                snippet: result
+                    .get("page_age")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+            });
+        }
+    }
+    out
 }
 
 impl Provider for AnthropicProvider {
@@ -709,7 +736,60 @@ impl Provider for AnthropicProvider {
         Capabilities {
             tools: true,
             auth: AuthMethod::ApiKeyOrOAuth,
+            images: true,
         }
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        anthropic_supports_images(model)
+    }
+
+    fn supports_web_search(&self) -> bool {
+        true
+    }
+
+    fn web_search(&self, query: String) -> JoinHandle<Result<WebSearchOutput, StreamError>> {
+        let client = self.client.clone();
+        let url = format!("{}/messages", self.base_url);
+        let store = self.store.clone();
+        let key = self.key.clone();
+        tokio::spawn(async move {
+            let Some(auth) = current_auth(&store, &key).await else {
+                return Err(StreamError::auth("not logged in to anthropic"));
+            };
+            let body = json!({
+                "model": WEB_SEARCH_MODEL,
+                "max_tokens": 1024,
+                "messages": [{ "role": "user", "content": query }],
+                "tools": [{ "type": "web_search_20250305", "name": "web_search", "max_uses": 5 }],
+            });
+            let builder = client
+                .post(&url)
+                .header("anthropic-version", VERSION)
+                .json(&body);
+            let builder = match &auth {
+                Auth::ApiKey(api_key) => builder.header("x-api-key", api_key),
+                Auth::OAuth(access) => builder
+                    .bearer_auth(access)
+                    .header("anthropic-beta", OAUTH_BETA)
+                    .header("user-agent", OAUTH_USER_AGENT)
+                    .header("x-app", "cli"),
+            };
+            let resp = builder.send().await.map_err(|err| error::transport(&err))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let headers = resp.headers().clone();
+                let detail = resp.text().await.unwrap_or_default();
+                return Err(error::classify_http(status, &headers, &detail));
+            }
+            let value: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|err| StreamError::other(format!("invalid search response: {err}")))?;
+            Ok(WebSearchOutput::from_results(parse_web_search_results(
+                &value,
+            )))
+        })
     }
 
     fn stream(&self, req: Request, tx: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
@@ -721,21 +801,25 @@ impl Provider for AnthropicProvider {
             let Some(auth) = current_auth(&store, &key).await else {
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: "not logged in to anthropic".to_owned(),
+                        error: goat_provider::StreamError::auth("not logged in to anthropic"),
                     })
                     .await;
                 return;
             };
-            let (system, messages, tools) = split_request(&req);
+            let (system, mut messages, mut tools) = split_request(&req);
             let cfg = thinking_config(&req.model, req.effort);
             let oauth = matches!(auth, Auth::OAuth(_));
+            let mut system_value = build_system(&system, oauth);
+            apply_cache_control(&mut system_value, &mut messages, &mut tools);
             let body = MessagesRequest {
                 model: &req.model,
                 max_tokens: cfg.max_tokens,
                 stream: true,
-                system: build_system(&system, oauth),
+                system: system_value,
                 messages,
                 tools,
+                tool_choice: matches!(req.tool_choice, goat_provider::ToolChoice::None)
+                    .then(|| json!({ "type": "none" })),
                 thinking: cfg.thinking,
                 output_config: cfg.output_config,
             };
@@ -756,7 +840,7 @@ impl Provider for AnthropicProvider {
                 Err(err) => {
                     let _ = tx
                         .send(StreamEvent::Failed {
-                            message: err.to_string(),
+                            error: error::transport(&err),
                         })
                         .await;
                     return;
@@ -764,10 +848,11 @@ impl Provider for AnthropicProvider {
             };
             if !resp.status().is_success() {
                 let status = resp.status();
+                let headers = resp.headers().clone();
                 let detail = resp.text().await.unwrap_or_default();
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: format!("{status}: {detail}"),
+                        error: error::classify_http(status, &headers, &detail),
                     })
                     .await;
                 return;
@@ -818,8 +903,8 @@ impl Provider for AnthropicProvider {
         })
     }
 
-    fn context_window(&self, _model: &str) -> Option<u32> {
-        Some(ANTHROPIC_CONTEXT_WINDOW)
+    fn context_window(&self, model: &str) -> Option<u32> {
+        Some(anthropic_context_window(model))
     }
 
     fn catalog(&self) -> &'static [&'static str] {
@@ -842,7 +927,14 @@ impl Provider for AnthropicProvider {
             let api_key = match auth {
                 Auth::OAuth(_) => {
                     for &id in CATALOG {
-                        if out.send(Model { id: id.to_owned() }).await.is_err() {
+                        if out
+                            .send(Model {
+                                id: id.to_owned(),
+                                supports_images: anthropic_supports_images(id),
+                            })
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -863,7 +955,15 @@ impl Provider for AnthropicProvider {
                 return;
             };
             for model in models.data {
-                if out.send(Model { id: model.id }).await.is_err() {
+                let supports_images = anthropic_supports_images(&model.id);
+                if out
+                    .send(Model {
+                        id: model.id,
+                        supports_images,
+                    })
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -879,7 +979,98 @@ impl Provider for AnthropicProvider {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{event_index, parse_input_json_delta, parse_text_delta};
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+    use super::{
+        event_index, parse_anthropic_unified_ratelimits, parse_input_json_delta, parse_text_delta,
+        parse_web_search_results,
+    };
+
+    fn headers_from(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (k, v) in pairs {
+            map.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn unified_scan_reads_5h_and_weekly_decimal() {
+        let h = headers_from(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.018"),
+            ("anthropic-ratelimit-unified-5h-reset", "1764554400"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.737"),
+            ("anthropic-ratelimit-unified-7d-reset", "1764615600"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "five_hour",
+            ),
+        ]);
+        let snap = parse_anthropic_unified_ratelimits(&h).expect("snapshot");
+        assert_eq!(snap.windows.len(), 2);
+        assert_eq!(snap.windows[0].label, "5h");
+        assert_eq!(snap.windows[1].label, "weekly");
+        assert!((snap.windows[1].used_percent - 73.7).abs() < 0.1);
+        assert_eq!(snap.representative.as_deref(), Some("5h"));
+    }
+
+    #[test]
+    fn unified_scan_accepts_percent_encoding() {
+        let h = headers_from(&[("anthropic-ratelimit-unified-5h-utilization", "42%")]);
+        let snap = parse_anthropic_unified_ratelimits(&h).expect("snapshot");
+        assert!((snap.windows[0].used_percent - 42.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn unified_scan_surfaces_unknown_period() {
+        let h = headers_from(&[("anthropic-ratelimit-unified-30d-utilization", "0.5")]);
+        let snap = parse_anthropic_unified_ratelimits(&h).expect("snapshot");
+        assert_eq!(snap.windows.len(), 1);
+        assert_eq!(snap.windows[0].label, "30d");
+    }
+
+    #[test]
+    fn unified_scan_ignores_non_period_headers() {
+        let h = headers_from(&[
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-fallback-percentage", "0.2"),
+        ]);
+        assert!(parse_anthropic_unified_ratelimits(&h).is_none());
+    }
+
+    #[test]
+    fn extracts_web_search_results() {
+        let value = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "here are results" },
+                { "type": "web_search_tool_result", "content": [
+                    { "type": "web_search_result", "url": "https://a.example", "title": "A", "page_age": "today" },
+                    { "type": "web_search_result", "url": "https://b.example", "title": "B" }
+                ]}
+            ]
+        });
+        let results = parse_web_search_results(&value);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, "https://a.example");
+        assert_eq!(results[0].title, "A");
+        assert_eq!(results[0].snippet, "today");
+        assert_eq!(results[1].url, "https://b.example");
+    }
+
+    #[test]
+    fn ignores_search_errors() {
+        let value = serde_json::json!({
+            "content": [
+                { "type": "web_search_tool_result", "content": {
+                    "type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"
+                }}
+            ]
+        });
+        assert!(parse_web_search_results(&value).is_empty());
+    }
 
     #[test]
     fn parses_text_delta() {
@@ -889,7 +1080,8 @@ mod tests {
 
     #[test]
     fn authorize_url_carries_pkce_and_scope() {
-        let url = super::authorize_url("CHAL", "STATE", "http://localhost:1234/callback").unwrap();
+        let url =
+            crate::auth::authorize_url("CHAL", "STATE", "http://localhost:1234/callback").unwrap();
         assert!(url.contains("client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e"));
         assert!(url.contains("code_challenge=CHAL"));
         assert!(url.contains("code_challenge_method=S256"));
@@ -907,8 +1099,40 @@ mod tests {
         assert_eq!(blocks[0]["text"], super::CLAUDE_CODE_SYSTEM);
         assert_eq!(blocks[1]["text"], "be helpful");
         let plain = super::build_system("be helpful", false).unwrap();
-        assert_eq!(plain, serde_json::Value::String("be helpful".to_owned()));
+        assert_eq!(plain[0]["text"], "be helpful");
         assert!(super::build_system("", false).is_none());
+    }
+
+    #[test]
+    fn cache_control_marks_tools_system_and_last_two_messages() {
+        let mut system = super::build_system("be helpful", false);
+        let mut tools = vec![
+            serde_json::json!({ "name": "Read" }),
+            serde_json::json!({ "name": "Bash" }),
+        ];
+        let mut messages = vec![
+            serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "one" }] }),
+            serde_json::json!({ "role": "assistant", "content": [
+                { "type": "text", "text": "two" },
+                { "type": "thinking", "thinking": "t", "signature": "s" },
+            ] }),
+            serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "three" }] }),
+        ];
+        super::apply_cache_control(&mut system, &mut messages, &mut tools);
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+        let system = system.unwrap();
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        assert_eq!(
+            messages[1]["content"][0]["cache_control"]["type"], "ephemeral",
+            "thinking blocks must be skipped when marking"
+        );
+        assert!(messages[1]["content"][1].get("cache_control").is_none());
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
@@ -984,6 +1208,19 @@ mod tests {
         let cfg = super::thinking_config("claude-opus-4-8", Some(Effort::High));
         assert_eq!(cfg.thinking.unwrap()["type"], "adaptive");
         assert_eq!(cfg.output_config.unwrap()["effort"], "high");
+    }
+
+    #[test]
+    fn fable_uses_output_config_with_xhigh() {
+        use goat_provider::Effort;
+        let cfg = super::thinking_config("claude-fable-5", Some(Effort::Xhigh));
+        assert_eq!(cfg.thinking.unwrap()["type"], "adaptive");
+        assert_eq!(cfg.output_config.unwrap()["effort"], "xhigh");
+        assert_eq!(super::anthropic_context_window("claude-fable-5"), 1_000_000);
+        assert!(super::anthropic_efforts("claude-fable-5").contains(&Effort::Xhigh));
+        let off = super::thinking_config("claude-fable-5", Some(Effort::Off));
+        assert!(off.thinking.is_none());
+        assert!(off.output_config.is_none());
     }
 
     #[test]

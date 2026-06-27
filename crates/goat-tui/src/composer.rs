@@ -1,23 +1,34 @@
+use goat_protocol::InputAttachment;
 use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, BorderType, Paragraph, Wrap},
+    widgets::{Block, BorderType, Padding, Paragraph},
 };
 use unicode_normalization::UnicodeNormalization;
 use unicode_width::UnicodeWidthChar;
 
-use crate::theme::Theme;
+use crate::{symbols, theme::Theme, wrap};
 
-const PROMPT_COLS: u16 = 2;
+const BORDER_COLS: u16 = 4;
 const PLACEHOLDER: &str = "Ask anything…";
+const SHELL_PLACEHOLDER: &str = "Run a shell command…";
+
+#[derive(Clone)]
+enum HistEntry {
+    Text(String),
+    Shell(String),
+}
 
 pub struct Composer {
     lines: Vec<Vec<char>>,
     row: usize,
     col: usize,
-    history: Vec<String>,
+    attachments: Vec<InputAttachment>,
+    shell: bool,
+    history: Vec<HistEntry>,
     hist_cursor: Option<usize>,
+    draft: Option<HistEntry>,
 }
 
 impl Default for Composer {
@@ -26,8 +37,11 @@ impl Default for Composer {
             lines: vec![Vec::new()],
             row: 0,
             col: 0,
+            attachments: Vec::new(),
+            shell: false,
             history: Vec::new(),
             hist_cursor: None,
+            draft: None,
         }
     }
 }
@@ -36,27 +50,63 @@ fn word_boundary(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-fn line_display_width(chars: &[char]) -> u16 {
-    let w: usize = chars.iter().filter_map(|c| c.width()).sum();
-    u16::try_from(w).unwrap_or(u16::MAX)
+fn prompt_cols() -> u16 {
+    u16::try_from(
+        symbols::marker::PROMPT
+            .chars()
+            .filter_map(UnicodeWidthChar::width)
+            .sum::<usize>(),
+    )
+    .unwrap_or(u16::MAX)
 }
 
 impl Composer {
     pub fn is_empty(&self) -> bool {
+        self.lines.iter().all(Vec::is_empty) && self.attachments.is_empty()
+    }
+
+    pub fn text_empty(&self) -> bool {
         self.lines.iter().all(Vec::is_empty)
     }
 
+    pub fn push_attachment(&mut self, attachment: InputAttachment) {
+        self.attachments.push(attachment);
+        self.hist_cursor = None;
+    }
+
+    pub fn push_attachments(&mut self, attachments: Vec<InputAttachment>) {
+        self.attachments.extend(attachments);
+        self.hist_cursor = None;
+    }
+
+    pub fn take_attachments(&mut self) -> Vec<InputAttachment> {
+        std::mem::take(&mut self.attachments)
+    }
+
+    pub fn shell(&self) -> bool {
+        self.shell
+    }
+
+    pub fn enter_shell(&mut self) {
+        self.shell = true;
+    }
+
+    pub fn exit_shell(&mut self) {
+        self.shell = false;
+    }
+
     pub fn desired_height(&self, width: u16) -> u16 {
-        let wrap_width = width.saturating_sub(PROMPT_COLS).max(1);
-        let total: u16 = self
+        let wrap_width = width.saturating_sub(prompt_cols() + BORDER_COLS).max(1);
+        let total: usize = self
             .lines
             .iter()
-            .map(|line| {
-                let dw = line_display_width(line);
-                dw.div_ceil(wrap_width).max(1)
-            })
-            .fold(0u16, u16::saturating_add);
-        total.saturating_add(2).clamp(3, 8)
+            .map(|line| wrap::wrap_chars(line, wrap_width).len())
+            .sum::<usize>()
+            + self.attachments.len();
+        u16::try_from(total)
+            .unwrap_or(u16::MAX)
+            .saturating_add(2)
+            .clamp(3, 8)
     }
 
     pub fn on_first_row(&self) -> bool {
@@ -224,10 +274,53 @@ impl Composer {
         };
     }
 
+    pub fn at_query(&self) -> Option<String> {
+        if self.shell {
+            return None;
+        }
+        let line = &self.lines[self.row];
+        let mut start = self.col;
+        while start > 0 {
+            let c = line[start - 1];
+            if c == '@' {
+                let before_ok = start == 1 || line[start - 2].is_whitespace();
+                if before_ok {
+                    let token: String = line[start..self.col].iter().collect();
+                    if token.chars().all(|c| !c.is_whitespace()) {
+                        return Some(token);
+                    }
+                }
+                return None;
+            }
+            if c.is_whitespace() {
+                return None;
+            }
+            start -= 1;
+        }
+        None
+    }
+
+    pub fn replace_at_query(&mut self, replacement: &str) {
+        let line = &self.lines[self.row];
+        let mut at = self.col;
+        while at > 0 && line[at - 1] != '@' {
+            at -= 1;
+        }
+        if at == 0 {
+            return;
+        }
+        let start = at - 1;
+        let inserted: Vec<char> = format!("@{replacement} ").chars().collect();
+        let new_len = inserted.len();
+        self.lines[self.row].splice(start..self.col, inserted);
+        self.col = start + new_len;
+        self.hist_cursor = None;
+    }
+
     pub fn take(&mut self) -> String {
         let text = self.text();
         if !text.trim().is_empty() {
-            self.history.push(text.clone());
+            self.history.push(self.snapshot());
         }
         let history = std::mem::take(&mut self.history);
         *self = Self {
@@ -237,18 +330,46 @@ impl Composer {
         text
     }
 
+    fn snapshot(&self) -> HistEntry {
+        if self.shell {
+            HistEntry::Shell(self.text())
+        } else {
+            HistEntry::Text(self.text())
+        }
+    }
+
+    fn apply(&mut self, entry: &HistEntry) {
+        match entry {
+            HistEntry::Text(text) => {
+                self.shell = false;
+                self.set_text(text);
+            }
+            HistEntry::Shell(text) => {
+                self.shell = true;
+                self.set_text(text);
+            }
+        }
+    }
+
+    pub fn discard(&mut self) {
+        self.take();
+    }
+
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {
             return;
         }
         let idx = match self.hist_cursor {
-            None => self.history.len() - 1,
+            None => {
+                self.draft = Some(self.snapshot());
+                self.history.len() - 1
+            }
             Some(0) => 0,
             Some(i) => i - 1,
         };
         self.hist_cursor = Some(idx);
         let entry = self.history[idx].clone();
-        self.set_text(&entry);
+        self.apply(&entry);
     }
 
     pub fn history_next(&mut self) {
@@ -256,11 +377,15 @@ impl Composer {
             Some(i) if i + 1 < self.history.len() => {
                 self.hist_cursor = Some(i + 1);
                 let entry = self.history[i + 1].clone();
-                self.set_text(&entry);
+                self.apply(&entry);
             }
             Some(_) => {
                 self.hist_cursor = None;
-                self.set_text("");
+                let draft = self
+                    .draft
+                    .take()
+                    .unwrap_or_else(|| HistEntry::Text(String::new()));
+                self.apply(&draft);
             }
             None => {}
         }
@@ -272,6 +397,11 @@ impl Composer {
             .map(|line| line.iter().collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    pub(crate) fn set_plain_text(&mut self, text: &str) {
+        self.set_text(text);
+        self.hist_cursor = None;
     }
 
     fn set_text(&mut self, text: &str) {
@@ -286,68 +416,100 @@ impl Composer {
         self.col = self.lines[self.row].len();
     }
 
-    fn cursor_display_col(&self) -> u16 {
-        let width: usize = self.lines[self.row][..self.col]
+    fn visual_cursor(&self, wrap_width: u16) -> (usize, u16) {
+        let mut row = 0usize;
+        for line in &self.lines[..self.row] {
+            row += wrap::wrap_chars(line, wrap_width).len();
+        }
+        let ranges = wrap::wrap_chars(&self.lines[self.row], wrap_width);
+        let idx = ranges
+            .iter()
+            .position(|r| self.col < r.end)
+            .unwrap_or(ranges.len() - 1);
+        let range = ranges[idx].clone();
+        let col: usize = self.lines[self.row][range.start..self.col.max(range.start)]
             .iter()
             .filter_map(|c| c.width())
             .sum();
-        u16::try_from(width).unwrap_or(u16::MAX)
+        (row + idx, u16::try_from(col).unwrap_or(u16::MAX))
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool) {
-        let block = Block::bordered()
+    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool, plan: bool) {
+        let plan = plan && !self.shell;
+        let border = match (self.shell, plan, focused) {
+            (true, _, true) => theme.shell(),
+            (true, _, false) => theme.shell_dim(),
+            (_, true, true) => theme.plan(),
+            (_, true, false) => theme.plan_dim(),
+            (false, false, true) => theme.border(),
+            (false, false, false) => theme.border_dim(),
+        };
+        let (marker, marker_style) = if self.shell {
+            (symbols::marker::SHELL, theme.shell())
+        } else {
+            (symbols::marker::PROMPT, theme.accent())
+        };
+        let mut block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(theme.border());
+            .border_style(border)
+            .padding(Padding::horizontal(1));
+        if plan {
+            block = block.title(Span::styled(" plan ", theme.plan()));
+        }
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        if self.is_empty() {
+        if self.text_empty() && self.attachments.is_empty() {
+            let placeholder = if self.shell {
+                SHELL_PLACEHOLDER
+            } else {
+                PLACEHOLDER
+            };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("› ", theme.accent()),
-                    Span::styled(PLACEHOLDER, theme.muted()),
+                    Span::styled(marker, marker_style),
+                    Span::styled(placeholder, theme.muted()),
                 ])),
                 inner,
             );
             if focused {
-                let x = inner.x + PROMPT_COLS;
+                let x = inner.x + prompt_cols();
                 frame.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
             }
             return;
         }
 
-        let lines: Vec<Line> = self
-            .lines
-            .iter()
-            .enumerate()
-            .map(|(i, chars)| {
-                let prompt = if i == 0 { "› " } else { "  " };
-                let body: String = chars.iter().collect();
-                Line::from(vec![
-                    Span::styled(prompt, theme.accent()),
+        let prompt_cols = prompt_cols();
+        let wrap_width = inner.width.saturating_sub(prompt_cols).max(1);
+        let mut rows: Vec<Line> = Vec::new();
+        for chars in &self.lines {
+            for range in wrap::wrap_chars(chars, wrap_width) {
+                let prompt = if rows.is_empty() { marker } else { "  " };
+                let body: String = chars[range].iter().collect();
+                rows.push(Line::from(vec![
+                    Span::styled(prompt, marker_style),
                     Span::styled(body, theme.base()),
-                ])
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+                ]));
+            }
+        }
+
+        for attachment in &self.attachments {
+            let prompt = if rows.is_empty() { marker } else { "  " };
+            rows.push(Line::from(vec![
+                Span::styled(prompt, marker_style),
+                Span::styled(format!("[image: {}]", attachment.label), theme.muted()),
+            ]));
+        }
+
+        let (cursor_row, cursor_col) = self.visual_cursor(wrap_width);
+        let visible_rows = usize::from(inner.height).max(1);
+        let offset = cursor_row.saturating_sub(visible_rows - 1);
+        let visible: Vec<Line> = rows.into_iter().skip(offset).take(visible_rows).collect();
+        frame.render_widget(Paragraph::new(visible), inner);
 
         if focused {
-            let wrap_width = inner.width.saturating_sub(PROMPT_COLS).max(1);
-            let cursor_char_col = self.cursor_display_col();
-
-            let visual_row_offset: u16 = self.lines[..self.row]
-                .iter()
-                .map(|line| {
-                    let dw = line_display_width(line);
-                    dw.div_ceil(wrap_width).max(1)
-                })
-                .fold(0u16, u16::saturating_add);
-
-            let visual_row_within = cursor_char_col / wrap_width;
-            let visual_col = PROMPT_COLS + (cursor_char_col % wrap_width);
-
-            let x = inner.x + visual_col;
-            let y = inner.y + visual_row_offset + visual_row_within;
+            let x = inner.x + prompt_cols + cursor_col;
+            let y = inner.y + u16::try_from(cursor_row - offset).unwrap_or(u16::MAX);
             frame.set_cursor_position((
                 x.min(inner.right().saturating_sub(1)),
                 y.min(inner.bottom().saturating_sub(1)),
@@ -364,16 +526,16 @@ mod tests {
     fn cursor_column_counts_wide_chars() {
         let mut composer = Composer::default();
         composer.insert_str("한글");
-        assert_eq!(composer.cursor_display_col(), 4);
+        assert_eq!(composer.visual_cursor(80), (0, 4));
         composer.move_left();
-        assert_eq!(composer.cursor_display_col(), 2);
+        assert_eq!(composer.visual_cursor(80), (0, 2));
     }
 
     #[test]
     fn paste_normalizes_to_nfc() {
         let mut composer = Composer::default();
         composer.insert_str("\u{1100}\u{1161}");
-        assert_eq!(composer.cursor_display_col(), 2);
+        assert_eq!(composer.visual_cursor(80), (0, 2));
     }
 
     #[test]
@@ -455,6 +617,28 @@ mod tests {
     }
 
     #[test]
+    fn discard_preserves_draft_in_history() {
+        let mut composer = Composer::default();
+        composer.insert_str("important draft");
+        composer.discard();
+        assert!(composer.is_empty());
+        composer.history_prev();
+        assert_eq!(composer.text(), "important draft");
+    }
+
+    #[test]
+    fn history_navigation_restores_draft() {
+        let mut composer = Composer::default();
+        composer.insert_str("sent");
+        composer.take();
+        composer.insert_str("work in progress");
+        composer.history_prev();
+        assert_eq!(composer.text(), "sent");
+        composer.history_next();
+        assert_eq!(composer.text(), "work in progress");
+    }
+
+    #[test]
     fn word_boundary_movement_skips_non_alnum() {
         let mut composer = Composer::default();
         composer.insert_str("hello_world foo");
@@ -469,8 +653,115 @@ mod tests {
         let mut composer = Composer::default();
         let long: String = "a".repeat(40);
         composer.insert_str(&long);
-        let h_narrow = composer.desired_height(22);
+        let h_narrow = composer.desired_height(24);
         let h_wide = composer.desired_height(80);
         assert!(h_narrow > h_wide);
+    }
+
+    #[test]
+    fn desired_height_counts_wide_chars_exactly() {
+        let mut composer = Composer::default();
+        composer.insert_str("한한한한한");
+        assert_eq!(composer.desired_height(9), 7);
+    }
+
+    #[test]
+    fn visual_cursor_row_tracks_wrapping() {
+        let mut composer = Composer::default();
+        composer.insert_str("abcdefghij");
+        assert_eq!(composer.visual_cursor(4), (2, 2));
+    }
+
+    #[test]
+    fn take_resets_shell_mode() {
+        let mut composer = Composer::default();
+        composer.enter_shell();
+        composer.insert_str("echo 1");
+        assert_eq!(composer.take(), "echo 1");
+        assert!(!composer.shell());
+        assert!(composer.is_empty());
+    }
+
+    #[test]
+    fn shell_history_recall_restores_mode() {
+        let mut composer = Composer::default();
+        composer.enter_shell();
+        composer.insert_str("echo 1");
+        composer.take();
+        composer.history_prev();
+        assert!(composer.shell());
+        assert_eq!(composer.text(), "echo 1");
+    }
+
+    #[test]
+    fn pasted_bang_text_recalls_as_plain() {
+        let mut composer = Composer::default();
+        composer.insert_str("!important note");
+        assert!(!composer.shell());
+        composer.take();
+        composer.history_prev();
+        assert!(!composer.shell());
+        assert_eq!(composer.text(), "!important note");
+    }
+
+    #[test]
+    fn shell_draft_survives_history_navigation() {
+        let mut composer = Composer::default();
+        composer.insert_str("older message");
+        composer.take();
+        composer.enter_shell();
+        composer.insert_str("dra");
+        composer.history_prev();
+        assert!(!composer.shell());
+        assert_eq!(composer.text(), "older message");
+        composer.history_next();
+        assert!(composer.shell());
+        assert_eq!(composer.text(), "dra");
+    }
+
+    #[test]
+    fn clear_exits_shell_mode() {
+        let mut composer = Composer::default();
+        composer.enter_shell();
+        composer.insert_str("ls");
+        composer.clear();
+        assert!(!composer.shell());
+    }
+
+    #[test]
+    fn at_query_detects_token_at_cursor() {
+        let mut composer = Composer::default();
+        composer.insert_str("see @src/li");
+        assert_eq!(composer.at_query().as_deref(), Some("src/li"));
+    }
+
+    #[test]
+    fn at_query_requires_word_boundary() {
+        let mut composer = Composer::default();
+        composer.insert_str("email me@host");
+        assert_eq!(composer.at_query(), None);
+    }
+
+    #[test]
+    fn at_query_at_start_of_input() {
+        let mut composer = Composer::default();
+        composer.insert_str("@lib");
+        assert_eq!(composer.at_query().as_deref(), Some("lib"));
+    }
+
+    #[test]
+    fn replace_at_query_inserts_path() {
+        let mut composer = Composer::default();
+        composer.insert_str("see @src/li");
+        composer.replace_at_query("src/lib.rs");
+        assert_eq!(composer.text(), "see @src/lib.rs ");
+    }
+
+    #[test]
+    fn at_query_none_in_shell_mode() {
+        let mut composer = Composer::default();
+        composer.enter_shell();
+        composer.insert_str("@file");
+        assert_eq!(composer.at_query(), None);
     }
 }

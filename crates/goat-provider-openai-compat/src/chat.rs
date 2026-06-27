@@ -55,6 +55,8 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
 }
 
@@ -80,6 +82,32 @@ fn role_label(role: MessageRole) -> &'static str {
     }
 }
 
+fn text_and_images_content(message: &Message) -> serde_json::Value {
+    let images: Vec<(&String, &String)> = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image { media_type, data } => Some((media_type, data)),
+            _ => None,
+        })
+        .collect();
+    let text = message.text_content();
+    if images.is_empty() {
+        return serde_json::Value::String(text);
+    }
+    let mut content = Vec::new();
+    if !text.is_empty() {
+        content.push(json!({ "type": "text", "text": text }));
+    }
+    for (media_type, data) in images {
+        content.push(json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{media_type};base64,{data}") },
+        }));
+    }
+    serde_json::Value::Array(content)
+}
+
 fn to_chat_messages(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for message in messages {
@@ -99,7 +127,7 @@ fn to_chat_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                     ContentBlock::ToolUse { id, name, input } => Some(json!({
                         "id": id,
                         "type": "function",
-                        "function": { "name": name, "arguments": input.to_string() },
+                        "function": { "name": name, "arguments": common::tool_arguments(input) },
                     })),
                     _ => None,
                 })
@@ -129,7 +157,7 @@ fn to_chat_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         } else {
             out.push(json!({
                 "role": role_label(message.role),
-                "content": message.text_content(),
+                "content": text_and_images_content(message),
             }));
         }
     }
@@ -220,6 +248,13 @@ fn drain_tool_calls(tool_calls: &mut ToolAccumulator) -> Vec<StreamEvent> {
         .collect()
 }
 
+fn data_has_error(data: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(data)
+        .ok()
+        .and_then(|value| value.get("error").map(|_| ()))
+        .is_some()
+}
+
 async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<StreamEvent>) {
     let mut stream = response.bytes_stream().eventsource();
     let mut tool_calls: ToolAccumulator = HashMap::new();
@@ -229,6 +264,14 @@ async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<StreamEv
             Ok(event) => {
                 if event.data == "[DONE]" {
                     break;
+                }
+                if event.event == "error" || data_has_error(&event.data) {
+                    let _ = events
+                        .send(StreamEvent::Failed {
+                            error: common::classify_stream_error(&event.data),
+                        })
+                        .await;
+                    return;
                 }
                 let Ok(chunk) = serde_json::from_str::<ChatChunk>(&event.data) else {
                     continue;
@@ -256,7 +299,7 @@ async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<StreamEv
             Err(err) => {
                 let _ = events
                     .send(StreamEvent::Failed {
-                        message: err.to_string(),
+                        error: goat_provider::StreamError::transport(err.to_string()),
                     })
                     .await;
                 return;
@@ -302,7 +345,12 @@ impl Provider for OpenAiCompatProvider {
         Capabilities {
             tools: true,
             auth: self.auth,
+            images: true,
         }
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        crate::vision::known_openai_compatible_vision_model(model)
     }
 
     fn efforts(&self, _model: &str) -> Vec<Effort> {
@@ -321,6 +369,9 @@ impl Provider for OpenAiCompatProvider {
                 stream_options: StreamOptions {
                     include_usage: true,
                 },
+                tool_choice: (!req.tools.is_empty()
+                    && matches!(req.tool_choice, goat_provider::ToolChoice::None))
+                .then_some("none"),
                 tools: to_chat_tools(&req),
                 reasoning_effort: req.effort.and_then(chat_effort_wire),
             };
@@ -333,7 +384,7 @@ impl Provider for OpenAiCompatProvider {
                 Err(err) => {
                     let _ = events
                         .send(StreamEvent::Failed {
-                            message: err.to_string(),
+                            error: common::transport(&err),
                         })
                         .await;
                     return;
@@ -341,10 +392,11 @@ impl Provider for OpenAiCompatProvider {
             };
             if !resp.status().is_success() {
                 let status = resp.status();
+                let headers = resp.headers().clone();
                 let detail = resp.text().await.unwrap_or_default();
                 let _ = events
                     .send(StreamEvent::Failed {
-                        message: format!("{status}: {detail}"),
+                        error: common::classify_http(status, &headers, &detail),
                     })
                     .await;
                 return;
@@ -359,6 +411,7 @@ impl Provider for OpenAiCompatProvider {
             format!("{}/models", self.base_url),
             self.bearer.clone(),
             None,
+            crate::vision::known_openai_compatible_vision_model,
             out,
         )
     }
@@ -367,7 +420,8 @@ impl Provider for OpenAiCompatProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatChunk, ToolAccumulator, accumulate_tool_calls, drain_tool_calls, to_chat_messages,
+        ChatChunk, ToolAccumulator, accumulate_tool_calls, data_has_error, drain_tool_calls,
+        to_chat_messages,
     };
     use goat_provider::{ContentBlock, Message, MessageRole, StreamEvent};
     use serde_json::json;
@@ -375,6 +429,17 @@ mod tests {
     fn chunk_tool_calls(data: &str) -> Vec<super::ToolCallChunk> {
         let chunk: ChatChunk = serde_json::from_str(data).unwrap();
         chunk.choices.into_iter().next().unwrap().delta.tool_calls
+    }
+
+    #[test]
+    fn error_chunk_is_detected() {
+        assert!(data_has_error(
+            r#"{"error":{"message":"bad","type":"invalid_request_error"}}"#
+        ));
+        assert!(!data_has_error(
+            r#"{"choices":[{"delta":{"content":"hi"}}]}"#
+        ));
+        assert!(!data_has_error("not json"));
     }
 
     #[test]

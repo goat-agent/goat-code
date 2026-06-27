@@ -14,7 +14,10 @@ pub fn parse_codex_ratelimits(headers: &HeaderMap) -> Option<RateLimitSnapshot> 
     if windows.is_empty() {
         None
     } else {
-        Some(RateLimitSnapshot { windows })
+        Some(RateLimitSnapshot {
+            windows,
+            representative: None,
+        })
     }
 }
 

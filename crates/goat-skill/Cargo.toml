@@ -9,6 +9,9 @@ publish = false
 
 [dependencies]
 goat-config = { workspace = true }
+goat-protocol = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

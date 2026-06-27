@@ -2,13 +2,15 @@ pub mod marker {
     pub const USER: &str = "› ";
     pub const AGENT: &str = "● ";
     pub const NOTICE: &str = "→ ";
-    pub const OK: &str = "✓ ";
     pub const ERROR: &str = "✗ ";
+    pub const PROMPT: &str = "❯ ";
+    pub const SHELL: &str = "! ";
 }
 
 pub mod ui {
     pub const CARET: &str = "›";
-    pub const BULLET: &str = "• ";
+    pub const BANG: &str = "!";
+    pub const BULLET: &str = "- ";
     pub const DOT_FULL: &str = "●";
     pub const DOT_EMPTY: &str = "○";
     pub const CHECK: &str = "✓";
@@ -16,9 +18,9 @@ pub mod ui {
     pub const MIDDOT: &str = "·";
     pub const SEPARATOR: &str = " · ";
     pub const ELLIPSIS: &str = "…";
-    pub const CODE_GUTTER: &str = "│ ";
-    pub const QUOTE_GUTTER: &str = "│ ";
+    pub const QUOTE_GUTTER: &str = "▎ ";
     pub const RULE: &str = "──────────";
+    pub const HRULE: &str = "\u{1}hrule\u{1}";
     pub const MORE_ABOVE: &str = "↑";
     pub const MORE_BELOW: &str = "↓";
     pub const STREAM_CURSOR: &str = "▌";
@@ -29,7 +31,7 @@ pub mod ui {
 
 pub mod key {
     pub const CTRL: &str = "⌃";
-    pub const ESC: &str = "⎋";
+    pub const ESC: &str = "esc";
     pub const SHIFT: &str = "⇧";
     pub const ENTER: &str = "↵";
     pub const TAB: &str = "⇥";

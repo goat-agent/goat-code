@@ -7,28 +7,39 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[package.metadata.dist]
-dist = true
-
 [[bin]]
 name = "goat"
 path = "src/main.rs"
 
 [dependencies]
-goat-core = { workspace = true }
 goat-tui = { workspace = true }
 goat-config = { workspace = true }
-goat-agent = { workspace = true }
-goat-auth = { workspace = true }
-goat-store = { workspace = true }
+goat-daemon = { workspace = true }
+goat-client = { workspace = true }
+goat-wire = { workspace = true }
+goat-protocol = { workspace = true }
 goat-provider = { workspace = true }
 goat-providers = { workspace = true }
-tokio = { workspace = true }
+goat-auth = { workspace = true }
+goat-worktree = { workspace = true }
+tokio = { workspace = true, features = ["io-std"] }
 clap = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 color-eyre = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+semver = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
-axoupdater = { workspace = true }
+qrcode = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

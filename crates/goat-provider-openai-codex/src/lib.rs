@@ -6,9 +6,11 @@ use goat_auth::{
     ensure_valid, random_state,
 };
 use goat_provider::{
-    AuthMethod, Capabilities, Model, Provider, ProviderId, Request, StreamEvent, now_secs,
+    AuthMethod, Capabilities, Model, Provider, ProviderId, Request, StreamError, StreamEvent,
+    WebSearchOutput, now_secs,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle};
 
 pub const PROVIDER_ID: &str = "openai-codex";
@@ -25,6 +27,7 @@ const DEFAULT_INSTRUCTIONS: &str = "You are goat, a coding assistant running in 
 const DEVICE_USERCODE: &str = "https://auth.openai.com/deviceauth/usercode";
 
 const CATALOG: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+const SEARCH_MODEL: &str = "gpt-5.4-mini";
 
 const CONTEXT_WINDOWS: &[(&str, u32)] = &[("gpt-5", 272_000)];
 const DEVICE_TOKEN: &str = "https://auth.openai.com/deviceauth/token";
@@ -310,9 +313,117 @@ async fn fetch_models(client: &reqwest::Client, access: &str, account: Option<&s
         .filter(|model| model.get("visibility").and_then(serde_json::Value::as_str) == Some("list"))
         .filter_map(|model| {
             let id = model.get("slug").and_then(serde_json::Value::as_str)?;
-            Some(Model { id: id.to_owned() })
+            Some(Model {
+                id: id.to_owned(),
+                supports_images: goat_provider_openai_compat::known_openai_vision_model(id),
+            })
         })
         .collect()
+}
+
+#[derive(Serialize)]
+struct CodexSearchRequest<'a> {
+    id: &'a str,
+    model: &'a str,
+    input: Vec<serde_json::Value>,
+    commands: CodexSearchCommands<'a>,
+    settings: CodexSearchSettings,
+    max_output_tokens: u64,
+}
+
+#[derive(Serialize)]
+struct CodexSearchCommands<'a> {
+    search_query: Vec<CodexSearchQuery<'a>>,
+    response_length: CodexSearchResponseLength,
+}
+
+#[derive(Serialize)]
+struct CodexSearchQuery<'a> {
+    q: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CodexSearchResponseLength {
+    Short,
+}
+
+#[derive(Serialize)]
+struct CodexSearchSettings {
+    allowed_callers: Vec<CodexSearchAllowedCaller>,
+    external_web_access: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CodexSearchAllowedCaller {
+    Direct,
+}
+
+#[derive(Deserialize)]
+struct CodexSearchResponse {
+    output: String,
+}
+
+fn codex_search_body(id: &str, model: &str, query: &str) -> serde_json::Value {
+    serde_json::to_value(CodexSearchRequest {
+        id,
+        model,
+        input: vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": query }],
+        })],
+        commands: CodexSearchCommands {
+            search_query: vec![CodexSearchQuery { q: query }],
+            response_length: CodexSearchResponseLength::Short,
+        },
+        settings: CodexSearchSettings {
+            allowed_callers: vec![CodexSearchAllowedCaller::Direct],
+            external_web_access: true,
+        },
+        max_output_tokens: 2500,
+    })
+    .expect("CodexSearchRequest is always serializable")
+}
+
+async fn run_codex_search(
+    client: &reqwest::Client,
+    access: &str,
+    account: Option<&str>,
+    query: &str,
+) -> Result<WebSearchOutput, StreamError> {
+    let url = format!("{BASE}/alpha/search");
+    let body = codex_search_body("goat-web-search", SEARCH_MODEL, query);
+    let mut builder = client.post(&url).bearer_auth(access).json(&body);
+    if let Some(account) = account {
+        builder = builder.header("chatgpt-account-id", account);
+    }
+    let resp = builder
+        .send()
+        .await
+        .map_err(|err| goat_provider_openai_compat::common::transport(&err))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(goat_provider_openai_compat::common::classify_http(
+            status, &headers, &detail,
+        ));
+    }
+    let response: CodexSearchResponse = resp
+        .json()
+        .await
+        .map_err(|err| StreamError::other(format!("invalid search response: {err}")))?;
+    let content = if response.output.trim().is_empty() {
+        "No results found.".to_owned()
+    } else {
+        response.output
+    };
+    Ok(WebSearchOutput {
+        content,
+        results: Vec::new(),
+    })
 }
 
 impl Provider for CodexProvider {
@@ -340,7 +451,28 @@ impl Provider for CodexProvider {
         Capabilities {
             tools: true,
             auth: AuthMethod::OAuth,
+            images: true,
         }
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        goat_provider_openai_compat::known_openai_vision_model(model)
+    }
+
+    fn supports_web_search(&self) -> bool {
+        true
+    }
+
+    fn web_search(&self, query: String) -> JoinHandle<Result<WebSearchOutput, StreamError>> {
+        let client = self.client.clone();
+        let store = self.store.clone();
+        let key = self.key.clone();
+        tokio::spawn(async move {
+            let Some((access, account)) = current_access(&store, &key).await else {
+                return Err(StreamError::auth("not logged in to codex"));
+            };
+            run_codex_search(&client, &access, account.as_deref(), &query).await
+        })
     }
 
     fn login(&self, status: mpsc::Sender<String>) -> JoinHandle<Result<TokenSet, String>> {
@@ -363,7 +495,7 @@ impl Provider for CodexProvider {
             let Some((access, account)) = current_access(&store, &key).await else {
                 let _ = events
                     .send(StreamEvent::Failed {
-                        message: "not logged in to codex".to_owned(),
+                        error: goat_provider::StreamError::auth("not logged in to codex"),
                     })
                     .await;
                 return;
@@ -375,6 +507,7 @@ impl Provider for CodexProvider {
                 Some(DEFAULT_INSTRUCTIONS),
                 false,
                 req.effort,
+                req.tool_choice,
             );
             goat_provider_openai_compat::run_request(
                 &client,
@@ -416,7 +549,7 @@ impl Provider for CodexProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{account_id, authorize_url};
+    use super::{account_id, authorize_url, codex_search_body};
 
     #[test]
     fn authorize_url_carries_pkce_and_client() {
@@ -428,6 +561,23 @@ mod tests {
         assert!(url.contains("redirect_uri=http"));
         assert!(url.contains("codex_cli_simplified_flow=true"));
         assert!(url.contains("id_token_add_organizations=true"));
+    }
+
+    #[test]
+    fn codex_search_body_matches_upstream_shape() {
+        let body = codex_search_body("search-session", "gpt-test", "find this");
+        assert_eq!(body["id"], "search-session");
+        assert_eq!(body["model"], "gpt-test");
+        assert!(body["input"].is_array());
+        assert_eq!(body["input"][0]["type"], "message");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(body["input"][0]["content"][0]["text"], "find this");
+        assert_eq!(body["commands"]["search_query"][0]["q"], "find this");
+        assert_eq!(body["commands"]["response_length"], "short");
+        assert_eq!(body["settings"]["allowed_callers"][0], "direct");
+        assert_eq!(body["settings"]["external_web_access"], true);
+        assert_eq!(body["max_output_tokens"], 2500);
     }
 
     #[test]

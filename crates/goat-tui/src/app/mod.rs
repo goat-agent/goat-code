@@ -3,22 +3,26 @@ mod keys;
 
 use std::{collections::HashMap, path::Path, time::Duration};
 
-use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
+use crossterm::event::{
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use futures::StreamExt;
 use goat_commands::{CommandEffect, CommandRegistry};
 use goat_protocol::{
-    AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, Op, RateLimitSnapshot,
-    TaskId, ToolCallId, Usage,
+    AccountEntry, Effort, Event as EngineEvent, ModelEntry, ModelTarget, NotifyKind, Op,
+    RateLimitSnapshot, TaskId, ToolCallId, Usage,
 };
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
+    ask::AskPicker,
     command::CommandMenu,
     composer::Composer,
     config::{Config, ConfigOutcome},
+    files::FileMenu,
     highlight::SyntectHighlighter,
-    picker::{AskPicker, EffortPicker, Picker, ThreadPicker},
+    picker::{EffortPicker, Picker, ThreadPicker},
     symbols,
     theme::Theme,
     transcript::Transcript,
@@ -52,9 +56,28 @@ pub(crate) enum Overlay {
     Thread(ThreadPicker),
     Config(Config),
     Commands(CommandMenu),
+    Files(FileMenu),
     Agents(usize),
     Ask(AskPicker, ToolCallId),
+    Plan(PlanOverlay),
     Usage,
+    Help,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanFocus {
+    Approve,
+    Reject,
+}
+
+pub(crate) struct PlanOverlay {
+    pub(crate) id: TaskId,
+    pub(crate) call: ToolCallId,
+    pub(crate) plan: String,
+    pub(crate) path: String,
+    pub(crate) scroll: u16,
+    pub(crate) focus: PlanFocus,
+    pub(crate) feedback: Option<String>,
 }
 
 const TICK: Duration = Duration::from_millis(120);
@@ -65,7 +88,14 @@ pub(crate) enum AppEvent {
     Input(CtEvent),
     Tick,
     Engine(EngineEvent),
+    AttachmentPaste {
+        text: String,
+        result: Result<Vec<goat_protocol::InputAttachment>, String>,
+        fallback: bool,
+    },
+    ClipboardImage(Result<goat_protocol::InputAttachment, String>),
     EngineClosed,
+    Presence(usize),
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -75,32 +105,69 @@ pub struct App {
     pub(crate) composer: Composer,
     pub(crate) highlighter: SyntectHighlighter,
     pub(crate) cwd: String,
-    pub(crate) active: Option<TaskId>,
     pub(crate) next_task: u64,
+    pub(crate) window_count: usize,
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
     pub(crate) clear_arm: Option<u16>,
+    pub(crate) queued: Vec<(TaskId, String, Vec<goat_protocol::InputAttachment>)>,
     pub(crate) should_quit: bool,
     pub(crate) dirty: bool,
-    pub(crate) scroll: u16,
+    pub(crate) scroll: usize,
     pub(crate) follow: bool,
+    pub(crate) viewport_rows: u16,
     pub(crate) models: Vec<ModelEntry>,
     pub(crate) model: Option<ModelTarget>,
     pub(crate) overlay: Overlay,
-    pub(crate) pending_resume: Option<ResumeIntent>,
+    pub(crate) pending: PendingState,
     pub(crate) account_entries: Vec<AccountEntry>,
     pub(crate) mouse_capture: bool,
     pub(crate) computer_use: bool,
     pub(crate) browser: bool,
     pub(crate) commands: CommandRegistry,
-    pub(crate) task_start: Option<std::time::Instant>,
     pub(crate) toasts: Vec<crate::toast::Toast>,
     pub(crate) agent_runs: Vec<AgentRunView>,
     pub(crate) main_view: MainView,
-    pub(crate) usage_last: HashMap<(String, String), Usage>,
-    pub(crate) usage_total: HashMap<(String, String), (u64, u64)>,
+    pub(crate) turn: TurnStatus,
+    pub(crate) usage: UsageState,
+    pub(crate) context_window: HashMap<(String, String), u32>,
+    pub(crate) compaction_threshold: Option<u32>,
+    pub(crate) focused: bool,
+    pub(crate) notification_pending: Option<crate::notification::Notification>,
+    pub(crate) mode: goat_protocol::Mode,
+    pub(crate) picker: Option<ratatui_image::picker::Picker>,
+}
+
+#[derive(Default)]
+pub(crate) struct UsageState {
+    pub(crate) last: HashMap<(String, String), Usage>,
+    pub(crate) total: HashMap<(String, String), (u64, u64)>,
     pub(crate) rate_limits: HashMap<(String, String), (RateLimitSnapshot, i64)>,
-    pub(crate) context_window: Option<u32>,
+    pub(crate) scroll: usize,
+    pub(crate) turn_tokens: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingState {
+    pub(crate) ask: Option<(AskPicker, ToolCallId)>,
+    pub(crate) resume: Option<ResumeIntent>,
+}
+
+#[derive(Default)]
+pub(crate) struct TurnStatus {
+    pub(crate) active: Option<TaskId>,
+    pub(crate) active_shell: bool,
+    pub(crate) thinking: bool,
+    pub(crate) task_start: Option<std::time::Instant>,
+    pub(crate) retry: Option<RetryState>,
+    pub(crate) compacting: bool,
+}
+
+pub(crate) struct RetryState {
+    pub(crate) attempt: u32,
+    pub(crate) max_attempts: u32,
+    pub(crate) reason: String,
+    pub(crate) until: std::time::Instant,
 }
 
 impl App {
@@ -109,46 +176,51 @@ impl App {
             .ok()
             .map(|p| shorten_home(&p))
             .unwrap_or_default();
+        let cfg = goat_config::Config::load();
         Self {
             theme,
             transcript: Transcript::default(),
             composer: Composer::default(),
             highlighter: SyntectHighlighter::new(),
             cwd,
-            active: None,
             next_task: 1,
+            window_count: 1,
             spinner: 0,
             quit_arm: None,
             clear_arm: None,
+            queued: Vec::new(),
             should_quit: false,
             dirty: true,
             scroll: 0,
             follow: true,
+            viewport_rows: 0,
             models: Vec::new(),
             model: None,
             overlay: Overlay::None,
-            pending_resume: None,
+            pending: PendingState::default(),
             account_entries: Vec::new(),
-            mouse_capture: true,
-            computer_use: goat_config::Config::load().computer_use_enabled,
-            browser: goat_config::Config::load().browser_enabled,
-
+            mouse_capture: cfg.mouse_capture_enabled,
+            computer_use: cfg.computer_use_enabled,
+            browser: cfg.browser_enabled,
             commands: CommandRegistry::builtin(),
-            task_start: None,
             toasts: Vec::new(),
             agent_runs: Vec::new(),
             main_view: MainView::Live,
-            usage_last: HashMap::new(),
-            usage_total: HashMap::new(),
-            rate_limits: HashMap::new(),
-            context_window: None,
+            turn: TurnStatus::default(),
+            usage: UsageState::default(),
+            context_window: HashMap::new(),
+            compaction_threshold: None,
+            focused: true,
+            notification_pending: None,
+            mode: goat_protocol::Mode::Normal,
+            picker: None,
         }
     }
 
     pub(crate) fn update(&mut self, event: AppEvent) -> Vec<Op> {
         match event {
             AppEvent::Tick => {
-                if self.active.is_some() {
+                if self.turn.active.is_some() {
                     self.spinner = self.spinner.wrapping_add(1);
                     self.dirty = true;
                 }
@@ -172,7 +244,9 @@ impl App {
                 Vec::new()
             }
             AppEvent::Input(CtEvent::Key(key)) if key.kind == KeyEventKind::Press => {
-                self.on_key(key)
+                let ops = self.on_key(key);
+                self.promote_pending_ask();
+                ops
             }
             AppEvent::Input(CtEvent::Paste(text)) => {
                 match &mut self.overlay {
@@ -190,7 +264,16 @@ impl App {
                         picker.insert_str(&text);
                     }
                     _ => {
-                        self.composer.insert_str(&text);
+                        match crate::attachment::attachments_from_paste(&text) {
+                            Ok(attachments) => self.composer.push_attachments(attachments),
+                            Err(
+                                crate::attachment::AttachError::NotImages
+                                | crate::attachment::AttachError::Empty,
+                            ) => {
+                                self.composer.insert_str(&text);
+                            }
+                            Err(err) => self.push_toast(NotifyKind::Error, err.to_string()),
+                        }
                         self.update_command_menu();
                     }
                 }
@@ -202,39 +285,76 @@ impl App {
                 Vec::new()
             }
             AppEvent::Input(CtEvent::Mouse(mouse)) => {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        self.scroll = self.scroll.saturating_sub(3);
-                        self.dirty = true;
+                if self.wheel_scroll_allowed() {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            self.scroll = self.scroll.saturating_sub(3);
+                            self.follow = false;
+                            self.dirty = true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.scroll = self.scroll.saturating_add(3);
+                            self.dirty = true;
+                        }
+                        _ => {}
                     }
-                    MouseEventKind::ScrollDown => {
-                        self.scroll = self.scroll.saturating_add(3);
-                        self.dirty = true;
-                    }
-                    _ => {}
                 }
+                Vec::new()
+            }
+            AppEvent::Input(CtEvent::FocusGained) => {
+                self.focused = true;
+                Vec::new()
+            }
+            AppEvent::Input(CtEvent::FocusLost) => {
+                self.focused = false;
                 Vec::new()
             }
             AppEvent::Input(_) => Vec::new(),
             AppEvent::Engine(event) => {
                 let ops = self.on_engine(event);
+                self.promote_pending_ask();
                 self.dirty = true;
                 ops
             }
+            AppEvent::AttachmentPaste {
+                text,
+                result,
+                fallback,
+            } => {
+                match result {
+                    Ok(attachments) => self.composer.push_attachments(attachments),
+                    Err(_message) if fallback => self.composer.insert_str(&text),
+                    Err(message) => self.push_toast(NotifyKind::Error, message),
+                }
+                self.update_command_menu();
+                self.dirty = true;
+                Vec::new()
+            }
+            AppEvent::ClipboardImage(result) => {
+                match result {
+                    Ok(attachment) => self.composer.push_attachment(attachment),
+                    Err(message) => self.push_toast(NotifyKind::Error, message),
+                }
+                self.update_command_menu();
+                self.dirty = true;
+                Vec::new()
+            }
             AppEvent::EngineClosed => {
                 self.should_quit = true;
+                Vec::new()
+            }
+            AppEvent::Presence(count) => {
+                if self.window_count != count {
+                    self.window_count = count;
+                    self.dirty = true;
+                }
                 Vec::new()
             }
         }
     }
 
     pub(crate) fn dispatch_slash_command(&mut self, raw: &str) -> Vec<Op> {
-        let rest = raw.trim().trim_start_matches('/');
-        let (name, args) = match rest.split_once(char::is_whitespace) {
-            Some((name, args)) => (name, args.trim()),
-            None => (rest, ""),
-        };
-        let effect = self.commands.resolve(name, args);
+        let effect = self.commands.resolve_line(raw);
         self.apply_command_effect(effect)
     }
 
@@ -249,8 +369,10 @@ impl App {
             CommandEffect::OpenEffortPicker => {
                 let efforts = self.current_efforts();
                 if efforts.is_empty() {
-                    self.transcript
-                        .push_notice("current model has no reasoning effort options".to_owned());
+                    self.push_toast(
+                        NotifyKind::Info,
+                        "current model has no reasoning effort options".to_owned(),
+                    );
                     return Vec::new();
                 }
                 let label = self
@@ -264,34 +386,25 @@ impl App {
             }
             CommandEffect::SelectEffort(level) => {
                 let Some(effort) = Effort::parse(&level) else {
-                    self.transcript
-                        .push_error(format!("unknown effort: {level}"));
+                    self.push_toast(NotifyKind::Error, format!("unknown effort: {level}"));
                     return Vec::new();
                 };
                 if !self.current_efforts().contains(&effort) {
-                    self.transcript
-                        .push_error(format!("current model does not support effort: {level}"));
+                    self.push_toast(
+                        NotifyKind::Error,
+                        format!("current model does not support effort: {level}"),
+                    );
                     return Vec::new();
                 }
                 self.apply_effort(effort)
             }
             CommandEffect::OpenThreadPicker => {
-                if self.active.is_some() {
-                    self.transcript
-                        .push_notice("finish the current task before resuming".to_owned());
-                    return Vec::new();
-                }
-                self.pending_resume = Some(ResumeIntent::Picker);
-                vec![Op::ListThreads]
+                self.pending.resume = Some(ResumeIntent::Picker);
+                vec![Op::ListThreads {}]
             }
             CommandEffect::ResumeIndex(index) => {
-                if self.active.is_some() {
-                    self.transcript
-                        .push_notice("finish the current task before resuming".to_owned());
-                    return Vec::new();
-                }
-                self.pending_resume = Some(ResumeIntent::Index(index));
-                vec![Op::ListThreads]
+                self.pending.resume = Some(ResumeIntent::Index(index));
+                vec![Op::ListThreads {}]
             }
             CommandEffect::OpenConfig => {
                 self.overlay = Overlay::Config(Config::new(
@@ -304,41 +417,112 @@ impl App {
                 Vec::new()
             }
             CommandEffect::ShowHelp => {
-                self.transcript
-                    .push_notice(crate::command::help_text(&self.commands));
+                self.overlay = Overlay::Help;
                 Vec::new()
             }
             CommandEffect::RenameConversation(title) => vec![Op::RenameThread { title }],
             CommandEffect::ClearConversation => {
-                if self.active.is_some() {
-                    return Vec::new();
-                }
                 self.transcript.clear();
                 self.reset_agents();
+                self.turn = TurnStatus::default();
+                self.clear_ctx_indicator();
                 self.scroll = 0;
                 self.follow = true;
-                vec![Op::Clear]
+                vec![Op::Clear {}]
+            }
+            CommandEffect::CompactConversation(instructions) => {
+                let id = TaskId(self.next_task);
+                self.next_task += 1;
+                if self.turn.active.is_some() {
+                    self.push_toast(
+                        NotifyKind::Info,
+                        "will compact after the current task".to_owned(),
+                    );
+                }
+                vec![Op::Compact { id, instructions }]
             }
             CommandEffect::Submit(text) => self.submit_text(text),
             CommandEffect::Notice(message) => {
-                self.transcript.push_notice(message);
+                self.push_toast(NotifyKind::Info, message);
                 Vec::new()
             }
             CommandEffect::Error(message) => {
-                self.transcript.push_error(message);
+                self.push_toast(NotifyKind::Error, message);
                 Vec::new()
             }
             CommandEffect::OpenUsage => {
                 self.overlay = Overlay::Usage;
+                self.usage.scroll = 0;
                 self.dirty = true;
                 Vec::new()
             }
+            CommandEffect::PlanMode(text) => self.plan_command(text),
             CommandEffect::Noop => Vec::new(),
             CommandEffect::Quit => {
                 self.should_quit = true;
                 Vec::new()
             }
         }
+    }
+
+    fn plan_command(&mut self, text: Option<String>) -> Vec<Op> {
+        let target = if text.is_some() || self.mode == goat_protocol::Mode::Normal {
+            goat_protocol::Mode::Plan
+        } else {
+            goat_protocol::Mode::Normal
+        };
+        let mut ops = vec![Op::SetMode { mode: target }];
+        if self.turn.active.is_some() {
+            self.push_toast(
+                NotifyKind::Info,
+                format!("{} mode starts after this turn", mode_label(target)),
+            );
+            if text.is_some() {
+                self.push_toast(
+                    NotifyKind::Info,
+                    "resend your request once plan mode is active".to_owned(),
+                );
+            }
+        } else if let Some(text) = text {
+            ops.extend(self.submit_text(text));
+        }
+        self.dirty = true;
+        ops
+    }
+
+    pub(crate) fn on_mode_changed(
+        &mut self,
+        mode: goat_protocol::Mode,
+        _plan_path: Option<String>,
+    ) {
+        self.mode = mode;
+        self.dirty = true;
+    }
+
+    pub(crate) fn on_plan_proposed(
+        &mut self,
+        id: TaskId,
+        call: ToolCallId,
+        plan: String,
+        path: String,
+    ) {
+        self.overlay = Overlay::Plan(PlanOverlay {
+            id,
+            call,
+            plan,
+            path,
+            scroll: 0,
+            focus: PlanFocus::Approve,
+            feedback: None,
+        });
+        self.dirty = true;
+    }
+
+    pub(crate) fn on_plan_dismissed(&mut self) {
+        if matches!(self.overlay, Overlay::Plan(_)) {
+            self.overlay = Overlay::None;
+        }
+        self.dirty = true;
     }
 
     pub(crate) fn apply_config_outcome(&mut self, outcome: ConfigOutcome) -> Vec<Op> {
@@ -360,59 +544,181 @@ impl App {
             }
             ConfigOutcome::SetTheme { dark } => {
                 self.theme = if dark { Theme::dark() } else { Theme::light() };
+                self.transcript.invalidate();
+                for run in &mut self.agent_runs {
+                    run.transcript.invalidate();
+                }
                 if let Overlay::Config(config) = &mut self.overlay {
                     config.set_providers(self.account_entries.clone());
                 }
-                vec![Op::SetTheme { dark }]
+                let mut cfg = goat_config::Config::load();
+                cfg.theme = if dark {
+                    goat_config::ThemeChoice::Dark
+                } else {
+                    goat_config::ThemeChoice::Light
+                };
+                self.persist_config(&cfg);
+                Vec::new()
             }
             ConfigOutcome::SetMouseCapture { enabled } => {
                 self.mouse_capture = enabled;
+                tui::set_mouse_capture(enabled);
+                let mut cfg = goat_config::Config::load();
+                cfg.mouse_capture_enabled = enabled;
+                self.persist_config(&cfg);
                 Vec::new()
             }
             ConfigOutcome::SetComputerUse { enabled } => {
                 self.computer_use = enabled;
                 let mut cfg = goat_config::Config::load();
                 cfg.computer_use_enabled = enabled;
-                let _ = cfg.save();
+                self.persist_config(&cfg);
                 Vec::new()
             }
             ConfigOutcome::SetBrowser { enabled } => {
                 self.browser = enabled;
                 let mut cfg = goat_config::Config::load();
                 cfg.browser_enabled = enabled;
-                let _ = cfg.save();
+                self.persist_config(&cfg);
                 Vec::new()
             }
         }
     }
 
     pub(crate) fn submit(&mut self) -> Vec<Op> {
-        if self.active.is_some() || self.composer.is_empty() {
+        if self.composer.is_empty() {
             return Vec::new();
         }
+        if self.composer.shell() {
+            if self.composer.text().trim().is_empty() {
+                return Vec::new();
+            }
+            if self.turn.active.is_some() {
+                self.push_toast(
+                    NotifyKind::Info,
+                    "finish or interrupt the task before running a shell command".to_owned(),
+                );
+                return Vec::new();
+            }
+            let command = self.composer.take();
+            return self.submit_shell(command);
+        }
         let text = self.composer.take();
+        let attachments = self.composer.take_attachments();
         let trimmed = text.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() && attachments.is_empty() {
             return Vec::new();
         }
         if trimmed.starts_with('/') {
             let cmd = trimmed.to_owned();
-            return self.dispatch_slash_command(&cmd);
+            if slash_command_name(&cmd).is_some_and(|name| self.commands.contains(name)) {
+                return self.dispatch_slash_command(&cmd);
+            }
         }
-        self.submit_text(text)
+        if !attachments.is_empty() && !self.current_model_supports_images() {
+            self.composer.set_plain_text(&text);
+            self.composer.push_attachments(attachments);
+            self.push_toast(
+                NotifyKind::Error,
+                "current model does not support image input".to_owned(),
+            );
+            self.dirty = true;
+            return Vec::new();
+        }
+        self.submit_text_with_attachments(text, attachments)
+    }
+
+    pub(crate) fn submit_shell(&mut self, command: String) -> Vec<Op> {
+        let id = TaskId(self.next_task);
+        self.next_task += 1;
+        self.turn.active = Some(id);
+        self.turn.active_shell = true;
+        self.transcript.push_shell(id, command.clone());
+        self.follow = true;
+        vec![Op::SubmitShell { id, command }]
     }
 
     pub(crate) fn submit_text(&mut self, text: String) -> Vec<Op> {
-        if self.active.is_some() {
-            return Vec::new();
-        }
+        self.submit_text_with_attachments(text, Vec::new())
+    }
+
+    pub(crate) fn submit_text_with_attachments(
+        &mut self,
+        text: String,
+        attachments: Vec<goat_protocol::InputAttachment>,
+    ) -> Vec<Op> {
         let id = TaskId(self.next_task);
         self.next_task += 1;
-        self.active = Some(id);
-        self.reset_agents();
-        self.transcript.push_user(text.clone());
         self.follow = true;
-        vec![Op::SubmitMessage { id, text }]
+        self.dirty = true;
+        if self.turn.active.is_none() {
+            self.turn.active = Some(id);
+            self.reset_agents();
+        }
+        self.queued.push((id, text.clone(), attachments.clone()));
+        vec![Op::SubmitMessage {
+            id,
+            text,
+            attachments,
+        }]
+    }
+
+    pub(crate) fn queued_labels(&self) -> Vec<String> {
+        if !matches!(self.main_view, MainView::Live) {
+            return Vec::new();
+        }
+        self.queued
+            .iter()
+            .filter(|(id, _, _)| self.turn.active != Some(*id))
+            .map(|(_, text, attachments)| {
+                text.lines()
+                    .find(|line| !line.trim().is_empty())
+                    .map_or_else(
+                        || {
+                            attachments
+                                .first()
+                                .map(|a| format!("[image: {}]", a.label))
+                                .unwrap_or_default()
+                        },
+                        str::to_owned,
+                    )
+            })
+            .collect()
+    }
+
+    pub(crate) fn restore_queued_to_composer(&mut self) {
+        if self.queued.is_empty() {
+            return;
+        }
+        let restored: Vec<(String, Vec<goat_protocol::InputAttachment>)> = self
+            .queued
+            .drain(..)
+            .map(|(_, text, attachments)| (text, attachments))
+            .collect();
+        let draft = self.composer.text();
+        self.composer.clear();
+        for (index, (text, attachments)) in restored.into_iter().enumerate() {
+            if index > 0 {
+                self.composer.insert_str("\n");
+            }
+            self.composer.insert_str(&text);
+            self.composer.push_attachments(attachments);
+        }
+        if !draft.trim().is_empty() {
+            self.composer.insert_str("\n");
+            self.composer.insert_str(&draft);
+        }
+        self.dirty = true;
+    }
+
+    pub(crate) fn current_model_supports_images(&self) -> bool {
+        let Some(model) = &self.model else {
+            return false;
+        };
+        self.models
+            .iter()
+            .find(|entry| entry.provider == model.provider && entry.model == model.model)
+            .is_some_and(|entry| entry.supports_images)
     }
 
     pub(crate) fn current_efforts(&self) -> Vec<Effort> {
@@ -428,8 +734,7 @@ impl App {
 
     pub(crate) fn apply_effort(&mut self, effort: Effort) -> Vec<Op> {
         let Some(current) = &self.model else {
-            self.transcript
-                .push_error("select a model first".to_owned());
+            self.push_toast(NotifyKind::Error, "select a model first".to_owned());
             return Vec::new();
         };
         let mut target = current.clone();
@@ -463,9 +768,29 @@ impl App {
     }
 
     pub(crate) fn update_command_menu(&mut self) {
+        if self.composer.shell() {
+            if matches!(self.overlay, Overlay::Commands(_) | Overlay::Files(_)) {
+                self.overlay = Overlay::None;
+            }
+            return;
+        }
+        if let Some(query) = self.composer.at_query() {
+            if let Overlay::Files(menu) = &mut self.overlay {
+                menu.update(&query);
+            } else {
+                let root = std::path::PathBuf::from(&self.cwd);
+                self.overlay = Overlay::Files(FileMenu::new(&root, &query));
+            }
+            return;
+        }
+        if matches!(self.overlay, Overlay::Files(_)) {
+            self.overlay = Overlay::None;
+        }
         let text = self.composer.text();
         let trimmed = text.trim_start();
-        if trimmed.starts_with('/') && !trimmed.contains(' ') {
+        if trimmed.starts_with('/')
+            && slash_command_name(trimmed).is_none_or(|name| !name.contains('/'))
+        {
             match &mut self.overlay {
                 Overlay::Commands(menu) => menu.update(&self.commands, trimmed),
                 _ => {
@@ -478,13 +803,29 @@ impl App {
     }
 
     pub(crate) fn clamp_scroll(&mut self, viewport_height: u16, content_width: u16) {
+        self.viewport_rows = viewport_height;
         let max = self
             .content_height(content_width)
-            .saturating_sub(viewport_height);
-        if self.scroll > max {
+            .saturating_sub(usize::from(viewport_height));
+        if self.follow {
             self.scroll = max;
+        } else {
+            if self.scroll > max {
+                self.scroll = max;
+            }
+            self.follow = self.scroll >= max;
         }
-        self.follow = self.scroll >= max;
+    }
+
+    pub(crate) fn page_rows(&self) -> usize {
+        usize::from(self.viewport_rows.saturating_sub(1)).max(1)
+    }
+
+    pub(crate) fn wheel_scroll_allowed(&self) -> bool {
+        matches!(
+            self.overlay,
+            Overlay::None | Overlay::Commands(_) | Overlay::Files(_) | Overlay::Agents(_)
+        )
     }
 
     pub(crate) fn take_dirty(&mut self) -> bool {
@@ -504,11 +845,31 @@ impl App {
         self.composer.desired_height(available_width)
     }
 
+    pub(crate) fn plan_prompt_active(&self) -> bool {
+        self.mode == goat_protocol::Mode::Plan && !self.composer.shell()
+    }
+
     pub(crate) fn elapsed_secs(&self) -> Option<u64> {
-        self.task_start.map(|t| t.elapsed().as_secs())
+        self.turn.task_start.map(|t| t.elapsed().as_secs())
     }
     pub(crate) fn is_busy(&self) -> bool {
-        self.active.is_some()
+        self.turn.active.is_some()
+    }
+    pub(crate) fn reset_active_state(&mut self) {
+        self.turn.active = None;
+        self.turn.active_shell = false;
+        self.turn.task_start = None;
+        self.turn.thinking = false;
+        self.turn.retry = None;
+        self.turn.compacting = false;
+    }
+    pub(crate) fn promote_pending_ask(&mut self) {
+        if matches!(self.overlay, Overlay::None | Overlay::Commands(_))
+            && let Some((picker, call)) = self.pending.ask.take()
+        {
+            self.overlay = Overlay::Ask(picker, call);
+            self.dirty = true;
+        }
     }
     pub(crate) fn cwd(&self) -> &str {
         &self.cwd
@@ -519,15 +880,87 @@ impl App {
     pub(crate) fn clear_armed(&self) -> bool {
         self.clear_arm.is_some()
     }
+
+    pub(crate) fn push_toast(&mut self, kind: NotifyKind, message: String) {
+        self.toasts.push(crate::toast::Toast::new(kind, message));
+        self.dirty = true;
+    }
+
+    fn persist_config(&mut self, cfg: &goat_config::Config) {
+        if let Err(err) = cfg.save() {
+            tracing::warn!(error = %err, "failed to save config");
+            self.push_toast(
+                NotifyKind::Error,
+                "could not save settings; change may not persist".to_owned(),
+            );
+        }
+    }
+
+    pub(crate) fn clear_ctx_indicator(&mut self) {
+        if let Some(model) = &self.model {
+            let key = (model.provider.clone(), model.account.clone());
+            self.usage.last.remove(&key);
+        }
+    }
     pub(crate) fn spinner_frame(&self) -> &'static str {
         symbols::SPINNER[self.spinner % symbols::SPINNER.len()]
     }
 
-    pub(crate) fn content_height(&self, width: u16) -> u16 {
-        self.active_transcript()
-            .content_height(width, self.theme, self.is_busy())
+    pub(crate) fn working_state(&self) -> Option<crate::transcript::Working> {
+        if self.turn.active_shell {
+            return None;
+        }
+        self.is_busy().then(|| crate::transcript::Working {
+            elapsed: self.elapsed_secs(),
+            label: self
+                .retry_status()
+                .or_else(|| self.compacting_status())
+                .or_else(|| self.agent_status()),
+            thinking: self.turn.thinking,
+            tokens: (self.usage.turn_tokens > 0).then_some(self.usage.turn_tokens),
+        })
     }
-    pub(crate) fn scroll(&self) -> u16 {
+
+    pub(crate) fn take_notification(&mut self) -> Option<crate::notification::Notification> {
+        self.notification_pending.take()
+    }
+
+    pub(crate) fn queue_notification(&mut self, notification: crate::notification::Notification) {
+        self.notification_pending = Some(notification);
+    }
+
+    pub(crate) fn compacting_status(&self) -> Option<String> {
+        self.turn
+            .compacting
+            .then(|| format!("compacting context{}", symbols::ui::ELLIPSIS))
+    }
+
+    pub(crate) fn retry_status(&self) -> Option<String> {
+        let retry = self.turn.retry.as_ref()?;
+        let remaining = retry
+            .until
+            .saturating_duration_since(std::time::Instant::now())
+            .as_millis()
+            .div_ceil(1000);
+        Some(format!(
+            "retrying in {remaining}s{sep}attempt {attempt}/{max}{sep}{reason}{sep}response will restart",
+            sep = symbols::ui::SEPARATOR,
+            attempt = retry.attempt,
+            max = retry.max_attempts,
+            reason = retry.reason,
+        ))
+    }
+
+    pub(crate) fn content_height(&self, width: u16) -> usize {
+        self.active_transcript().content_height(
+            width,
+            self.theme,
+            &self.highlighter,
+            self.working_state().as_ref(),
+            &self.queued_labels(),
+        )
+    }
+    pub(crate) fn scroll(&self) -> usize {
         self.scroll
     }
     pub(crate) fn overlay(&self) -> &Overlay {
@@ -573,7 +1006,6 @@ impl App {
         if let Some(run) = self.agent_runs.get(cursor) {
             self.overlay = Overlay::Agents(cursor);
             self.main_view = MainView::Agent(run.id);
-            self.scroll = 0;
             self.follow = true;
             self.dirty = true;
         }
@@ -583,7 +1015,6 @@ impl App {
         self.overlay = Overlay::None;
         self.main_view = MainView::Live;
         self.follow = true;
-        self.scroll = u16::MAX;
         self.dirty = true;
     }
 
@@ -616,27 +1047,48 @@ impl App {
         Some(format!("{running} agents · {}", parts.join(", ")))
     }
 
-    pub(crate) fn build_usage_view(&self) -> UsageView {
+    pub(crate) fn current_context_window(&self) -> Option<u32> {
+        let model = self.model.as_ref()?;
+        self.context_window
+            .get(&(model.provider.clone(), model.account.clone()))
+            .copied()
+    }
+
+    pub(crate) fn build_usage_view(&self) -> UsageView<'_> {
         UsageView::new(
-            self.account_entries.clone(),
-            self.usage_last.clone(),
-            self.usage_total.clone(),
-            self.rate_limits.clone(),
-            self.context_window,
-            self.model.clone(),
+            &self.account_entries,
+            &self.usage.last,
+            &self.usage.total,
+            &self.usage.rate_limits,
+            self.current_context_window(),
+            self.model.as_ref(),
+            self.usage.scroll,
         )
     }
 
     pub(crate) fn ctx_indicator(&self) -> Option<(f32, u64, u32)> {
         let model = self.model.as_ref()?;
-        let window = self.context_window?;
+        let window = self.current_context_window()?;
         let key = (model.provider.clone(), model.account.clone());
-        let usage = self.usage_last.get(&key)?;
+        let usage = self.usage.last.get(&key)?;
         let used = u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
         #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
         let pct = (used as f64 / f64::from(window) * 100.0).min(100.0) as f32;
         Some((pct, used, window))
     }
+}
+
+pub(crate) fn mode_label(mode: goat_protocol::Mode) -> &'static str {
+    match mode {
+        goat_protocol::Mode::Normal => "normal",
+        goat_protocol::Mode::Plan => "plan",
+    }
+}
+
+fn slash_command_name(raw: &str) -> Option<&str> {
+    let rest = raw.trim().strip_prefix('/')?;
+    let name = rest.split_whitespace().next().unwrap_or(rest);
+    (!name.is_empty()).then_some(name)
 }
 
 fn shorten_home(path: &Path) -> String {
@@ -653,12 +1105,24 @@ fn shorten_home(path: &Path) -> String {
 pub async fn run(
     ops: Sender<Op>,
     mut events: Receiver<EngineEvent>,
+    mut presence: Receiver<usize>,
     theme: Theme,
+    initial_ops: Vec<Op>,
 ) -> color_eyre::Result<()> {
-    let mut terminal = tui::init()?;
-    let result = event_loop(&mut terminal, &ops, &mut events, theme).await;
+    let mut app = App::new(theme);
+    let (mut terminal, picker) = tui::init(app.mouse_capture)?;
+    app.picker = picker;
+    let result = event_loop(
+        &mut terminal,
+        &ops,
+        &mut events,
+        &mut presence,
+        app,
+        initial_ops,
+    )
+    .await;
     tui::restore();
-    let _ = ops.send(Op::Shutdown).await;
+    let _ = ops.send(Op::Shutdown {}).await;
     result
 }
 
@@ -666,17 +1130,29 @@ async fn event_loop(
     terminal: &mut DefaultTerminal,
     ops: &Sender<Op>,
     events: &mut Receiver<EngineEvent>,
-    theme: Theme,
+    presence: &mut Receiver<usize>,
+    mut app: App,
+    initial_ops: Vec<Op>,
 ) -> color_eyre::Result<()> {
-    let mut app = App::new(theme);
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(TICK);
+
+    let (attach_tx, mut attach_rx) = tokio::sync::mpsc::channel(8);
+
+    for op in initial_ops {
+        if ops.send(op).await.is_err() {
+            app.should_quit = true;
+        }
+    }
 
     terminal.draw(|frame| view::render(frame, &mut app))?;
     while !app.should_quit {
         let event = tokio::select! {
             maybe = input.next() => match maybe {
-                Some(Ok(ev)) => AppEvent::Input(ev),
+                Some(Ok(ev)) => match prepare_input_event(ev, &attach_tx) {
+                    Some(event) => event,
+                    None => continue,
+                },
                 Some(Err(_)) | None => break,
             },
             _ = ticker.tick() => AppEvent::Tick,
@@ -684,6 +1160,11 @@ async fn event_loop(
                 Some(ev) => AppEvent::Engine(ev),
                 None => AppEvent::EngineClosed,
             },
+            maybe = attach_rx.recv() => match maybe {
+                Some(event) => event,
+                None => AppEvent::Tick,
+            },
+            Some(count) = presence.recv() => AppEvent::Presence(count),
         };
 
         for op in app.update(event) {
@@ -691,7 +1172,17 @@ async fn event_loop(
                 app.should_quit = true;
             }
         }
+        while let Ok(pending) = events.try_recv() {
+            for op in app.update(AppEvent::Engine(pending)) {
+                if ops.send(op).await.is_err() {
+                    app.should_quit = true;
+                }
+            }
+        }
 
+        if let Some(notification) = app.take_notification() {
+            crate::notification::spawn(notification);
+        }
         if app.take_dirty() {
             terminal.draw(|frame| view::render(frame, &mut app))?;
         }
@@ -699,12 +1190,60 @@ async fn event_loop(
     Ok(())
 }
 
+fn prepare_input_event(ev: CtEvent, tx: &tokio::sync::mpsc::Sender<AppEvent>) -> Option<AppEvent> {
+    match &ev {
+        CtEvent::Paste(text) => {
+            let text = text.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let fallback = !crate::attachment::paste_contains_only_image_paths(&text);
+                let result = tokio::task::spawn_blocking({
+                    let text = text.clone();
+                    move || {
+                        crate::attachment::attachments_from_paste(&text)
+                            .map_err(|err| err.to_string())
+                    }
+                })
+                .await
+                .unwrap_or_else(|err| Err(err.to_string()));
+                let _ = tx
+                    .send(AppEvent::AttachmentPaste {
+                        text,
+                        result,
+                        fallback,
+                    })
+                    .await;
+            });
+            None
+        }
+        CtEvent::Key(key)
+            if key.kind == KeyEventKind::Press
+                && key
+                    .modifiers
+                    .intersects(KeyModifiers::SUPER | KeyModifiers::META)
+                && matches!(key.code, KeyCode::Char('v' | 'V')) =>
+        {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(|| {
+                    crate::attachment::attachment_from_clipboard().map_err(|err| err.to_string())
+                })
+                .await
+                .unwrap_or_else(|err| Err(err.to_string()));
+                let _ = tx.send(AppEvent::ClipboardImage(result)).await;
+            });
+            None
+        }
+        _ => Some(AppEvent::Input(ev)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use goat_protocol::{AccountChoice, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId};
 
-    use super::{App, Overlay};
+    use super::{App, Overlay, PlanFocus, PlanOverlay};
     use crate::theme::Theme;
 
     fn single_entry(provider: &str, model: &str) -> ModelEntry {
@@ -722,6 +1261,7 @@ mod tests {
                 },
             }],
             context_window: None,
+            supports_images: true,
             efforts: Vec::new(),
         }
     }
@@ -743,6 +1283,348 @@ mod tests {
         assert!(matches!(started.as_slice(), [Op::SubmitMessage { .. }]));
         let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(ops.as_slice(), [Op::Interrupt { .. }]));
+    }
+
+    fn user_lines(app: &App) -> usize {
+        app.transcript
+            .items
+            .iter()
+            .filter(|item| matches!(item, crate::transcript::Item::User(_)))
+            .count()
+    }
+
+    fn submit_id(ops: &[Op]) -> TaskId {
+        match ops {
+            [Op::SubmitMessage { id, .. }] => *id,
+            _ => panic!("expected a single SubmitMessage op"),
+        }
+    }
+
+    #[test]
+    fn sender_first_message_renders_once_on_echo() {
+        let mut app = App::new(Theme::dark());
+        let ops = app.submit_text("hello".to_owned());
+        let id = submit_id(&ops);
+        assert_eq!(user_lines(&app), 0, "no optimistic render");
+        assert_eq!(app.turn.active, Some(id));
+
+        app.on_engine(EngineEvent::UserMessage {
+            id,
+            text: "hello".to_owned(),
+            attachments: Vec::new(),
+        });
+        assert_eq!(user_lines(&app), 1);
+        assert!(app.queued.is_empty());
+
+        app.on_engine(EngineEvent::TaskStarted { id });
+        assert_eq!(user_lines(&app), 1, "TaskStarted adds no user line");
+    }
+
+    #[test]
+    fn peer_message_renders_from_echo_and_resets() {
+        let mut app = App::new(Theme::dark());
+        assert!(app.turn.active.is_none());
+        app.on_engine(EngineEvent::UserMessage {
+            id: TaskId(42),
+            text: "from another window".to_owned(),
+            attachments: Vec::new(),
+        });
+        assert_eq!(user_lines(&app), 1);
+        assert!(app.follow);
+    }
+
+    #[test]
+    fn steering_echo_does_not_reset_agents() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::TaskStarted { id: TaskId(1) });
+        app.follow = false;
+        app.on_engine(EngineEvent::UserMessage {
+            id: TaskId(2),
+            text: "mid turn".to_owned(),
+            attachments: Vec::new(),
+        });
+        assert_eq!(user_lines(&app), 1);
+        assert!(!app.follow, "mid-turn echo does not force follow");
+    }
+
+    #[test]
+    fn in_flight_first_message_excluded_from_queued_labels() {
+        let mut app = App::new(Theme::dark());
+        let ops = app.submit_text("hello".to_owned());
+        let _ = submit_id(&ops);
+        assert!(app.queued_labels().is_empty());
+    }
+
+    #[test]
+    fn queued_steering_message_shows_label() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::TaskStarted { id: TaskId(100) });
+        let _ = app.submit_text("next up".to_owned());
+        assert_eq!(app.queued_labels(), vec!["next up".to_owned()]);
+    }
+
+    #[test]
+    fn first_message_then_immediate_interrupt_does_not_double_render() {
+        let mut app = App::new(Theme::dark());
+        let ops = app.submit_text("hello".to_owned());
+        let id = submit_id(&ops);
+        app.on_engine(EngineEvent::UserMessage {
+            id,
+            text: "hello".to_owned(),
+            attachments: Vec::new(),
+        });
+        app.on_engine(EngineEvent::TaskStarted { id });
+        app.on_engine(EngineEvent::TaskDone {
+            id,
+            interrupted: true,
+        });
+        assert_eq!(user_lines(&app), 1);
+        assert!(app.composer.text().trim().is_empty());
+    }
+
+    #[test]
+    fn task_done_queues_notification_only_when_unfocused() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::TaskDone {
+            id: TaskId(1),
+            interrupted: false,
+        });
+        assert_eq!(app.take_notification(), None);
+
+        app.update(super::AppEvent::Input(crossterm::event::Event::FocusLost));
+        app.on_engine(EngineEvent::TaskDone {
+            id: TaskId(2),
+            interrupted: false,
+        });
+        assert_eq!(
+            app.take_notification(),
+            Some(crate::notification::Notification::Completion)
+        );
+
+        app.update(super::AppEvent::Input(crossterm::event::Event::FocusGained));
+        app.on_engine(EngineEvent::TaskDone {
+            id: TaskId(3),
+            interrupted: false,
+        });
+        assert_eq!(app.take_notification(), None);
+    }
+
+    #[test]
+    fn ask_started_queues_attention_notification_only_when_unfocused() {
+        use goat_protocol::{AskQuestion, ToolCallId};
+
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::AskStarted {
+            id: TaskId(1),
+            call: ToolCallId(1),
+            questions: vec![AskQuestion {
+                question: "continue?".to_owned(),
+                options: Vec::new(),
+                multiple: false,
+            }],
+        });
+        assert_eq!(app.take_notification(), None);
+
+        app.update(super::AppEvent::Input(crossterm::event::Event::FocusLost));
+        app.on_engine(EngineEvent::AskStarted {
+            id: TaskId(2),
+            call: ToolCallId(2),
+            questions: vec![AskQuestion {
+                question: "continue?".to_owned(),
+                options: Vec::new(),
+                multiple: false,
+            }],
+        });
+        assert_eq!(
+            app.take_notification(),
+            Some(crate::notification::Notification::Attention)
+        );
+    }
+
+    #[test]
+    fn back_tab_toggles_plan_mode() {
+        use goat_protocol::Mode;
+        let mut app = App::new(Theme::dark());
+        let ops = app.on_key(press(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(matches!(ops.as_slice(), [Op::SetMode { mode: Mode::Plan }]));
+        app.on_mode_changed(Mode::Plan, Some("/p.md".to_owned()));
+        let ops = app.on_key(press(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(matches!(
+            ops.as_slice(),
+            [Op::SetMode { mode: Mode::Normal }]
+        ));
+    }
+
+    #[test]
+    fn plan_proposed_overlay_approve_and_reject() {
+        use goat_protocol::{PlanDecision, ToolCallId};
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::PlanProposed {
+            id: TaskId(7),
+            call: ToolCallId(3),
+            plan: "do the thing".to_owned(),
+            path: "/p.md".to_owned(),
+        });
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                focus: PlanFocus::Approve,
+                ..
+            })
+        ));
+        let ops = app.on_key(press(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(matches!(
+            ops.as_slice(),
+            [Op::ResolvePlan {
+                decision: PlanDecision::Approve {},
+                ..
+            }]
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+
+        app.on_engine(EngineEvent::PlanProposed {
+            id: TaskId(7),
+            call: ToolCallId(4),
+            plan: "again".to_owned(),
+            path: "/p.md".to_owned(),
+        });
+        app.on_key(press(KeyCode::Char('r'), KeyModifiers::NONE));
+        for ch in "nope".chars() {
+            app.on_key(press(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            ops.as_slice(),
+            [Op::ResolvePlan {
+                decision: PlanDecision::Reject { feedback },
+                ..
+            }] if feedback == "nope"
+        ));
+    }
+
+    #[test]
+    fn plan_overlay_esc_dismisses() {
+        use goat_protocol::ToolCallId;
+        let mut app = App::new(Theme::dark());
+        app.turn.active = Some(TaskId(7));
+        app.on_engine(EngineEvent::PlanProposed {
+            id: TaskId(7),
+            call: ToolCallId(3),
+            plan: "do the thing".to_owned(),
+            path: "/p.md".to_owned(),
+        });
+        let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(ops.as_slice(), [Op::Interrupt { .. }]));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn plan_feedback_esc_returns_to_choices() {
+        use goat_protocol::ToolCallId;
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::PlanProposed {
+            id: TaskId(7),
+            call: ToolCallId(3),
+            plan: "do the thing".to_owned(),
+            path: "/p.md".to_owned(),
+        });
+        app.on_key(press(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                feedback: Some(_),
+                ..
+            })
+        ));
+        let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(ops.is_empty());
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay { feedback: None, .. })
+        ));
+    }
+
+    #[test]
+    fn plan_choice_navigation_matches_picker() {
+        use goat_protocol::{PlanDecision, ToolCallId};
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::PlanProposed {
+            id: TaskId(7),
+            call: ToolCallId(3),
+            plan: "do the thing".to_owned(),
+            path: "/p.md".to_owned(),
+        });
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                focus: PlanFocus::Approve,
+                ..
+            })
+        ));
+        app.on_key(press(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                focus: PlanFocus::Reject,
+                ..
+            })
+        ));
+        app.on_key(press(KeyCode::Up, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                focus: PlanFocus::Approve,
+                ..
+            })
+        ));
+        app.on_key(press(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                focus: PlanFocus::Reject,
+                ..
+            })
+        ));
+        app.on_key(press(KeyCode::Up, KeyModifiers::NONE));
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            ops.as_slice(),
+            [Op::ResolvePlan {
+                decision: PlanDecision::Approve {},
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn plan_preview_scroll_uses_page_keys() {
+        use goat_protocol::ToolCallId;
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::PlanProposed {
+            id: TaskId(7),
+            call: ToolCallId(3),
+            plan: "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten".to_owned(),
+            path: "/p.md".to_owned(),
+        });
+        app.on_key(press(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay {
+                scroll: 0,
+                focus: PlanFocus::Reject,
+                ..
+            })
+        ));
+        app.on_key(press(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay { scroll: 10, .. })
+        ));
+        app.on_key(press(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Plan(PlanOverlay { scroll: 0, .. })
+        ));
     }
 
     #[test]
@@ -767,6 +1649,163 @@ mod tests {
         assert!(!app.should_quit);
         app.on_ctrl_c();
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn bang_on_empty_enters_shell_mode() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::SHIFT));
+        assert!(app.composer.shell());
+        assert!(app.composer.is_empty());
+    }
+
+    #[test]
+    fn bang_mid_text_is_literal() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('l'), KeyModifiers::NONE));
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::SHIFT));
+        assert!(!app.composer.shell());
+        assert_eq!(app.composer.text(), "l!");
+    }
+
+    #[test]
+    fn backspace_on_empty_exits_shell_mode() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.on_key(press(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(!app.composer.shell());
+    }
+
+    #[test]
+    fn esc_on_empty_exits_shell_mode() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.composer.shell());
+    }
+
+    #[test]
+    fn shell_submit_emits_submit_shell() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("echo hi");
+        let ops = app.submit();
+        assert!(
+            matches!(ops.as_slice(), [Op::SubmitShell { command, .. }] if command == "echo hi")
+        );
+        assert!(app.turn.active.is_some());
+        assert!(app.turn.active_shell);
+        assert!(matches!(
+            app.transcript.items.last(),
+            Some(crate::transcript::Item::Shell { .. })
+        ));
+    }
+
+    #[test]
+    fn shell_mode_slash_text_is_not_a_command() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.on_key(press(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(!matches!(app.overlay, Overlay::Commands(_)));
+        app.composer.insert_str("usr/bin/true");
+        let ops = app.submit();
+        assert!(
+            matches!(ops.as_slice(), [Op::SubmitShell { command, .. }] if command == "/usr/bin/true")
+        );
+    }
+
+    #[test]
+    fn whitespace_shell_submit_keeps_mode() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("   ");
+        let ops = app.submit();
+        assert!(ops.is_empty());
+        assert!(app.composer.shell());
+        assert_eq!(app.composer.text(), "   ");
+    }
+
+    #[test]
+    fn ctrl_c_during_shell_run_interrupts() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("sleep 5");
+        app.submit();
+        let ops = app.on_ctrl_c();
+        assert!(matches!(ops.as_slice(), [Op::Interrupt { .. }]));
+        assert!(!app.quit_armed());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn shell_run_suppresses_working_line() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("sleep 5");
+        app.submit();
+        app.on_engine(EngineEvent::TaskStarted { id: TaskId(1) });
+        assert!(app.working_state().is_none());
+    }
+
+    #[test]
+    fn shell_done_completes_cell_and_clears_state() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("echo hi");
+        let ops = app.submit();
+        let [Op::SubmitShell { id, .. }] = ops.as_slice() else {
+            panic!("expected SubmitShell");
+        };
+        app.on_engine(EngineEvent::ShellDone {
+            id: *id,
+            output: "hi".to_owned(),
+        });
+        app.on_engine(EngineEvent::TaskDone {
+            id: *id,
+            interrupted: false,
+        });
+        assert!(app.turn.active.is_none());
+        assert!(!app.turn.active_shell);
+        assert!(matches!(
+            app.transcript.items.last(),
+            Some(crate::transcript::Item::Shell {
+                status: crate::transcript::ShellStatus::Done(output),
+                ..
+            }) if output == "hi"
+        ));
+    }
+
+    #[test]
+    fn shell_history_recall_restores_mode() {
+        let mut app = App::new(Theme::dark());
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("echo 1");
+        app.submit();
+        assert!(!app.composer.shell());
+        app.on_engine(EngineEvent::TaskDone {
+            id: TaskId(1),
+            interrupted: false,
+        });
+        app.on_key(press(KeyCode::Up, KeyModifiers::NONE));
+        assert!(app.composer.shell());
+        assert_eq!(app.composer.text(), "echo 1");
+    }
+
+    #[test]
+    fn shell_submit_while_active_denies() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("hi");
+        app.submit();
+        app.on_key(press(KeyCode::Char('!'), KeyModifiers::NONE));
+        app.composer.insert_str("echo hi");
+        let ops = app.submit();
+        assert!(ops.is_empty());
+        assert!(
+            !app.toasts.is_empty(),
+            "denied shell submit must explain itself"
+        );
+        assert!(app.composer.shell());
+        assert_eq!(app.composer.text(), "echo hi");
     }
 
     #[test]
@@ -815,6 +1854,83 @@ mod tests {
         assert!(app.follow);
     }
 
+    fn filled_app() -> App {
+        let mut app = App::new(Theme::dark());
+        for i in 0..30 {
+            app.transcript.push_user(format!("message {i}"));
+        }
+        app.clamp_scroll(10, 80);
+        app
+    }
+
+    fn mouse(kind: crossterm::event::MouseEventKind) -> super::AppEvent {
+        super::AppEvent::Input(crossterm::event::Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+        ))
+    }
+
+    #[test]
+    fn clamp_scroll_materializes_bottom_when_following() {
+        let app = filled_app();
+        assert!(app.follow);
+        assert_eq!(app.scroll, app.content_height(80) - 10);
+    }
+
+    #[test]
+    fn wheel_up_unfollows_then_bottom_refollows() {
+        use crossterm::event::MouseEventKind;
+        let mut app = filled_app();
+        app.update(mouse(MouseEventKind::ScrollUp));
+        assert!(!app.follow);
+        app.clamp_scroll(10, 80);
+        assert!(!app.follow);
+        for _ in 0..40 {
+            app.update(mouse(MouseEventKind::ScrollDown));
+        }
+        app.clamp_scroll(10, 80);
+        assert!(app.follow);
+    }
+
+    #[test]
+    fn wheel_ignored_while_picker_overlay_open() {
+        use crossterm::event::MouseEventKind;
+        let mut app = filled_app();
+        app.update(mouse(MouseEventKind::ScrollUp));
+        app.clamp_scroll(10, 80);
+        let before = app.scroll;
+        app.dispatch_slash_command("/model");
+        app.update(mouse(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll, before);
+    }
+
+    #[test]
+    fn home_and_end_jump_transcript_when_composer_empty() {
+        let mut app = filled_app();
+        app.on_key(press(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.scroll, 0);
+        assert!(!app.follow);
+        app.clamp_scroll(10, 80);
+        assert_eq!(app.scroll, 0);
+        app.on_key(press(KeyCode::End, KeyModifiers::NONE));
+        app.clamp_scroll(10, 80);
+        assert!(app.follow);
+        assert_eq!(app.scroll, app.content_height(80) - 10);
+    }
+
+    #[test]
+    fn page_up_scrolls_by_viewport_and_unfollows() {
+        let mut app = filled_app();
+        let bottom = app.scroll;
+        app.on_key(press(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(!app.follow);
+        assert_eq!(app.scroll, bottom - 9);
+    }
+
     #[test]
     fn clear_command_empties_transcript_and_emits_clear() {
         let mut app = App::new(Theme::dark());
@@ -823,20 +1939,21 @@ mod tests {
         app.follow = false;
         app.composer.insert_str("/clear");
         let ops = app.submit();
-        assert!(matches!(ops.as_slice(), [Op::Clear]));
+        assert!(matches!(ops.as_slice(), [Op::Clear {}]));
         assert!(app.transcript.items.is_empty());
         assert_eq!(app.scroll, 0);
         assert!(app.follow);
     }
 
     #[test]
-    fn clear_command_ignored_while_active() {
+    fn clear_command_rebinds_even_while_active() {
         let mut app = App::new(Theme::dark());
-        app.active = Some(TaskId(1));
+        app.turn.active = Some(TaskId(1));
         app.transcript.push_user("in flight");
         let ops = app.dispatch_slash_command("/clear");
-        assert!(ops.is_empty());
-        assert!(!app.transcript.items.is_empty());
+        assert_eq!(ops, vec![Op::Clear {}]);
+        assert!(app.transcript.items.is_empty());
+        assert!(app.turn.active.is_none());
     }
 
     #[test]
@@ -901,32 +2018,36 @@ mod tests {
     }
 
     #[test]
-    fn unknown_slash_command_pushes_error() {
+    fn unknown_slash_command_submits_as_message() {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("/bogus");
         let ops = app.submit();
-        assert!(ops.is_empty());
-        assert!(matches!(app.overlay, Overlay::None));
-        assert!(app.active.is_none());
-        assert_eq!(app.transcript.items.len(), 1);
-        assert!(matches!(
-            &app.transcript.items[0],
-            crate::transcript::Item::Error(_)
-        ));
+        assert!(matches!(ops.as_slice(), [Op::SubmitMessage { text, .. }] if text == "/bogus"));
+        assert!(app.turn.active.is_some());
+        assert!(app.toasts.is_empty());
     }
 
     #[test]
-    fn slash_help_pushes_notice() {
+    fn absolute_path_starting_with_slash_submits_as_message() {
+        let mut app = App::new(Theme::dark());
+        app.composer.insert_str("/var/folders/image.png");
+        let ops = app.submit();
+        assert!(
+            matches!(ops.as_slice(), [Op::SubmitMessage { text, .. }] if text == "/var/folders/image.png")
+        );
+        assert!(app.turn.active.is_some());
+        assert!(app.toasts.is_empty());
+    }
+
+    #[test]
+    fn slash_help_opens_overlay() {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("/help");
         let ops = app.submit();
         assert!(ops.is_empty());
-        assert!(app.active.is_none());
-        assert_eq!(app.transcript.items.len(), 1);
-        assert!(matches!(
-            &app.transcript.items[0],
-            crate::transcript::Item::Notice(_)
-        ));
+        assert!(app.turn.active.is_none());
+        assert!(matches!(app.overlay, Overlay::Help));
+        assert!(app.transcript.items.is_empty());
     }
 
     #[test]
@@ -936,25 +2057,23 @@ mod tests {
             skills: vec![goat_protocol::SkillInfo {
                 name: "demo".to_owned(),
                 description: "a demo".to_owned(),
+                command: None,
             }],
         });
         app.composer.insert_str("/demo");
         let ops = app.submit();
         assert!(matches!(ops.as_slice(), [Op::SubmitMessage { .. }]));
-        assert!(app.active.is_some());
+        assert!(app.turn.active.is_some());
     }
 
     #[test]
-    fn unknown_skill_command_pushes_error() {
+    fn unknown_skill_command_submits_as_message() {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("/demo");
         let ops = app.submit();
-        assert!(ops.is_empty());
-        assert_eq!(app.transcript.items.len(), 1);
-        assert!(matches!(
-            &app.transcript.items[0],
-            crate::transcript::Item::Error(_)
-        ));
+        assert!(matches!(ops.as_slice(), [Op::SubmitMessage { text, .. }] if text == "/demo"));
+        assert!(app.turn.active.is_some());
+        assert!(app.toasts.is_empty());
     }
 
     fn entry_with_efforts(
@@ -979,15 +2098,13 @@ mod tests {
     }
 
     #[test]
-    fn effort_without_model_notices() {
+    fn effort_without_model_shows_toast() {
         let mut app = App::new(Theme::dark());
         let ops = app.dispatch_slash_command("/effort");
         assert!(ops.is_empty());
         assert!(!matches!(app.overlay, Overlay::Effort(_)));
-        assert!(matches!(
-            app.transcript.items.last(),
-            Some(crate::transcript::Item::Notice(_))
-        ));
+        assert!(app.transcript.items.is_empty());
+        assert_eq!(app.toasts.len(), 1);
     }
 
     #[test]
@@ -1041,10 +2158,8 @@ mod tests {
         select_model(&mut app, "openai", "gpt");
         let ops = app.dispatch_slash_command("/effort max");
         assert!(ops.is_empty());
-        assert!(matches!(
-            app.transcript.items.last(),
-            Some(crate::transcript::Item::Error(_))
-        ));
+        assert!(app.transcript.items.is_empty());
+        assert_eq!(app.toasts.len(), 1);
     }
 
     #[test]
@@ -1066,13 +2181,14 @@ mod tests {
         use goat_protocol::ThreadSummary;
         let mut app = App::new(Theme::dark());
         let ops = app.dispatch_slash_command("/resume");
-        assert!(matches!(ops.as_slice(), [Op::ListThreads]));
+        assert!(matches!(ops.as_slice(), [Op::ListThreads {}]));
         let ops = app.on_engine(EngineEvent::ThreadsListed {
             threads: vec![ThreadSummary {
                 id: 7,
                 title: "first chat".to_owned(),
                 model: "openai/gpt".to_owned(),
                 updated_at: 1,
+                live: false,
             }],
         });
         assert!(ops.is_empty());
@@ -1084,13 +2200,14 @@ mod tests {
         use goat_protocol::ThreadSummary;
         let mut app = App::new(Theme::dark());
         let ops = app.dispatch_slash_command("/resume 1");
-        assert!(matches!(ops.as_slice(), [Op::ListThreads]));
+        assert!(matches!(ops.as_slice(), [Op::ListThreads {}]));
         let ops = app.on_engine(EngineEvent::ThreadsListed {
             threads: vec![ThreadSummary {
                 id: 42,
                 title: "chat".to_owned(),
                 model: "openai/gpt".to_owned(),
                 updated_at: 1,
+                live: false,
             }],
         });
         assert!(matches!(ops.as_slice(), [Op::Resume { thread_id: 42 }]));
@@ -1109,18 +2226,27 @@ mod tests {
                 account: "default".to_owned(),
                 effort: Some(goat_protocol::Effort::High),
             },
+            context_tokens: None,
+            compaction_threshold: None,
+            mode: goat_protocol::Mode::Normal,
             entries: vec![
-                TranscriptEntry::User("hello".to_owned()),
-                TranscriptEntry::Assistant("hi there".to_owned()),
+                TranscriptEntry::User {
+                    text: "hello".to_owned(),
+                    attachments: Vec::new(),
+                },
+                TranscriptEntry::Assistant {
+                    text: "hi there".to_owned(),
+                },
                 TranscriptEntry::Tool {
                     call: ToolCall {
                         id: ToolCallId(1),
                         name: "Read".to_owned(),
-                        input: "f.rs".to_owned(),
+                        display: goat_protocol::ToolDisplay::primary("f.rs"),
                     },
                     outcome: ToolOutcome {
                         ok: true,
                         summary: Some("done".to_owned()),
+                        image: None,
                     },
                 },
             ],
@@ -1146,13 +2272,18 @@ mod tests {
         let mut app = App::new(Theme::dark());
         app.composer.insert_str("go");
         app.submit();
-        let top = app.active.unwrap();
+        let top = app.turn.active.unwrap();
+        app.on_engine(EngineEvent::UserMessage {
+            id: top,
+            text: "go".to_owned(),
+            attachments: Vec::new(),
+        });
         app.on_engine(EngineEvent::ToolStarted {
             id: top,
             call: ToolCall {
                 id: ToolCallId(1),
                 name: "Agent".to_owned(),
-                input: "{}".to_owned(),
+                display: goat_protocol::ToolDisplay::primary("explore"),
             },
         });
         let child = TaskId(1 << 32);
@@ -1168,7 +2299,7 @@ mod tests {
             call: ToolCall {
                 id: ToolCallId(1),
                 name: "Grep".to_owned(),
-                input: "x".to_owned(),
+                display: goat_protocol::ToolDisplay::primary("x"),
             },
         });
         app.on_engine(EngineEvent::ToolDone {
@@ -1177,6 +2308,7 @@ mod tests {
             outcome: ToolOutcome {
                 ok: true,
                 summary: None,
+                image: None,
             },
         });
 
@@ -1198,5 +2330,107 @@ mod tests {
         app.close_agent_selector();
         assert!(matches!(app.main_view, super::MainView::Live));
         assert_eq!(app.transcript().items.len(), 2);
+    }
+
+    #[test]
+    fn error_during_compaction_clears_compacting_status() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::CompactionStarted { id: TaskId(1) });
+        assert!(app.compacting_status().is_some());
+        app.on_engine(EngineEvent::Error {
+            id: Some(TaskId(1)),
+            message: "boom".to_owned(),
+        });
+        assert!(app.compacting_status().is_none());
+        assert!(!app.is_busy());
+    }
+
+    #[test]
+    fn ask_defers_while_modal_open_then_promotes_on_close() {
+        use goat_protocol::{AskQuestion, ToolCallId};
+        let mut app = App::new(Theme::dark());
+        app.overlay = Overlay::Help;
+        app.on_engine(EngineEvent::AskStarted {
+            id: TaskId(1),
+            call: ToolCallId(9),
+            questions: vec![AskQuestion {
+                question: "ok?".to_owned(),
+                options: Vec::new(),
+                multiple: false,
+            }],
+        });
+        assert!(matches!(app.overlay, Overlay::Help));
+        assert!(app.pending.ask.is_some());
+
+        app.overlay = Overlay::None;
+        app.promote_pending_ask();
+        assert!(matches!(app.overlay, Overlay::Ask(..)));
+        assert!(app.pending.ask.is_none());
+    }
+
+    #[test]
+    fn usage_attributes_to_event_model_not_current() {
+        use goat_protocol::Usage;
+        let mut app = App::new(Theme::dark());
+        app.model = Some(ModelTarget {
+            provider: "anthropic".to_owned(),
+            model: "sonnet".to_owned(),
+            account: "default".to_owned(),
+            effort: None,
+        });
+        app.on_engine(EngineEvent::Usage {
+            id: TaskId(1),
+            provider: "openai".to_owned(),
+            account: "work".to_owned(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            context_window: Some(128_000),
+            compaction_threshold: None,
+        });
+        let openai = app
+            .usage
+            .total
+            .get(&("openai".to_owned(), "work".to_owned()))
+            .copied();
+        assert_eq!(openai, Some((10, 5)));
+        assert!(
+            !app.usage
+                .total
+                .contains_key(&("anthropic".to_owned(), "default".to_owned()))
+        );
+        assert_eq!(
+            app.context_window
+                .get(&("openai".to_owned(), "work".to_owned()))
+                .copied(),
+            Some(128_000)
+        );
+        assert!(app.current_context_window().is_none());
+    }
+
+    #[test]
+    fn presence_updates_window_count_and_marks_dirty() {
+        let mut app = App::new(Theme::dark());
+        app.take_dirty();
+        assert_eq!(app.window_count, 1);
+
+        let ops = app.update(super::AppEvent::Presence(3));
+        assert!(ops.is_empty());
+        assert_eq!(app.window_count, 3);
+        assert!(app.take_dirty());
+    }
+
+    #[test]
+    fn presence_with_same_count_is_not_dirty() {
+        let mut app = App::new(Theme::dark());
+        app.update(super::AppEvent::Presence(2));
+        app.take_dirty();
+
+        let ops = app.update(super::AppEvent::Presence(2));
+        assert!(ops.is_empty());
+        assert!(!app.take_dirty());
     }
 }

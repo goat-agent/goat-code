@@ -1,4 +1,5 @@
 mod codeassist;
+mod error;
 mod oauth;
 mod wire;
 
@@ -8,13 +9,21 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_auth::{CredentialKey, CredentialStore, TokenSet};
 use goat_provider::{
-    AuthMethod, Capabilities, Effort, Model, Provider, ProviderId, Request, StreamEvent,
+    AuthMethod, Capabilities, Effort, Model, Provider, ProviderId, Request, SearchResult,
+    StreamError, StreamEvent, WebSearchOutput,
 };
+use serde_json::json;
 use tokio::{sync::Mutex, sync::mpsc, task::JoinHandle};
 
 pub const PROVIDER_ID: &str = "gemini";
 pub const ENV_VAR: &str = "GEMINI_API_KEY";
 const GL_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+const SEARCH_MODEL: &str = "gemini-2.5-flash";
+
+fn gemini_supports_images(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    id.starts_with("gemini-") && !id.contains("embedding")
+}
 
 const CATALOG: &[&str] = &[
     "gemini-3.5-flash",
@@ -88,14 +97,19 @@ async fn fetch_gl_models(client: &reqwest::Client, api_key: &str) -> Vec<Model> 
                 .iter()
                 .any(|method| method == "generateContent")
         })
-        .map(|m| Model {
-            id: m.name.strip_prefix("models/").unwrap_or(&m.name).to_owned(),
+        .map(|m| {
+            let id = m.name.strip_prefix("models/").unwrap_or(&m.name).to_owned();
+            Model {
+                supports_images: gemini_supports_images(&id),
+                id,
+            }
         })
         .collect()
 }
 
 async fn stream_response(resp: reqwest::Response, tx: &mpsc::Sender<StreamEvent>, oauth: bool) {
     let mut stream = resp.bytes_stream().eventsource();
+    let mut last_usage: Option<goat_provider::Usage> = None;
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => {
@@ -105,35 +119,91 @@ async fn stream_response(resp: reqwest::Response, tx: &mpsc::Sender<StreamEvent>
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.data) else {
                     continue;
                 };
-                if let Some(reason) = wire::extract_finish_reason(&value, oauth) {
-                    let finished = matches!(reason, "STOP" | "MAX_TOKENS");
-                    for ev in wire::parse_chunk(&value, oauth) {
-                        if tx.send(ev).await.is_err() {
-                            return;
-                        }
+                if let Some(error) = error::stream_error(&event.data) {
+                    let _ = tx.send(StreamEvent::Failed { error }).await;
+                    return;
+                }
+                for ev in wire::parse_chunk(&value, oauth) {
+                    if tx.send(ev).await.is_err() {
+                        return;
                     }
-                    if finished {
-                        break;
-                    }
-                } else {
-                    for ev in wire::parse_chunk(&value, oauth) {
-                        if tx.send(ev).await.is_err() {
-                            return;
+                }
+                if let Some(usage) = wire::parse_usage(&value, oauth) {
+                    last_usage = Some(usage);
+                }
+                match wire::extract_finish_reason(&value, oauth) {
+                    None | Some("") => {}
+                    Some("STOP" | "MAX_TOKENS") => break,
+                    Some(reason) => {
+                        if let Some(usage) = last_usage.take() {
+                            let _ = tx.send(StreamEvent::Usage { usage }).await;
                         }
+                        let _ = tx
+                            .send(StreamEvent::Failed {
+                                error: goat_provider::StreamError::other(format!(
+                                    "generation stopped: {reason}"
+                                )),
+                            })
+                            .await;
+                        return;
                     }
                 }
             }
             Err(err) => {
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: err.to_string(),
+                        error: goat_provider::StreamError::transport(err.to_string()),
                     })
                     .await;
                 return;
             }
         }
     }
+    if let Some(usage) = last_usage.take() {
+        let _ = tx.send(StreamEvent::Usage { usage }).await;
+    }
     let _ = tx.send(StreamEvent::Completed).await;
+}
+
+fn parse_grounding_results(value: &serde_json::Value) -> Vec<SearchResult> {
+    let root = value.get("response").unwrap_or(value);
+    let mut out = Vec::new();
+    let Some(candidate) = root
+        .get("candidates")
+        .and_then(|candidates| candidates.as_array())
+        .and_then(|candidates| candidates.first())
+    else {
+        return out;
+    };
+    let Some(chunks) = candidate
+        .get("groundingMetadata")
+        .and_then(|meta| meta.get("groundingChunks"))
+        .and_then(|chunks| chunks.as_array())
+    else {
+        return out;
+    };
+    for chunk in chunks {
+        let Some(web) = chunk.get("web") else {
+            continue;
+        };
+        let url = web
+            .get("uri")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if url.is_empty() {
+            continue;
+        }
+        out.push(SearchResult {
+            title: web
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            url: url.to_owned(),
+            snippet: String::new(),
+        });
+    }
+    out
 }
 
 impl Provider for GeminiProvider {
@@ -145,7 +215,12 @@ impl Provider for GeminiProvider {
         Capabilities {
             tools: true,
             auth: AuthMethod::ApiKeyOrOAuth,
+            images: true,
         }
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        gemini_supports_images(model)
     }
 
     fn authenticated(&self) -> bool {
@@ -203,7 +278,14 @@ impl Provider for GeminiProvider {
             match auth {
                 oauth::Auth::OAuth(_) => {
                     for &id in CATALOG {
-                        if out.send(Model { id: id.to_owned() }).await.is_err() {
+                        if out
+                            .send(Model {
+                                id: id.to_owned(),
+                                supports_images: gemini_supports_images(id),
+                            })
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -219,6 +301,58 @@ impl Provider for GeminiProvider {
         })
     }
 
+    fn supports_web_search(&self) -> bool {
+        true
+    }
+
+    fn web_search(&self, query: String) -> JoinHandle<Result<WebSearchOutput, StreamError>> {
+        let client = self.client.clone();
+        let store = self.store.clone();
+        let key = self.key.clone();
+        let project_cache = Arc::clone(&self.project);
+        tokio::spawn(async move {
+            let Some(auth) = oauth::current_auth(&store, &key).await else {
+                return Err(StreamError::auth("not logged in to gemini"));
+            };
+            let inner = json!({
+                "contents": [{ "role": "user", "parts": [{ "text": query }] }],
+                "tools": [{ "google_search": {} }],
+            });
+            let builder = match &auth {
+                oauth::Auth::ApiKey(api_key) => {
+                    let url = format!("{GL_BASE}/models/{SEARCH_MODEL}:generateContent");
+                    client
+                        .post(&url)
+                        .header("x-goog-api-key", api_key)
+                        .json(&inner)
+                }
+                oauth::Auth::OAuth(access) => {
+                    let project =
+                        codeassist::resolve_project(&client, access, &project_cache).await?;
+                    let body = codeassist::wrap_request(SEARCH_MODEL, project.as_deref(), inner);
+                    let url = format!("{}:generateContent", codeassist::CA_BASE);
+                    client.post(&url).bearer_auth(access).json(&body)
+                }
+            };
+            let resp = builder
+                .send()
+                .await
+                .map_err(|err| StreamError::transport(err.to_string()))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let detail = resp.text().await.unwrap_or_default();
+                return Err(error::classify_http(status, &detail));
+            }
+            let value: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|err| StreamError::other(format!("invalid search response: {err}")))?;
+            Ok(WebSearchOutput::from_results(parse_grounding_results(
+                &value,
+            )))
+        })
+    }
+
     fn stream(&self, req: Request, tx: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
         let client = self.client.clone();
         let store = self.store.clone();
@@ -228,14 +362,14 @@ impl Provider for GeminiProvider {
             let Some(auth) = oauth::current_auth(&store, &key).await else {
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: "not logged in to gemini".to_owned(),
+                        error: goat_provider::StreamError::auth("not logged in to gemini"),
                     })
                     .await;
                 return;
             };
 
             let inner = wire::build_request(&req);
-            let inner_value = wire::inner_request_to_value(&inner);
+            let inner_value = wire::inner_request_to_value(inner);
 
             tracing::debug!(model = %req.model, body = %inner_value, "gemini request");
 
@@ -257,12 +391,12 @@ impl Provider for GeminiProvider {
                         match codeassist::resolve_project(&client, access, &project_cache).await {
                             Ok(p) => p,
                             Err(e) => {
-                                let _ = tx.send(StreamEvent::Failed { message: e }).await;
+                                let _ = tx.send(StreamEvent::Failed { error: e }).await;
                                 return;
                             }
                         };
                     let body =
-                        codeassist::wrap_request(&req.model, project.as_deref(), &inner_value);
+                        codeassist::wrap_request(&req.model, project.as_deref(), inner_value);
                     let url = format!("{}:streamGenerateContent?alt=sse", codeassist::CA_BASE);
                     let b = client.post(&url).bearer_auth(access).json(&body);
                     (b, true)
@@ -274,7 +408,7 @@ impl Provider for GeminiProvider {
                 Err(err) => {
                     let _ = tx
                         .send(StreamEvent::Failed {
-                            message: err.to_string(),
+                            error: goat_provider::StreamError::transport(err.to_string()),
                         })
                         .await;
                     return;
@@ -286,7 +420,7 @@ impl Provider for GeminiProvider {
                 let detail = resp.text().await.unwrap_or_default();
                 let _ = tx
                     .send(StreamEvent::Failed {
-                        message: format!("{status}: {detail}"),
+                        error: error::classify_http(status, &detail),
                     })
                     .await;
                 return;
@@ -298,5 +432,44 @@ impl Provider for GeminiProvider {
 
     fn login(&self, status: mpsc::Sender<String>) -> JoinHandle<Result<TokenSet, String>> {
         tokio::spawn(async move { oauth::do_login(&status).await.map_err(|e| e.to_string()) })
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::parse_grounding_results;
+
+    #[test]
+    fn extracts_grounding_chunks() {
+        let value = serde_json::json!({
+            "candidates": [{
+                "groundingMetadata": {
+                    "groundingChunks": [
+                        { "web": { "uri": "https://a.example", "title": "A" } },
+                        { "web": { "uri": "https://b.example", "title": "B" } }
+                    ]
+                }
+            }]
+        });
+        let results = parse_grounding_results(&value);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, "https://a.example");
+        assert_eq!(results[1].title, "B");
+    }
+
+    #[test]
+    fn unwraps_codeassist_envelope() {
+        let value = serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "groundingMetadata": {
+                        "groundingChunks": [{ "web": { "uri": "https://x.example", "title": "X" } }]
+                    }
+                }]
+            }
+        });
+        let results = parse_grounding_results(&value);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://x.example");
     }
 }

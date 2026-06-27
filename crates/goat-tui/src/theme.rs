@@ -1,5 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::layout::{METER_HIGH, METER_WARN};
+
 #[derive(Debug, Clone, Copy)]
 pub struct CodePalette {
     pub bg: Color,
@@ -9,19 +11,33 @@ pub struct CodePalette {
     pub number: Color,
     pub type_: Color,
     pub function: Color,
+    pub variable: Color,
+    pub operator: Color,
+    pub macro_: Color,
+    pub property: Color,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
+    id: u8,
     bg: Color,
     fg: Color,
+    dark: bool,
     user: Color,
+    user_panel: Color,
     agent: Color,
     tool: Color,
     error: Color,
     muted: Color,
     accent: Color,
+    success: Color,
     border: Color,
+    border_dim: Color,
+    panel: Color,
+    shell: Color,
+    shell_dim: Color,
+    plan: Color,
+    plan_dim: Color,
     pub code: CodePalette,
 }
 
@@ -34,52 +50,84 @@ impl Default for Theme {
 impl Theme {
     pub const fn dark() -> Self {
         Self {
-            bg: Color::Rgb(0x12, 0x12, 0x14),
-            fg: Color::Rgb(0xe6, 0xe6, 0xe6),
-            user: Color::Rgb(0x7a, 0xa2, 0xf7),
-            agent: Color::Rgb(0x9e, 0xce, 0x6a),
-            tool: Color::Rgb(0xe0, 0xaf, 0x68),
-            error: Color::Rgb(0xf7, 0x76, 0x8e),
-            muted: Color::Rgb(0x6b, 0x70, 0x7c),
-            accent: Color::Rgb(0xbb, 0x9a, 0xf7),
+            id: 1,
+            bg: Color::Reset,
+            dark: true,
+            fg: Color::Rgb(0xd7, 0xda, 0xe0),
+            user: Color::Rgb(0x7d, 0x9b, 0xd4),
+            user_panel: Color::Rgb(0x18, 0x22, 0x35),
+            agent: Color::Rgb(0x6f, 0xb3, 0xa8),
+            tool: Color::Rgb(0xcf, 0x9b, 0x6b),
+            error: Color::Rgb(0xc9, 0x7a, 0x7a),
+            muted: Color::Rgb(0x7a, 0x80, 0x8c),
+            accent: Color::Rgb(0xa9, 0x8f, 0xd0),
+            success: Color::Rgb(0x8f, 0xb9, 0x8a),
             border: Color::Rgb(0x2a, 0x2c, 0x32),
+            border_dim: Color::Rgb(0x22, 0x24, 0x29),
+            panel: Color::Rgb(0x1b, 0x1b, 0x1e),
+            shell: Color::Rgb(0xdb, 0x4b, 0x4b),
+            shell_dim: Color::Rgb(0x54, 0x29, 0x2e),
+            plan: Color::Rgb(0x56, 0x9c, 0xd6),
+            plan_dim: Color::Rgb(0x2b, 0x40, 0x52),
             code: CodePalette {
-                bg: Color::Rgb(0x1a, 0x1b, 0x26),
-                keyword: Color::Rgb(0xbb, 0x9a, 0xf7),
-                string: Color::Rgb(0x9e, 0xce, 0x6a),
-                comment: Color::Rgb(0x56, 0x5f, 0x89),
-                number: Color::Rgb(0xff, 0x9e, 0x64),
-                type_: Color::Rgb(0x2a, 0xc3, 0xde),
-                function: Color::Rgb(0x7a, 0xa2, 0xf7),
+                bg: Color::Reset,
+                keyword: Color::Rgb(0x56, 0x9c, 0xd6),
+                string: Color::Rgb(0xce, 0x91, 0x78),
+                comment: Color::Rgb(0x6a, 0x99, 0x55),
+                number: Color::Rgb(0xb5, 0xce, 0xa8),
+                type_: Color::Rgb(0x4e, 0xc9, 0xb0),
+                function: Color::Rgb(0xdc, 0xdc, 0xaa),
+                variable: Color::Rgb(0x9c, 0xda, 0xfe),
+                operator: Color::Rgb(0xd4, 0xd4, 0xd4),
+                macro_: Color::Rgb(0xc5, 0x86, 0xc0),
+                property: Color::Rgb(0x9c, 0xda, 0xfe),
             },
         }
     }
 
     pub const fn light() -> Self {
         Self {
+            id: 2,
             bg: Color::Rgb(0xfa, 0xfa, 0xfa),
+            dark: false,
             fg: Color::Rgb(0x1c, 0x1e, 0x22),
             user: Color::Rgb(0x2e, 0x5c, 0xc9),
+            user_panel: Color::Rgb(0xe8, 0xef, 0xff),
             agent: Color::Rgb(0x2f, 0x7d, 0x32),
             tool: Color::Rgb(0xb5, 0x6a, 0x00),
             error: Color::Rgb(0xc6, 0x28, 0x28),
             muted: Color::Rgb(0x8a, 0x8f, 0x98),
             accent: Color::Rgb(0x6a, 0x3d, 0xc9),
+            success: Color::Rgb(0x2f, 0x7d, 0x32),
             border: Color::Rgb(0xd9, 0xdc, 0xe1),
+            border_dim: Color::Rgb(0xe6, 0xe8, 0xec),
+            panel: Color::Rgb(0xee, 0xee, 0xf0),
+            shell: Color::Rgb(0xb0, 0x35, 0x54),
+            shell_dim: Color::Rgb(0xe6, 0xc2, 0xcb),
+            plan: Color::Rgb(0x26, 0x7f, 0x99),
+            plan_dim: Color::Rgb(0xc2, 0xd8, 0xe1),
             code: CodePalette {
-                bg: Color::Rgb(0xf0, 0xf0, 0xf5),
-                keyword: Color::Rgb(0x6a, 0x3d, 0xc9),
-                string: Color::Rgb(0x2f, 0x7d, 0x32),
-                comment: Color::Rgb(0x9e, 0xa3, 0xb0),
-                number: Color::Rgb(0xb5, 0x6a, 0x00),
-                type_: Color::Rgb(0x00, 0x7a, 0x8a),
-                function: Color::Rgb(0x2e, 0x5c, 0xc9),
+                bg: Color::Reset,
+                keyword: Color::Rgb(0x00, 0x00, 0xff),
+                string: Color::Rgb(0xa3, 0x15, 0x15),
+                comment: Color::Rgb(0x00, 0x80, 0x00),
+                number: Color::Rgb(0x09, 0x88, 0x58),
+                type_: Color::Rgb(0x26, 0x7f, 0x99),
+                function: Color::Rgb(0x79, 0x5e, 0x26),
+                variable: Color::Rgb(0x00, 0x16, 0x80),
+                operator: Color::Rgb(0x3b, 0x3b, 0x3b),
+                macro_: Color::Rgb(0xaf, 0x00, 0xdb),
+                property: Color::Rgb(0x00, 0x16, 0x80),
             },
         }
     }
 
     pub fn base(self) -> Style {
         Style::new().fg(self.fg).bg(self.bg)
+    }
+
+    pub fn text(self) -> Style {
+        Style::new().fg(self.fg)
     }
 
     pub fn muted(self) -> Style {
@@ -91,39 +139,77 @@ impl Theme {
     }
 
     pub fn accent(self) -> Style {
-        Style::new().fg(self.accent).add_modifier(Modifier::BOLD)
+        Style::new().fg(self.accent)
     }
 
     pub fn border(self) -> Style {
         Style::new().fg(self.border)
     }
 
+    pub fn border_dim(self) -> Style {
+        Style::new().fg(self.border_dim)
+    }
+
+    pub fn shell(self) -> Style {
+        Style::new().fg(self.shell)
+    }
+
+    pub fn shell_dim(self) -> Style {
+        Style::new().fg(self.shell_dim)
+    }
+
+    pub fn plan(self) -> Style {
+        Style::new().fg(self.plan)
+    }
+
+    pub fn plan_dim(self) -> Style {
+        Style::new().fg(self.plan_dim)
+    }
+
     pub fn role_user(self) -> Style {
-        Style::new().fg(self.user).add_modifier(Modifier::BOLD)
+        Style::new().fg(self.user)
+    }
+
+    pub fn user_panel(self) -> Style {
+        Style::new().bg(self.user_panel)
     }
 
     pub fn role_agent(self) -> Style {
-        Style::new().fg(self.agent).add_modifier(Modifier::BOLD)
+        Style::new().fg(self.agent)
     }
 
     pub fn role_tool(self) -> Style {
-        Style::new().fg(self.tool).add_modifier(Modifier::BOLD)
-    }
-
-    pub fn tool_name(self) -> Style {
         Style::new().fg(self.tool)
     }
 
-    pub fn selected_row(self) -> Style {
-        Style::new().bg(self.border)
+    pub fn error(self) -> Style {
+        Style::new().fg(self.error)
     }
 
-    pub fn error(self) -> Style {
-        Style::new().fg(self.error).add_modifier(Modifier::BOLD)
+    pub fn success(self) -> Style {
+        Style::new().fg(self.success)
+    }
+
+    pub fn error_body(self) -> Style {
+        Style::new().fg(self.error)
+    }
+
+    pub fn meter(self, pct: f32) -> Style {
+        if pct >= METER_HIGH {
+            self.error()
+        } else if pct >= METER_WARN {
+            self.role_tool()
+        } else {
+            self.muted()
+        }
     }
 
     pub fn code_plain(self) -> Style {
-        Style::new().fg(self.fg).bg(self.code.bg)
+        Style::new().fg(self.fg)
+    }
+
+    pub fn inline_code(self) -> Style {
+        Style::new().fg(self.accent)
     }
 
     pub fn fg_color(self) -> Color {
@@ -134,21 +220,19 @@ impl Theme {
         self.accent
     }
 
-    pub fn muted_accent(self) -> Style {
-        Style::new().fg(self.muted).add_modifier(Modifier::BOLD)
+    pub fn hint_key(self) -> Style {
+        Style::new().fg(self.fg)
     }
 
-    pub fn surface(self) -> Style {
-        Style::new().fg(self.fg).bg(self.code.bg)
+    pub fn panel(self) -> Style {
+        Style::new().fg(self.fg).bg(self.panel)
     }
 
     pub fn is_dark(self) -> bool {
-        match self.bg {
-            Color::Rgb(r, g, b) => {
-                let luminance = u32::from(r) + u32::from(g) + u32::from(b);
-                luminance < 384
-            }
-            _ => true,
-        }
+        self.dark
+    }
+
+    pub fn id(self) -> u8 {
+        self.id
     }
 }

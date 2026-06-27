@@ -21,6 +21,14 @@ impl ToolRegistry {
         self
     }
 
+    #[must_use]
+    pub fn with_many(mut self, tools: Vec<Box<dyn Tool>>) -> Self {
+        for tool in tools {
+            self.tools.insert(tool.name(), tool);
+        }
+        self
+    }
+
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(AsRef::as_ref)
     }
@@ -45,6 +53,7 @@ fn builtin_tools() -> Vec<Box<dyn Tool>> {
     tools.extend(goat_tool_shell::all());
     tools.extend(goat_tool_search::all());
     tools.extend(goat_tool_skill::all());
+    tools.extend(goat_tool_web::all());
     tools
 }
 
@@ -62,9 +71,9 @@ mod tests {
             "Bash",
             "Grep",
             "Glob",
+            "Skill",
             "WebFetch",
             "WebSearch",
-            "Skill",
         ] {
             assert!(registry.get(name).is_some(), "missing tool: {name}");
         }
@@ -79,6 +88,12 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(names, sorted);
         assert_eq!(specs.len(), 9);
+    }
+
+    #[test]
+    fn with_many_registers_dynamic_tools() {
+        let registry = ToolRegistry::builtin().with_many(Vec::new());
+        assert!(registry.get("Read").is_some());
     }
 
     #[test]

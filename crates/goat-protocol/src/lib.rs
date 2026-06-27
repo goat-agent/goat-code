@@ -1,348 +1,153 @@
-use std::fmt;
+mod event;
+mod op;
+mod types;
 
-use serde::{Deserialize, Serialize};
+pub use event::{AskOption, AskQuestion, Event, NotifyKind};
+pub use op::Op;
+pub use types::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct Usage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub cache_read_tokens: u32,
-    pub cache_write_tokens: u32,
-}
+#[cfg(test)]
+mod tests {
+    use super::{
+        Event, LoginCredential, Op, PlanDecision, TaskId, ToolCallId, ToolImageData, ToolOutcome,
+        TranscriptEntry,
+    };
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RateWindow {
-    pub label: String,
-    pub used_percent: f32,
-    pub resets_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RateLimitSnapshot {
-    pub windows: Vec<RateWindow>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct TaskId(pub u64);
-
-impl fmt::Display for TaskId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ToolCallId(pub u64);
-
-impl fmt::Display for ToolCallId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: ToolCallId,
-    pub name: String,
-    pub input: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolOutcome {
-    pub ok: bool,
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Effort {
-    Off,
-    Low,
-    Medium,
-    High,
-    Xhigh,
-    Max,
-}
-
-impl Effort {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Xhigh => "xhigh",
-            Self::Max => "max",
-        }
+    #[test]
+    fn tool_outcome_image_round_trips() {
+        let outcome = ToolOutcome {
+            ok: true,
+            summary: Some("captured".to_owned()),
+            image: Some(ToolImageData {
+                media_type: "image/png".to_owned(),
+                data: "AAAA".to_owned(),
+            }),
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        let back: ToolOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(outcome, back);
     }
 
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "off" => Some(Self::Off),
-            "low" => Some(Self::Low),
-            "medium" => Some(Self::Medium),
-            "high" => Some(Self::High),
-            "xhigh" => Some(Self::Xhigh),
-            "max" => Some(Self::Max),
-            _ => None,
-        }
+    #[test]
+    fn tool_outcome_without_image_omits_field() {
+        let outcome = ToolOutcome {
+            ok: false,
+            summary: None,
+            image: None,
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert!(!json.contains("image"));
+        let back: ToolOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(outcome, back);
     }
-}
 
-impl fmt::Display for Effort {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+    #[test]
+    fn op_unit_variants_serialize_as_type_object() {
+        assert_eq!(
+            serde_json::to_string(&Op::Clear {}).unwrap(),
+            r#"{"type":"Clear"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Op::ListThreads {}).unwrap(),
+            r#"{"type":"ListThreads"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Op::ResumeLatest {}).unwrap(),
+            r#"{"type":"ResumeLatest"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Op::Shutdown {}).unwrap(),
+            r#"{"type":"Shutdown"}"#
+        );
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ModelTarget {
-    pub provider: String,
-    pub model: String,
-    pub account: String,
-    #[serde(default)]
-    pub effort: Option<Effort>,
-}
+    #[test]
+    fn op_struct_variants_serialize_flat_with_type() {
+        let op = Op::SubmitMessage {
+            id: TaskId(1),
+            text: "hi".to_owned(),
+            attachments: Vec::new(),
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        assert_eq!(json, r#"{"type":"SubmitMessage","id":"1","text":"hi"}"#);
+        let back: Op = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, op);
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountChoice {
-    pub id: String,
-    pub display: String,
-    pub target: ModelTarget,
-}
+    #[test]
+    fn event_serializes_flat_with_type() {
+        let ev = Event::TextDelta {
+            id: TaskId(1),
+            chunk: "x".to_owned(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(json, r#"{"type":"TextDelta","id":"1","chunk":"x"}"#);
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ev);
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelEntry {
-    pub provider: String,
-    pub model: String,
-    pub accounts: Vec<AccountChoice>,
-    pub context_window: Option<u32>,
-    #[serde(default)]
-    pub efforts: Vec<Effort>,
-}
+    #[test]
+    fn transcript_entry_user_serializes_with_type() {
+        let entry = TranscriptEntry::User {
+            text: "hello".to_owned(),
+            attachments: Vec::new(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(json, r#"{"type":"User","text":"hello"}"#);
+        let back: TranscriptEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, entry);
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadSummary {
-    pub id: i64,
-    pub title: String,
-    pub model: String,
-    pub updated_at: i64,
-}
+    #[test]
+    fn plan_decision_approve_serializes_with_type() {
+        let json = serde_json::to_string(&PlanDecision::Approve {}).unwrap();
+        assert_eq!(json, r#"{"type":"Approve"}"#);
+        let back: PlanDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, PlanDecision::Approve {});
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TranscriptEntry {
-    User(String),
-    Assistant(String),
-    Tool {
-        call: ToolCall,
-        outcome: ToolOutcome,
-    },
-}
+    #[test]
+    fn login_credential_api_key_serializes_with_type() {
+        let cred = LoginCredential::ApiKey {
+            key: "sk-x".to_owned(),
+        };
+        let json = serde_json::to_string(&cred).unwrap();
+        assert_eq!(json, r#"{"type":"ApiKey","key":"sk-x"}"#);
+        let back: LoginCredential = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cred);
+    }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthMethod {
-    None,
-    ApiKey,
-    OAuth,
-    ApiKeyOrOAuth,
-}
+    #[test]
+    fn op_answer_roundtrips() {
+        let op = Op::Answer {
+            id: TaskId(2),
+            call: ToolCallId(5),
+            answers: vec!["yes".to_owned()],
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        let back: Op = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, op);
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoginProvider {
-    pub id: String,
-    pub method: AuthMethod,
-}
+    #[test]
+    fn task_id_serializes_as_string() {
+        assert_eq!(serde_json::to_string(&TaskId(42)).unwrap(), r#""42""#);
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountInfo {
-    pub name: String,
-    pub method: AuthMethod,
-}
+    #[test]
+    fn task_id_deserializes_from_string_and_number() {
+        let from_str: TaskId = serde_json::from_str(r#""42""#).unwrap();
+        let from_num: TaskId = serde_json::from_str("42").unwrap();
+        assert_eq!(from_str, TaskId(42));
+        assert_eq!(from_num, TaskId(42));
+    }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountEntry {
-    pub provider: String,
-    pub display_name: String,
-    pub accounts: Vec<AccountInfo>,
-    pub local: bool,
-    pub login: AuthMethod,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LoginCredential {
-    ApiKey(String),
-    OAuth,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillInfo {
-    pub name: String,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Op {
-    SubmitMessage {
-        id: TaskId,
-        text: String,
-    },
-    Interrupt {
-        id: TaskId,
-    },
-    Clear,
-    SelectModel {
-        target: ModelTarget,
-    },
-    Login {
-        provider: String,
-        credential: LoginCredential,
-    },
-    AddAccount {
-        provider: String,
-        name: String,
-        credential: LoginCredential,
-    },
-    RemoveAccount {
-        provider: String,
-        name: String,
-    },
-    SetTheme {
-        dark: bool,
-    },
-    ListThreads,
-    Resume {
-        thread_id: i64,
-    },
-    RenameThread {
-        title: String,
-    },
-    Answer {
-        id: TaskId,
-        call: ToolCallId,
-        answers: Vec<String>,
-    },
-    Shutdown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NotifyKind {
-    Info,
-    Success,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Event {
-    TaskStarted {
-        id: TaskId,
-    },
-    TextDelta {
-        id: TaskId,
-        chunk: String,
-    },
-    TextDone {
-        id: TaskId,
-        text: String,
-    },
-    ToolStarted {
-        id: TaskId,
-        call: ToolCall,
-    },
-    ToolDone {
-        id: TaskId,
-        call: ToolCallId,
-        outcome: ToolOutcome,
-    },
-    TaskDone {
-        id: TaskId,
-        interrupted: bool,
-    },
-    AgentStarted {
-        id: TaskId,
-        parent: TaskId,
-        agent_type: String,
-        label: String,
-    },
-    AgentDone {
-        id: TaskId,
-        ok: bool,
-    },
-    ModelListChanged {
-        entries: Vec<ModelEntry>,
-    },
-    ModelSelected {
-        target: ModelTarget,
-    },
-    ThreadsListed {
-        threads: Vec<ThreadSummary>,
-    },
-    ConversationRestored {
-        target: ModelTarget,
-        entries: Vec<TranscriptEntry>,
-    },
-    ThinkingDelta {
-        id: TaskId,
-        chunk: String,
-    },
-    LoginProviders {
-        providers: Vec<LoginProvider>,
-    },
-    LoginStatus {
-        provider: String,
-        message: String,
-        done: bool,
-        ok: bool,
-    },
-    AccountsChanged {
-        providers: Vec<AccountEntry>,
-    },
-    SkillsChanged {
-        skills: Vec<SkillInfo>,
-    },
-    Error {
-        id: Option<TaskId>,
-        message: String,
-    },
-    Notify {
-        kind: NotifyKind,
-        message: String,
-    },
-    AskStarted {
-        id: TaskId,
-        call: ToolCallId,
-        questions: Vec<AskQuestion>,
-    },
-    AskDismissed {
-        id: TaskId,
-        call: ToolCallId,
-    },
-    Usage {
-        id: TaskId,
-        usage: Usage,
-        context_window: Option<u32>,
-    },
-    RateLimits {
-        provider: String,
-        account: String,
-        snapshot: RateLimitSnapshot,
-        cached_at: i64,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AskOption {
-    pub label: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AskQuestion {
-    pub question: String,
-    #[serde(default)]
-    pub options: Vec<AskOption>,
+    #[test]
+    fn task_id_above_js_safe_integer_roundtrips() {
+        let big = TaskId(9_007_199_254_740_993);
+        let json = serde_json::to_string(&big).unwrap();
+        assert_eq!(json, r#""9007199254740993""#);
+        let back: TaskId = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, big);
+    }
 }

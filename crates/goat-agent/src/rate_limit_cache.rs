@@ -20,15 +20,8 @@ impl RateLimitCache {
             .unwrap_or_default()
     }
 
-    pub fn save(&self, path: &Path) {
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Err(err) = fs::write(path, json) {
-                tracing::warn!(%err, "failed to save rate limit cache");
-            }
-        }
+    pub fn to_json(&self) -> Option<String> {
+        serde_json::to_string_pretty(self).ok()
     }
 
     pub fn upsert(
@@ -49,5 +42,14 @@ impl RateLimitCache {
             let (provider, account) = key.split_once(':')?;
             Some((provider, account, entry))
         })
+    }
+}
+
+pub fn write(path: &Path, json: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Err(err) = fs::write(path, json) {
+        tracing::warn!(%err, "failed to save rate limit cache");
     }
 }

@@ -10,12 +10,15 @@ pub enum ThemeChoice {
     Light,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub theme: ThemeChoice,
     pub computer_use_enabled: bool,
     pub browser_enabled: bool,
+    pub mouse_capture_enabled: bool,
+    pub plan_shell_without_sandbox: bool,
+    pub remote: RemoteConfig,
     pub search: SearchConfig,
 }
 
@@ -65,6 +68,36 @@ impl SearchAccountConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteConfig {
+    pub bind: String,
+    pub advertised: Vec<String>,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            bind: "0.0.0.0:4317".to_owned(),
+            advertised: Vec::new(),
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            theme: ThemeChoice::default(),
+            computer_use_enabled: false,
+            browser_enabled: false,
+            mouse_capture_enabled: true,
+            plan_shell_without_sandbox: false,
+            remote: RemoteConfig::default(),
+            search: SearchConfig::default(),
+        }
+    }
+}
+
 impl Config {
     pub fn load() -> Self {
         config_path()
@@ -108,6 +141,10 @@ pub fn config_path() -> Option<PathBuf> {
     app_home().map(|home| home.join("config.json"))
 }
 
+pub fn mcp_config_path() -> Option<PathBuf> {
+    app_home().map(|home| home.join("mcp.json"))
+}
+
 pub fn db_path() -> Option<PathBuf> {
     app_home().map(|home| home.join("goat-code.db"))
 }
@@ -128,8 +165,24 @@ pub fn browser_dir() -> Option<PathBuf> {
     app_home().map(|home| home.join("browser"))
 }
 
+pub fn plans_dir() -> Option<PathBuf> {
+    app_home().map(|home| home.join("plans"))
+}
+
 pub fn browser_profile_dir() -> Option<PathBuf> {
     browser_dir().map(|dir| dir.join("profile"))
+}
+
+pub fn socket_path() -> Option<PathBuf> {
+    app_home().map(|home| home.join("daemon.sock"))
+}
+
+pub fn remote_dir() -> Option<PathBuf> {
+    app_home().map(|home| home.join("remote"))
+}
+
+pub fn update_dir() -> Option<PathBuf> {
+    app_home().map(|home| home.join("update"))
 }
 
 pub const PROJECT_SKILLS_SUBDIR: &str = ".goat/skills";
@@ -154,7 +207,7 @@ pub fn rate_limits_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, SearchConfig, ThemeChoice};
+    use super::{Config, RemoteConfig, SearchConfig, ThemeChoice};
 
     #[test]
     fn defaults_to_dark() {
@@ -208,12 +261,16 @@ mod tests {
         );
         assert_eq!(cfg.search.accounts[0].target(), "browser/duckduckgo");
     }
+
     #[test]
     fn round_trips_through_json() {
         let cfg = Config {
             theme: ThemeChoice::Light,
             computer_use_enabled: false,
             browser_enabled: true,
+            mouse_capture_enabled: false,
+            plan_shell_without_sandbox: true,
+            remote: RemoteConfig::default(),
             search: SearchConfig::default(),
         };
         let raw = serde_json::to_string(&cfg).unwrap();

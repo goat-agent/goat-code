@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io::Cursor;
 use std::sync::Arc;
@@ -5,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
 use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, StopLoadingParams};
+use chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::error::CdpError;
 use chromiumoxide::handler::viewport::Viewport;
@@ -13,7 +16,7 @@ use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Browser, BrowserConfig, Element, Page};
 use futures::StreamExt as _;
 use goat_tool::{ToolImage, ToolOutput};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
@@ -26,10 +29,10 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(30);
 const NAV_TIMEOUT: Duration = Duration::from_secs(30);
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const SNAPSHOT_MAX_BYTES: usize = 32 * 1024;
 const SCREENSHOT_MAX_DIM: u32 = 1280;
 const DEFAULT_TEXT_MAX_BYTES: usize = 8 * 1024;
+const HANDLER_MAX_CONSECUTIVE_ERRORS: u32 = 64;
 
 const LAUNCH_ARGS: [&str; 21] = [
     "disable-background-networking",
@@ -61,40 +64,39 @@ pub fn new_handle() -> SessionHandle {
     Arc::new(Mutex::new(None))
 }
 
-pub struct BrowserSession {
+struct SharedBrowser {
     browser: Browser,
     handler_task: JoinHandle<()>,
-    page: Page,
-    page_count: usize,
-    snapshot_seq: u64,
-    current_snapshot_id: Option<String>,
 }
 
-impl Drop for BrowserSession {
-    fn drop(&mut self) {
-        self.handler_task.abort();
+static SHARED: OnceCell<Mutex<Option<Arc<SharedBrowser>>>> = OnceCell::const_new();
+
+async fn shared_cell() -> &'static Mutex<Option<Arc<SharedBrowser>>> {
+    SHARED.get_or_init(|| async { Mutex::new(None) }).await
+}
+
+async fn shared_browser() -> Result<Arc<SharedBrowser>, BrowserError> {
+    let cell = shared_cell().await;
+    let mut guard = cell.lock().await;
+    if let Some(shared) = guard.as_ref()
+        && !shared.handler_task.is_finished()
+    {
+        return Ok(shared.clone());
     }
-}
-
-pub async fn ensure_session(
-    slot: &mut Option<BrowserSession>,
-) -> Result<&mut BrowserSession, BrowserError> {
-    let alive = matches!(slot, Some(session) if !session.handler_task.is_finished());
-    if !alive {
-        if let Some(mut old) = slot.take() {
-            let _ = old.browser.kill().await;
-        }
-        *slot = Some(launch().await?);
+    if let Some(old) = guard.take() {
+        old.handler_task.abort();
     }
-    Ok(slot.as_mut().expect("session was set above"))
+    let shared = Arc::new(launch_shared().await?);
+    *guard = Some(shared.clone());
+    Ok(shared)
 }
 
-async fn launch() -> Result<BrowserSession, BrowserError> {
-    match launch_once().await {
-        Ok(session) => Ok(session),
+async fn launch_shared() -> Result<SharedBrowser, BrowserError> {
+    match launch_shared_once().await {
+        Ok(shared) => Ok(shared),
         Err(first) => {
             clear_singleton_locks();
-            launch_once().await.map_err(|_| first)
+            launch_shared_once().await.map_err(|_| first)
         }
     }
 }
@@ -108,7 +110,7 @@ fn clear_singleton_locks() {
     }
 }
 
-async fn launch_once() -> Result<BrowserSession, BrowserError> {
+async fn launch_shared_once() -> Result<SharedBrowser, BrowserError> {
     let profile = goat_config::browser_profile_dir().ok_or(BrowserError::NoProfile)?;
     std::fs::create_dir_all(&profile).map_err(|err| {
         BrowserError::Message(format!("could not create browser profile dir: {err}"))
@@ -121,6 +123,7 @@ async fn launch_once() -> Result<BrowserSession, BrowserError> {
         .launch_timeout(LAUNCH_TIMEOUT)
         .request_timeout(CMD_TIMEOUT)
         .disable_default_args()
+        .surface_invalid_messages()
         .args(LAUNCH_ARGS)
         .build()
         .map_err(BrowserError::NoChrome)?;
@@ -128,34 +131,91 @@ async fn launch_once() -> Result<BrowserSession, BrowserError> {
     let built = tokio::spawn(async move {
         let (browser, mut handler) = Browser::launch(config).await?;
         let handler_task = tokio::spawn(async move {
+            let mut consecutive_errors: u32 = 0;
             while let Some(event) = handler.next().await {
                 if let Err(err) = event {
-                    tracing::debug!(%err, "browser handler event error");
+                    consecutive_errors += 1;
+                    tracing::debug!(%err, consecutive_errors, "browser handler event error");
+                    if handler_should_stop(consecutive_errors) {
+                        tracing::warn!(
+                            consecutive_errors,
+                            "browser handler stopping after sustained errors; chrome will relaunch on next use"
+                        );
+                        break;
+                    }
+                } else {
+                    consecutive_errors = 0;
                 }
             }
         });
-        let page = browser.new_page("about:blank").await?;
-        if let Ok(others) = browser.pages().await {
-            for other in others {
-                if other.target_id() != page.target_id() {
-                    let _ = other.close().await;
-                }
-            }
-        }
-        let _ = page.bring_to_front().await;
-        Ok::<_, CdpError>(BrowserSession {
+        Ok::<_, CdpError>(SharedBrowser {
             browser,
             handler_task,
-            page,
-            page_count: 1,
-            snapshot_seq: 0,
-            current_snapshot_id: None,
         })
     })
     .await
     .map_err(|err| BrowserError::Message(format!("browser launch task failed: {err}")))?;
 
     built.map_err(map_launch_err)
+}
+
+fn handler_should_stop(consecutive_errors: u32) -> bool {
+    consecutive_errors >= HANDLER_MAX_CONSECUTIVE_ERRORS
+}
+
+pub struct BrowserSession {
+    shared: Arc<SharedBrowser>,
+    context_id: BrowserContextId,
+    page: Page,
+    known_targets: HashSet<String>,
+    snapshot_seq: u64,
+    current_snapshot_id: Option<String>,
+}
+
+pub async fn ensure_session(
+    slot: &mut Option<BrowserSession>,
+) -> Result<&mut BrowserSession, BrowserError> {
+    let alive = matches!(slot, Some(session) if !session.shared.handler_task.is_finished());
+    if !alive {
+        if let Some(old) = slot.take() {
+            old.dispose().await;
+        }
+        *slot = Some(open_session().await?);
+    }
+    slot.as_mut()
+        .ok_or_else(|| BrowserError::Message("browser session unavailable".to_owned()))
+}
+
+async fn open_session() -> Result<BrowserSession, BrowserError> {
+    let shared = shared_browser().await?;
+    let context_id = shared
+        .browser
+        .create_browser_context(
+            chromiumoxide::cdp::browser_protocol::target::CreateBrowserContextParams::default(),
+        )
+        .await
+        .map_err(map_launch_err)?;
+    let params = CreateTargetParams::builder()
+        .url("about:blank")
+        .browser_context_id(context_id.clone())
+        .build()
+        .map_err(BrowserError::Message)?;
+    let page = shared
+        .browser
+        .new_page(params)
+        .await
+        .map_err(map_launch_err)?;
+    let _ = page.bring_to_front().await;
+    let mut known_targets = HashSet::new();
+    known_targets.insert(page.target_id().inner().clone());
+    Ok(BrowserSession {
+        shared,
+        context_id,
+        page,
+        known_targets,
+        snapshot_seq: 0,
+        current_snapshot_id: None,
+    })
 }
 
 fn map_launch_err(err: CdpError) -> BrowserError {
@@ -171,29 +231,27 @@ fn map_launch_err(err: CdpError) -> BrowserError {
 }
 
 pub async fn close(slot: &mut Option<BrowserSession>) -> String {
-    let Some(mut session) = slot.take() else {
+    let Some(session) = slot.take() else {
         return "browser is not running".to_owned();
     };
-    let graceful = timeout(CLOSE_TIMEOUT, session.browser.close()).await;
-    if matches!(graceful, Ok(Ok(_))) {
-        let _ = timeout(CLOSE_TIMEOUT, session.browser.wait()).await;
-    } else {
-        let _ = session.browser.kill().await;
-    }
+    session.dispose().await;
     "browser closed".to_owned()
 }
 
 impl BrowserSession {
+    async fn dispose(self) {
+        let _ = self
+            .shared
+            .browser
+            .dispose_browser_context(self.context_id)
+            .await;
+    }
+
     pub async fn dispatch(
         &mut self,
         action: Action,
         max_bytes: usize,
     ) -> Result<ToolOutput, BrowserError> {
-        self.page_count = self
-            .browser
-            .pages()
-            .await
-            .map_or(self.page_count, |pages| pages.len());
         let output = match action {
             Action::Navigate { url } => ToolOutput::text(self.navigate(&url, max_bytes).await?),
             Action::Snapshot => ToolOutput::text(
@@ -248,7 +306,7 @@ impl BrowserSession {
                 self.wait_for(text.as_deref(), state.as_deref(), timeout_ms, max_bytes)
                     .await?,
             ),
-            Action::Screenshot => ToolOutput::Image(self.screenshot().await?),
+            Action::Screenshot => ToolOutput::image(self.screenshot().await?),
             Action::DebugEval { js } => ToolOutput::text(self.debug_eval(&js, max_bytes).await?),
             Action::Close => ToolOutput::text("browser closed".to_owned()),
         };
@@ -535,7 +593,7 @@ impl BrowserSession {
             }
             None => "undefined".to_owned(),
         };
-        Ok(cap(rendered, max_bytes))
+        Ok(goat_tool::truncate(rendered, max_bytes))
     }
 
     async fn screenshot(&self) -> Result<ToolImage, BrowserError> {
@@ -592,7 +650,7 @@ impl BrowserSession {
                 url: &url,
                 state: "usable",
                 load,
-                profile: "persistent",
+                profile: "isolated_context",
                 last_action: Some(last_action),
                 switched,
                 raw: &raw,
@@ -627,7 +685,7 @@ impl BrowserSession {
         let _ = writeln!(out, "title: {title}");
         out.push_str("state: usable\n");
         let _ = writeln!(out, "load: {load}");
-        out.push_str("profile: persistent\n");
+        out.push_str("profile: isolated_context\n");
         let _ = writeln!(out, "\nlast_action: {last_action}");
         out.push_str("\nwarnings:\n- page_content_untrusted\n- refs_expire_after_next_snapshot\n");
         Ok(cap(out, max_bytes))
@@ -658,19 +716,21 @@ impl BrowserSession {
     }
 
     async fn follow_new_tab(&mut self) -> bool {
-        let Ok(pages) = self.browser.pages().await else {
+        let Ok(pages) = self.shared.browser.pages().await else {
             return false;
         };
-        let count = pages.len();
-        let mut switched = false;
-        if count > self.page_count
-            && let Some(last) = pages.into_iter().last()
-        {
-            self.page = last;
-            switched = true;
+        let mut newest: Option<Page> = None;
+        for page in pages {
+            let target = page.target_id().inner().clone();
+            if self.known_targets.insert(target) {
+                newest = Some(page);
+            }
         }
-        self.page_count = count;
-        switched
+        if let Some(page) = newest {
+            self.page = page;
+            return true;
+        }
+        false
     }
 }
 
@@ -789,7 +849,20 @@ fn downscale_png(bytes: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_url;
+    use super::{HANDLER_MAX_CONSECUTIVE_ERRORS, handler_should_stop, normalize_url};
+
+    #[test]
+    fn handler_keeps_running_below_threshold() {
+        assert!(!handler_should_stop(0));
+        assert!(!handler_should_stop(1));
+        assert!(!handler_should_stop(HANDLER_MAX_CONSECUTIVE_ERRORS - 1));
+    }
+
+    #[test]
+    fn handler_stops_at_threshold() {
+        assert!(handler_should_stop(HANDLER_MAX_CONSECUTIVE_ERRORS));
+        assert!(handler_should_stop(HANDLER_MAX_CONSECUTIVE_ERRORS + 1));
+    }
 
     #[test]
     fn adds_https_scheme() {

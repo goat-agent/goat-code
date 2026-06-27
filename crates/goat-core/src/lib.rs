@@ -31,7 +31,7 @@ mod tests {
                                 })
                                 .await;
                         }
-                        Op::Shutdown => break,
+                        Op::Shutdown {} => break,
                         _ => {}
                     }
                 }
@@ -46,6 +46,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "hi".to_owned(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();

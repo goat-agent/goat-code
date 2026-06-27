@@ -13,6 +13,7 @@ goat-tool-fs = { workspace = true }
 goat-tool-shell = { workspace = true }
 goat-tool-search = { workspace = true }
 goat-tool-skill = { workspace = true }
+goat-tool-web = { workspace = true }
 
 [lints]
 workspace = true

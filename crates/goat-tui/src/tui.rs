@@ -2,27 +2,41 @@ use std::io;
 
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::supports_keyboard_enhancement,
 };
 use ratatui::DefaultTerminal;
+use ratatui_image::picker::Picker;
 
-pub fn init() -> io::Result<DefaultTerminal> {
+pub fn init(mouse_capture: bool) -> io::Result<(DefaultTerminal, Option<Picker>)> {
     let terminal = ratatui::init();
+    let picker = crate::screenshot::query_picker();
     if supports_keyboard_enhancement().unwrap_or(false) {
         execute!(
             io::stdout(),
             EnableBracketedPaste,
-            EnableMouseCapture,
+            EnableFocusChange,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         )?;
     } else {
-        execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
+        execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
     }
-    Ok(terminal)
+    if mouse_capture {
+        execute!(io::stdout(), EnableMouseCapture)?;
+    }
+    Ok((terminal, picker))
+}
+
+pub fn set_mouse_capture(enabled: bool) {
+    if enabled {
+        let _ = execute!(io::stdout(), EnableMouseCapture);
+    } else {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+    }
 }
 
 pub fn restore() {
@@ -30,11 +44,17 @@ pub fn restore() {
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableFocusChange,
             DisableMouseCapture,
             PopKeyboardEnhancementFlags,
         );
     } else {
-        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            DisableFocusChange,
+            DisableMouseCapture
+        );
     }
     ratatui::restore();
 }
