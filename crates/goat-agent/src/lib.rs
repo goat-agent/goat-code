@@ -308,10 +308,7 @@ async fn handle_remove_account(
     registry: &mut Registry,
     events: &mpsc::Sender<Event>,
 ) {
-    let key = CredentialKey {
-        provider: provider.clone(),
-        account: name.clone(),
-    };
+    let key = CredentialKey::model(provider.clone(), name.clone());
     if let Err(err) = credentials.remove(&key) {
         tracing::warn!(%err, "failed to remove account");
     }
@@ -640,10 +637,7 @@ async fn handle_login(
     credential: LoginCredential,
     dedup: bool,
 ) {
-    let key = CredentialKey {
-        provider: provider.clone(),
-        account: name.clone(),
-    };
+    let key = CredentialKey::model(provider.clone(), name.clone());
     if dedup
         && ctx
             .credentials

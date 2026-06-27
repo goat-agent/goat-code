@@ -261,10 +261,7 @@ async fn current_access(
 }
 
 pub fn build(store: &CredentialStore, account: &str) -> CodexProvider {
-    let key = CredentialKey {
-        provider: PROVIDER_ID.to_owned(),
-        account: account.to_owned(),
-    };
+    let key = CredentialKey::model(PROVIDER_ID, account);
     CodexProvider::new(store.clone(), key)
 }
 

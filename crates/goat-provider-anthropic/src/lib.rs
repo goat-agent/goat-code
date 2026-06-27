@@ -76,10 +76,7 @@ impl AnthropicProvider {
 }
 
 pub fn build(store: &CredentialStore, account: &str) -> AnthropicProvider {
-    let key = CredentialKey {
-        provider: PROVIDER_ID.to_owned(),
-        account: account.to_owned(),
-    };
+    let key = CredentialKey::model(PROVIDER_ID, account);
     AnthropicProvider::new(store.clone(), key)
 }
 

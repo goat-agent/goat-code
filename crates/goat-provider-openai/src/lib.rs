@@ -51,10 +51,7 @@ fn is_chat_model(id: &str) -> bool {
 }
 
 pub fn build(store: &CredentialStore, account: &str) -> ResponsesProvider {
-    let key = CredentialKey {
-        provider: PROVIDER_ID.to_owned(),
-        account: account.to_owned(),
-    };
+    let key = CredentialKey::model(PROVIDER_ID, account);
     let bearer = store
         .resolve(&key, Some(ENV_VAR))
         .map(|cred| cred.bearer().to_owned());

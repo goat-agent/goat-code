@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use goat_auth::CredentialService;
 
 #[derive(Parser)]
 #[command(name = "goat", version, about = "goat — a terminal coding agent")]
@@ -15,6 +16,8 @@ pub enum Command {
     Update,
     #[command(subcommand)]
     Auth(AuthCommand),
+    #[command(subcommand)]
+    Search(SearchCommand),
 }
 
 #[derive(Subcommand)]
@@ -26,6 +29,8 @@ pub enum AuthCommand {
         account: Option<String>,
         #[arg(long)]
         key: Option<String>,
+        #[arg(long, value_enum, default_value = "model")]
+        service: AuthServiceArg,
     },
     #[command(visible_alias = "ls")]
     List,
@@ -34,5 +39,44 @@ pub enum AuthCommand {
         provider: String,
         #[arg(long, short)]
         account: Option<String>,
+        #[arg(long, value_enum, default_value = "model")]
+        service: AuthServiceArg,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AuthServiceArg {
+    Model,
+    Search,
+}
+
+impl From<AuthServiceArg> for CredentialService {
+    fn from(value: AuthServiceArg) -> Self {
+        match value {
+            AuthServiceArg::Model => Self::Model,
+            AuthServiceArg::Search => Self::Search,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum SearchCommand {
+    Add {
+        provider: String,
+        #[arg(long, short)]
+        account: String,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        engine: Option<String>,
+        #[arg(long)]
+        default: bool,
+    },
+    Default {
+        target: String,
+    },
+    List,
+    Remove {
+        target: String,
     },
 }

@@ -1,6 +1,7 @@
 mod auth;
 mod cli;
 mod logging;
+mod search;
 mod update;
 
 use clap::Parser;
@@ -21,6 +22,7 @@ async fn main() -> color_eyre::Result<()> {
     match cli.command {
         Some(Command::Update) => update::run().await,
         Some(Command::Auth(command)) => auth::run(command).await,
+        Some(Command::Search(command)) => search::run(command),
         None => run_tui().await,
     }
 }

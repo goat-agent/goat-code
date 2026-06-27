@@ -48,10 +48,7 @@ impl GeminiProvider {
 }
 
 pub fn build(store: &CredentialStore, account: &str) -> GeminiProvider {
-    let key = CredentialKey {
-        provider: PROVIDER_ID.to_owned(),
-        account: account.to_owned(),
-    };
+    let key = CredentialKey::model(PROVIDER_ID, account);
     GeminiProvider::new(store.clone(), key)
 }
 
