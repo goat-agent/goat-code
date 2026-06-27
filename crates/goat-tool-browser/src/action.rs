@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 use crate::error::BrowserError;
-use crate::snapshot::is_valid_ref;
+use crate::snapshot::{RefParts, parse_ref};
 
 #[derive(Debug, Deserialize)]
 struct Input {
@@ -10,6 +10,8 @@ struct Input {
     url: Option<String>,
     #[serde(default, rename = "ref")]
     reference: Option<String>,
+    #[serde(default)]
+    snapshot_id: Option<String>,
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
@@ -20,6 +22,24 @@ struct Input {
     key: Option<String>,
     #[serde(default)]
     js: Option<String>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    amount: Option<i64>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    max_chars: Option<usize>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserRef {
+    pub snapshot_id: Option<String>,
+    pub reference: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -29,25 +49,55 @@ pub enum Action {
     },
     Snapshot,
     Click {
-        reference: String,
+        reference: BrowserRef,
     },
-    Type {
-        reference: String,
+    Fill {
+        reference: BrowserRef,
         text: String,
         submit: bool,
     },
     Select {
-        reference: String,
+        reference: BrowserRef,
         value: String,
     },
     PressKey {
         key: String,
     },
-    Evaluate {
-        js: String,
+    Scroll {
+        direction: ScrollDirection,
+        amount: Option<i64>,
+    },
+    GoBack,
+    GoForward,
+    FindText {
+        query: String,
+        max_chars: Option<usize>,
+    },
+    Inspect {
+        reference: BrowserRef,
+        max_chars: Option<usize>,
+    },
+    ReadViewport {
+        max_chars: Option<usize>,
+    },
+    WaitFor {
+        text: Option<String>,
+        state: Option<String>,
+        timeout_ms: Option<u64>,
     },
     Screenshot,
+    DebugEval {
+        js: String,
+    },
     Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollDirection {
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 pub fn parse(input: &str) -> Result<Action, BrowserError> {
@@ -59,28 +109,50 @@ pub fn parse(input: &str) -> Result<Action, BrowserError> {
         },
         "snapshot" => Action::Snapshot,
         "click" => Action::Click {
-            reference: require_ref(raw.reference, "click")?,
+            reference: require_ref(raw.reference, raw.snapshot_id, "click")?,
         },
-        "type" => Action::Type {
-            reference: require_ref(raw.reference, "type")?,
-            text: require(raw.text, "type", "text")?,
+        "fill" => Action::Fill {
+            reference: require_ref(raw.reference, raw.snapshot_id, "fill")?,
+            text: require(raw.text, "fill", "text")?,
             submit: raw.submit,
         },
         "select" => Action::Select {
-            reference: require_ref(raw.reference, "select")?,
+            reference: require_ref(raw.reference, raw.snapshot_id, "select")?,
             value: require(raw.value, "select", "value")?,
         },
         "press_key" => Action::PressKey {
             key: require(raw.key, "press_key", "key")?,
         },
-        "evaluate" => Action::Evaluate {
-            js: require(raw.js, "evaluate", "js")?,
+        "scroll" => Action::Scroll {
+            direction: require_direction(raw.direction)?,
+            amount: raw.amount,
+        },
+        "go_back" => Action::GoBack,
+        "go_forward" => Action::GoForward,
+        "find_text" => Action::FindText {
+            query: require(raw.query, "find_text", "query")?,
+            max_chars: raw.max_chars,
+        },
+        "inspect" => Action::Inspect {
+            reference: require_ref(raw.reference, raw.snapshot_id, "inspect")?,
+            max_chars: raw.max_chars,
+        },
+        "read_viewport" => Action::ReadViewport {
+            max_chars: raw.max_chars,
+        },
+        "wait_for" => Action::WaitFor {
+            text: raw.text,
+            state: raw.state,
+            timeout_ms: raw.timeout_ms,
         },
         "screenshot" => Action::Screenshot,
         "close" => Action::Close,
+        "debug_eval" => Action::DebugEval {
+            js: require(raw.js, "debug_eval", "js")?,
+        },
         other => {
             return Err(BrowserError::Input(format!(
-                "unknown action '{other}'; valid actions: navigate, snapshot, click, type, select, press_key, evaluate, screenshot, close"
+                "unknown action '{other}'; valid actions: navigate, snapshot, click, fill, select, press_key, scroll, go_back, go_forward, find_text, inspect, read_viewport, wait_for, screenshot, close, debug_eval"
             )));
         }
     };
@@ -93,20 +165,43 @@ fn require(value: Option<String>, action: &str, field: &str) -> Result<String, B
         .ok_or_else(|| BrowserError::Input(format!("action '{action}' requires '{field}'")))
 }
 
-fn require_ref(value: Option<String>, action: &str) -> Result<String, BrowserError> {
-    let reference = require(value, action, "ref")?;
-    if is_valid_ref(&reference) {
-        Ok(reference)
-    } else {
-        Err(BrowserError::Input(format!(
-            "action '{action}' got an invalid ref '{reference}'; refs look like e12 and come from the latest snapshot"
-        )))
+fn require_ref(
+    value: Option<String>,
+    snapshot_id: Option<String>,
+    action: &str,
+) -> Result<BrowserRef, BrowserError> {
+    let raw = require(value, action, "ref")?;
+    let RefParts {
+        snapshot_id: parsed_snapshot,
+        reference,
+    } = parse_ref(&raw).ok_or_else(|| {
+        BrowserError::Input(format!(
+            "action '{action}' got an invalid ref '{raw}'; refs look like s12:e3 and come from the latest snapshot"
+        ))
+    })?;
+    let snapshot_id = parsed_snapshot.or(snapshot_id);
+    Ok(BrowserRef {
+        snapshot_id,
+        reference,
+    })
+}
+
+fn require_direction(value: Option<String>) -> Result<ScrollDirection, BrowserError> {
+    let direction = require(value, "scroll", "direction")?;
+    match direction.as_str() {
+        "up" => Ok(ScrollDirection::Up),
+        "down" => Ok(ScrollDirection::Down),
+        "left" => Ok(ScrollDirection::Left),
+        "right" => Ok(ScrollDirection::Right),
+        other => Err(BrowserError::Input(format!(
+            "unknown scroll direction '{other}'; valid directions: up, down, left, right"
+        ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, parse};
+    use super::{Action, BrowserRef, ScrollDirection, parse};
 
     #[test]
     fn parses_navigate() {
@@ -120,16 +215,37 @@ mod tests {
     }
 
     #[test]
-    fn parses_type_with_submit() {
-        let action = parse(r#"{"action":"type","ref":"e3","text":"hi","submit":true}"#).unwrap();
+    fn parses_fill_with_submit() {
+        let action = parse(r#"{"action":"fill","ref":"s2:e3","text":"hi","submit":true}"#).unwrap();
         assert_eq!(
             action,
-            Action::Type {
-                reference: "e3".to_owned(),
+            Action::Fill {
+                reference: BrowserRef {
+                    snapshot_id: Some("s2".to_owned()),
+                    reference: "e3".to_owned(),
+                },
                 text: "hi".to_owned(),
                 submit: true,
             }
         );
+    }
+
+    #[test]
+    fn parses_scroll() {
+        let action = parse(r#"{"action":"scroll","direction":"down","amount":640}"#).unwrap();
+        assert_eq!(
+            action,
+            Action::Scroll {
+                direction: ScrollDirection::Down,
+                amount: Some(640),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_type() {
+        let err = parse(r#"{"action":"type","ref":"e3","text":"hi"}"#).unwrap_err();
+        assert!(err.to_string().contains("unknown action"));
     }
 
     #[test]

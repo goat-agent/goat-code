@@ -19,6 +19,53 @@ pub struct Config {
     pub mouse_capture_enabled: bool,
     pub plan_shell_without_sandbox: bool,
     pub remote: RemoteConfig,
+    pub search: SearchConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    pub default_target: Option<String>,
+    pub accounts: Vec<SearchAccountConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum SearchAccountConfig {
+    Duckduckgo {
+        account: String,
+    },
+    Browser {
+        account: String,
+        #[serde(default = "default_browser_search_engine")]
+        engine: String,
+    },
+    Searxng {
+        account: String,
+        endpoint: String,
+    },
+    Brave {
+        account: String,
+    },
+    Tavily {
+        account: String,
+    },
+}
+
+fn default_browser_search_engine() -> String {
+    "duckduckgo".to_owned()
+}
+
+impl SearchAccountConfig {
+    pub fn target(&self) -> String {
+        match self {
+            Self::Duckduckgo { account } => format!("duckduckgo/{account}"),
+            Self::Browser { account, .. } => format!("browser/{account}"),
+            Self::Searxng { account, .. } => format!("searxng/{account}"),
+            Self::Brave { account } => format!("brave/{account}"),
+            Self::Tavily { account } => format!("tavily/{account}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +93,7 @@ impl Default for Config {
             mouse_capture_enabled: true,
             plan_shell_without_sandbox: false,
             remote: RemoteConfig::default(),
+            search: SearchConfig::default(),
         }
     }
 }
@@ -159,7 +207,7 @@ pub fn rate_limits_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, RemoteConfig, ThemeChoice};
+    use super::{Config, RemoteConfig, SearchConfig, ThemeChoice};
 
     #[test]
     fn defaults_to_dark() {
@@ -178,6 +226,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_search_config() {
+        let cfg = Config::from_json(
+            r#"{
+                "search": {
+                    "default_target": "searxng/home",
+                    "accounts": [
+                        { "provider": "searxng", "account": "home", "endpoint": "https://search.example.com" }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.search.default_target.as_deref(), Some("searxng/home"));
+        assert_eq!(cfg.search.accounts[0].target(), "searxng/home");
+    }
+
+    #[test]
+    fn parses_browser_search_config() {
+        let cfg = Config::from_json(
+            r#"{
+                "search": {
+                    "default_target": "browser/duckduckgo",
+                    "accounts": [
+                        { "provider": "browser", "account": "duckduckgo", "engine": "duckduckgo" }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.search.default_target.as_deref(),
+            Some("browser/duckduckgo")
+        );
+        assert_eq!(cfg.search.accounts[0].target(), "browser/duckduckgo");
+    }
+
+    #[test]
     fn round_trips_through_json() {
         let cfg = Config {
             theme: ThemeChoice::Light,
@@ -186,6 +271,7 @@ mod tests {
             mouse_capture_enabled: false,
             plan_shell_without_sandbox: true,
             remote: RemoteConfig::default(),
+            search: SearchConfig::default(),
         };
         let raw = serde_json::to_string(&cfg).unwrap();
         assert_eq!(Config::from_json(&raw).unwrap(), cfg);

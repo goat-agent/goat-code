@@ -5,7 +5,8 @@ use std::{
 };
 
 use goat_auth::{
-    Credential, CredentialKey, CredentialKind, CredentialStore, SecretString, TokenSet,
+    Credential, CredentialKey, CredentialKind, CredentialService, CredentialStore, SecretString,
+    TokenSet,
 };
 use goat_protocol::{
     AccountChoice, AccountEntry, AccountInfo, AuthMethod, Effort, Event, LoginCredential,
@@ -57,10 +58,7 @@ pub(crate) async fn handle_remove_account(
     registry: &mut Registry,
     events: &mpsc::Sender<Event>,
 ) {
-    let key = CredentialKey {
-        provider: provider.clone(),
-        account: name.clone(),
-    };
+    let key = CredentialKey::model(provider.clone(), name.clone());
     if let Err(err) = credentials.remove(&key) {
         tracing::warn!(%err, "failed to remove account");
     }
@@ -84,7 +82,9 @@ pub(crate) fn build_account_entries(
             let is_local = matches!(auth_method, AuthMethod::None);
             let accounts = stored
                 .iter()
-                .filter(|(key, _)| key.provider == provider_id)
+                .filter(|(key, _)| {
+                    key.service == CredentialService::Model && key.provider == provider_id
+                })
                 .map(|(key, kind)| AccountInfo {
                     name: key.account.clone(),
                     method: match kind {
@@ -257,10 +257,7 @@ pub(crate) async fn handle_login(
     credential: LoginCredential,
     dedup: bool,
 ) {
-    let key = CredentialKey {
-        provider: provider.clone(),
-        account: name.clone(),
-    };
+    let key = CredentialKey::model(provider.clone(), name.clone());
     if dedup
         && ctx
             .credentials
@@ -296,7 +293,7 @@ fn account_names_for(credentials: &CredentialStore, provider_id: &str) -> Vec<St
     credentials
         .entries()
         .into_iter()
-        .filter(|(key, _)| key.provider == provider_id)
+        .filter(|(key, _)| key.service == CredentialService::Model && key.provider == provider_id)
         .map(|(key, _)| key.account)
         .collect()
 }

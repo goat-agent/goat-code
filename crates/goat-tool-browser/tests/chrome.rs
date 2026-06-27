@@ -4,7 +4,7 @@ use goat_tool::{Tool, ToolContext};
 
 #[tokio::test]
 #[ignore = "requires a real Chrome install and drives the persistent profile"]
-async fn navigates_clicks_evaluates_and_closes() {
+async fn navigates_clicks_debug_evals_and_closes() {
     let tool = goat_tool_browser::browser_tool();
     let ctx = ToolContext::new(Path::new(".")).unwrap();
 
@@ -12,7 +12,7 @@ async fn navigates_clicks_evaluates_and_closes() {
     let snapshot = tool.run(nav, &ctx).await.unwrap();
     let snapshot = snapshot.as_text().expect("navigate returns text");
     assert!(
-        snapshot.contains("[ref=e1]"),
+        snapshot.contains("[ref=s1:e1]"),
         "snapshot should tag the button: {snapshot}"
     );
 
@@ -21,7 +21,7 @@ async fn navigates_clicks_evaluates_and_closes() {
         .unwrap();
 
     let value = tool
-        .run(r#"{"action":"evaluate","js":"window.__c"}"#, &ctx)
+        .run(r#"{"action":"debug_eval","js":"window.__c"}"#, &ctx)
         .await
         .unwrap();
     assert_eq!(value.as_text().unwrap().trim(), "1");

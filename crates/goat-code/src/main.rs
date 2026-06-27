@@ -2,6 +2,7 @@ mod auth;
 mod cli;
 mod headless;
 mod logging;
+mod search;
 mod update;
 
 use clap::Parser;
@@ -32,6 +33,11 @@ async fn main() -> color_eyre::Result<()> {
             reject_worktree(cli.worktree.as_ref())?;
             reject_continue(cli.r#continue)?;
             auth::run(command).await
+        }
+        Some(Command::Search(command)) => {
+            reject_worktree(cli.worktree.as_ref())?;
+            reject_continue(cli.r#continue)?;
+            search::run(command)
         }
         Some(Command::Worktree(command)) => {
             reject_worktree(cli.worktree.as_ref())?;
