@@ -15,15 +15,25 @@ impl Registry {
     }
 
     pub fn load(store: &CredentialStore, account: &str) -> Self {
-        let providers: Vec<Arc<dyn Provider>> = vec![
+        let mut providers: Vec<Arc<dyn Provider>> = vec![
             Arc::new(goat_provider_openai::build(store, account)),
             Arc::new(goat_provider_openai_codex::build(store, account)),
             Arc::new(goat_provider_anthropic::build(store, account)),
             Arc::new(goat_provider_gemini::build(store, account)),
-            Arc::new(goat_provider_local::ollama()),
-            Arc::new(goat_provider_local::lmstudio()),
-            Arc::new(goat_provider_local::llama_cpp()),
         ];
+        providers.extend(
+            goat_provider_hosted::all(store, account)
+                .into_iter()
+                .map(|provider| Arc::new(provider) as Arc<dyn Provider>),
+        );
+        providers.push(Arc::new(goat_provider_hosted::build_kimi_code(
+            store, account,
+        )));
+        providers.extend([
+            Arc::new(goat_provider_local::ollama()) as Arc<dyn Provider>,
+            Arc::new(goat_provider_local::lmstudio()) as Arc<dyn Provider>,
+            Arc::new(goat_provider_local::llama_cpp()) as Arc<dyn Provider>,
+        ]);
         Self { providers }
     }
 
@@ -65,8 +75,18 @@ mod tests {
             std::env::temp_dir().join("goat-providers-registry-test.json"),
         );
         let registry = Registry::new(&store);
-        assert_eq!(registry.all().len(), 7);
+        assert_eq!(registry.all().len(), 17);
         assert!(registry.get(&ProviderId::from("anthropic")).is_some());
+        assert!(registry.get(&ProviderId::from("openrouter")).is_some());
+        assert!(registry.get(&ProviderId::from("groq")).is_some());
+        assert!(registry.get(&ProviderId::from("deepseek")).is_some());
+        assert!(registry.get(&ProviderId::from("xai")).is_some());
+        assert!(registry.get(&ProviderId::from("mistral")).is_some());
+        assert!(registry.get(&ProviderId::from("zai")).is_some());
+        assert!(registry.get(&ProviderId::from("zai-coding")).is_some());
+        assert!(registry.get(&ProviderId::from("kimi")).is_some());
+        assert!(registry.get(&ProviderId::from("kimi-code")).is_some());
+        assert!(registry.get(&ProviderId::from("qwen")).is_some());
         assert!(registry.get(&ProviderId::from("ollama")).is_some());
         assert!(registry.get(&ProviderId::from("does-not-exist")).is_none());
     }

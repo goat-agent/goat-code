@@ -7,8 +7,8 @@ use futures::StreamExt;
 use goat_auth::{CredentialKey, CredentialStore, TokenSet};
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, RateLimitSnapshot, RateWindow, Request, SearchResult, StreamError, StreamEvent,
-    Usage, WebSearchOutput,
+    ProviderId, ProviderMetadata, RateLimitSnapshot, RateWindow, Request, SearchResult,
+    StreamError, StreamEvent, Usage, WebSearchOutput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -737,6 +737,15 @@ impl Provider for AnthropicProvider {
             tools: true,
             auth: AuthMethod::ApiKeyOrOAuth,
             images: true,
+        }
+    }
+
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            env_var: Some(ENV_VAR),
+            validation: "network",
+            endpoint: None,
+            oauth: Some("browser"),
         }
     }
 

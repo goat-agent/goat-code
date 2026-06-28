@@ -148,7 +148,9 @@ pub async fn do_login(status: &mpsc::Sender<String>) -> Result<TokenSet, GeminiA
 
 pub async fn current_auth(store: &CredentialStore, key: &CredentialKey) -> Option<Auth> {
     match store.resolve(key, Some(super::ENV_VAR))? {
-        Credential::ApiKey(secret) => Some(Auth::ApiKey(secret.expose().to_owned())),
+        Credential::ApiKey(secret) | Credential::ApiKeyWithEndpoint { secret, .. } => {
+            Some(Auth::ApiKey(secret.expose().to_owned()))
+        }
         Credential::OAuth(tokens) => {
             let tokens = ensure_valid(tokens, store, key, do_refresh).await?;
             Some(Auth::OAuth(tokens.access_token.expose().to_owned()))

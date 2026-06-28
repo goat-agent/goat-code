@@ -314,9 +314,31 @@ impl StreamError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderMetadata {
+    pub env_var: Option<&'static str>,
+    pub validation: &'static str,
+    pub endpoint: Option<&'static str>,
+    pub oauth: Option<&'static str>,
+}
+
+impl ProviderMetadata {
+    pub const fn default() -> Self {
+        Self {
+            env_var: None,
+            validation: "network",
+            endpoint: None,
+            oauth: None,
+        }
+    }
+}
+
 pub trait Provider: Send + Sync + 'static {
     fn id(&self) -> ProviderId;
     fn capabilities(&self) -> Capabilities;
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata::default()
+    }
     fn stream(&self, req: Request, tx: mpsc::Sender<StreamEvent>) -> JoinHandle<()>;
     fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()>;
     fn catalog(&self) -> &'static [&'static str] {
@@ -331,6 +353,11 @@ pub trait Provider: Send + Sync + 'static {
     fn validate(&self) -> JoinHandle<Result<(), String>> {
         tokio::spawn(async { Ok(()) })
     }
+
+    fn verifies_credentials(&self) -> bool {
+        true
+    }
+
     fn context_window(&self, _model: &str) -> Option<u32> {
         None
     }

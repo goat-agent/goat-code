@@ -1,5 +1,5 @@
 use goat_auth::{CredentialKey, CredentialStore};
-use goat_provider::{AuthMethod, ProviderId};
+use goat_provider::{AuthMethod, ProviderId, ProviderMetadata};
 use goat_provider_openai_compat::ResponsesProvider;
 
 pub const PROVIDER_ID: &str = "openai";
@@ -67,6 +67,12 @@ pub fn build(store: &CredentialStore, account: &str) -> ResponsesProvider {
     .with_catalog(CATALOG)
     .with_context_windows(CONTEXT_WINDOWS)
     .with_search_model(SEARCH_MODEL)
+    .with_metadata(ProviderMetadata {
+        env_var: Some(ENV_VAR),
+        validation: "network",
+        endpoint: None,
+        oauth: Some("not supported"),
+    })
 }
 
 #[cfg(test)]
