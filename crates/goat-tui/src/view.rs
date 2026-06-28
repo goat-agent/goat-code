@@ -249,12 +249,13 @@ fn footer_visible(app: &App) -> bool {
 
 fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     let content = Rect {
-        x: area.x + PAD_X,
+        x: area.x,
         y: area.y,
-        width: area.width.saturating_sub(PAD_X + SCROLL_GUTTER),
+        width: area.width.saturating_sub(SCROLL_GUTTER),
         height: area.height,
     };
-    app.clamp_scroll(content.height, content.width);
+    let body_width = content.width.saturating_sub(PAD_X);
+    app.clamp_scroll(content.height, body_width);
     let working = app.working_state();
     let queued = app.queued_labels();
     app.transcript().render(
@@ -263,6 +264,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
         &crate::transcript::RenderCtx {
             theme,
             scroll: app.scroll(),
+            left_pad: PAD_X,
             spinner: app.spinner_frame(),
             working: working.as_ref(),
             queued: &queued,
@@ -273,7 +275,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
     if app.follow() {
         return;
     }
-    let content_len = app.content_height(content.width);
+    let content_len = app.content_height(body_width);
     if content_len <= usize::from(content.height) {
         return;
     }

@@ -117,21 +117,14 @@ fn line_width(line: &Line<'static>) -> usize {
         .sum()
 }
 
-const USER_PANEL_PAD_X: usize = 2;
-
 fn user_panel_rows(mut rows: Vec<Line<'static>>, theme: Theme, width: u16) -> Vec<Line<'static>> {
     let panel = theme.user_panel();
     let target = usize::from(width);
-    let content_width = rows.iter().map(line_width).max().unwrap_or_default();
-    let block_width = content_width
-        .saturating_add(USER_PANEL_PAD_X)
-        .min(target)
-        .max(content_width.min(target));
     for line in &mut rows {
         for span in &mut line.spans {
             span.style = span.style.patch(panel);
         }
-        let pad = block_width.saturating_sub(line_width(line));
+        let pad = target.saturating_sub(line_width(line));
         if pad > 0 {
             line.spans.push(Span::styled(" ".repeat(pad), panel));
         }

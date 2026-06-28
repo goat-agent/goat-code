@@ -34,6 +34,11 @@ async fn main() -> color_eyre::Result<()> {
             reject_continue(cli.r#continue)?;
             auth::run(command).await
         }
+        Some(Command::Provider(command)) => {
+            reject_worktree(cli.worktree.as_ref())?;
+            reject_continue(cli.r#continue)?;
+            auth::run_provider(command).await
+        }
         Some(Command::Search(command)) => {
             reject_worktree(cli.worktree.as_ref())?;
             reject_continue(cli.r#continue)?;

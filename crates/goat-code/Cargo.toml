@@ -19,6 +19,7 @@ goat-client = { workspace = true }
 goat-wire = { workspace = true }
 goat-protocol = { workspace = true }
 goat-provider = { workspace = true }
+goat-provider-hosted = { workspace = true }
 goat-providers = { workspace = true }
 goat-auth = { workspace = true }
 goat-worktree = { workspace = true }

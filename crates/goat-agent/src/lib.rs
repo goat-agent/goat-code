@@ -837,17 +837,15 @@ mod tests {
                 .expect("engine stalled before processing the follow-up")
                 .expect("engine closed");
             match event {
-                Event::TaskStarted { .. } => {
-                    if !sent_followup {
-                        sent_followup = true;
-                        ops.send(Op::SubmitMessage {
-                            id: TaskId(2),
-                            text: "follow up".to_owned(),
-                            attachments: Vec::new(),
-                        })
-                        .await
-                        .unwrap();
-                    }
+                Event::TaskStarted { .. } if !sent_followup => {
+                    sent_followup = true;
+                    ops.send(Op::SubmitMessage {
+                        id: TaskId(2),
+                        text: "follow up".to_owned(),
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .unwrap();
                 }
                 Event::TextDone { .. } => text_dones += 1,
                 Event::TaskDone { interrupted, .. } => {

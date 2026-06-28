@@ -185,21 +185,34 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credential {
     ApiKey(SecretString),
+    ApiKeyWithEndpoint {
+        secret: SecretString,
+        endpoint: String,
+    },
     OAuth(TokenSet),
 }
 
 impl Credential {
     pub fn kind(&self) -> CredentialKind {
         match self {
-            Credential::ApiKey(_) => CredentialKind::ApiKey,
+            Credential::ApiKey(_) | Credential::ApiKeyWithEndpoint { .. } => CredentialKind::ApiKey,
             Credential::OAuth(_) => CredentialKind::OAuth,
         }
     }
 
     pub fn bearer(&self) -> &str {
         match self {
-            Credential::ApiKey(secret) => secret.expose(),
+            Credential::ApiKey(secret) | Credential::ApiKeyWithEndpoint { secret, .. } => {
+                secret.expose()
+            }
             Credential::OAuth(tokens) => tokens.access_token.expose(),
+        }
+    }
+
+    pub fn endpoint(&self) -> Option<&str> {
+        match self {
+            Credential::ApiKeyWithEndpoint { endpoint, .. } => Some(endpoint),
+            Credential::ApiKey(_) | Credential::OAuth(_) => None,
         }
     }
 }
@@ -207,14 +220,25 @@ impl Credential {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum StoredValue {
-    ApiKey { secret: SecretString },
-    OAuth { tokens: TokenSet },
+    ApiKey {
+        secret: SecretString,
+    },
+    ApiKeyWithEndpoint {
+        secret: SecretString,
+        endpoint: String,
+    },
+    OAuth {
+        tokens: TokenSet,
+    },
 }
 
 impl From<Credential> for StoredValue {
     fn from(value: Credential) -> Self {
         match value {
             Credential::ApiKey(secret) => StoredValue::ApiKey { secret },
+            Credential::ApiKeyWithEndpoint { secret, endpoint } => {
+                StoredValue::ApiKeyWithEndpoint { secret, endpoint }
+            }
             Credential::OAuth(tokens) => StoredValue::OAuth { tokens },
         }
     }
@@ -224,6 +248,9 @@ impl From<StoredValue> for Credential {
     fn from(value: StoredValue) -> Self {
         match value {
             StoredValue::ApiKey { secret } => Credential::ApiKey(secret),
+            StoredValue::ApiKeyWithEndpoint { secret, endpoint } => {
+                Credential::ApiKeyWithEndpoint { secret, endpoint }
+            }
             StoredValue::OAuth { tokens } => Credential::OAuth(tokens),
         }
     }
@@ -386,6 +413,10 @@ impl CredentialStore {
 
     pub fn store(&self, key: &CredentialKey, value: Credential) -> Result<(), AuthError> {
         self.file_set(key, value)
+    }
+
+    pub fn get(&self, key: &CredentialKey) -> Option<Credential> {
+        self.file_get(key)
     }
 
     pub fn entries(&self) -> Vec<(CredentialKey, CredentialKind)> {

@@ -1986,6 +1986,7 @@ dependencies = [
  "goat-daemon",
  "goat-protocol",
  "goat-provider",
+ "goat-provider-hosted",
  "goat-providers",
  "goat-tui",
  "goat-wire",
@@ -2166,6 +2167,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "goat-provider-hosted"
+version = "0.1.14"
+dependencies = [
+ "goat-auth",
+ "goat-provider",
+ "goat-provider-openai-compat",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "goat-provider-local"
 version = "0.1.14"
 dependencies = [
@@ -2220,6 +2235,7 @@ dependencies = [
  "goat-provider",
  "goat-provider-anthropic",
  "goat-provider-gemini",
+ "goat-provider-hosted",
  "goat-provider-local",
  "goat-provider-openai",
  "goat-provider-openai-codex",

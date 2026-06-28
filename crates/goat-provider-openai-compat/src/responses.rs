@@ -4,8 +4,8 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, RateLimitSnapshot, Request, SearchResult, StreamError, StreamEvent, ToolChoice,
-    ToolDefinition, Usage, WebSearchOutput,
+    ProviderId, ProviderMetadata, RateLimitSnapshot, Request, SearchResult, StreamError,
+    StreamEvent, ToolChoice, ToolDefinition, Usage, WebSearchOutput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -491,6 +491,7 @@ pub struct ResponsesProvider {
     rate_limits_parser: Option<fn(&reqwest::header::HeaderMap) -> Option<RateLimitSnapshot>>,
     context_windows: &'static [(&'static str, u32)],
     search_model: Option<&'static str>,
+    metadata: ProviderMetadata,
 }
 
 impl ResponsesProvider {
@@ -512,6 +513,7 @@ impl ResponsesProvider {
             rate_limits_parser: None,
             context_windows: &[],
             search_model: None,
+            metadata: ProviderMetadata::default(),
         }
     }
 
@@ -556,6 +558,12 @@ impl ResponsesProvider {
     #[must_use]
     pub fn with_context_windows(mut self, windows: &'static [(&'static str, u32)]) -> Self {
         self.context_windows = windows;
+        self
+    }
+
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: ProviderMetadata) -> Self {
+        self.metadata = metadata;
         self
     }
 }
@@ -680,6 +688,10 @@ impl Provider for ResponsesProvider {
             auth: self.auth,
             images: true,
         }
+    }
+
+    fn metadata(&self) -> ProviderMetadata {
+        self.metadata
     }
 
     fn supports_images(&self, model: &str) -> bool {

@@ -170,6 +170,24 @@ async fn login_succeeded(provider: &str, events: &mpsc::Sender<Event>) {
         .await;
 }
 
+async fn login_stored_unverified(provider: &str, events: &mpsc::Sender<Event>) {
+    let message = "stored but not verified; validation will happen on first request".to_owned();
+    let _ = events
+        .send(Event::Notify {
+            kind: NotifyKind::Success,
+            message: format!("{provider} {message}"),
+        })
+        .await;
+    let _ = events
+        .send(Event::LoginStatus {
+            provider: provider.to_owned(),
+            message,
+            done: true,
+            ok: true,
+        })
+        .await;
+}
+
 async fn login_failed(provider: &str, events: &mpsc::Sender<Event>, message: String) {
     let _ = events
         .send(Event::LoginStatus {
@@ -230,9 +248,16 @@ async fn finalize_login(
         emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
         return;
     }
+    let stored_but_unverified = Registry::load(ctx.credentials, &name)
+        .get(&goat_provider::ProviderId::from(provider.as_str()))
+        .is_some_and(|target| !target.verifies_credentials());
     let entries = discover_ready(ctx.registry, ctx.credentials).await;
     let _ = ctx.events.send(Event::ModelListChanged { entries }).await;
-    login_succeeded(&provider, ctx.events).await;
+    if stored_but_unverified {
+        login_stored_unverified(&provider, ctx.events).await;
+    } else {
+        login_succeeded(&provider, ctx.events).await;
+    }
     emit_accounts_changed(ctx.events, ctx.registry, ctx.credentials).await;
 }
 

@@ -6,8 +6,8 @@ use goat_auth::{
     ensure_valid, random_state,
 };
 use goat_provider::{
-    AuthMethod, Capabilities, Model, Provider, ProviderId, Request, StreamError, StreamEvent,
-    WebSearchOutput, now_secs,
+    AuthMethod, Capabilities, Model, Provider, ProviderId, ProviderMetadata, Request, StreamError,
+    StreamEvent, WebSearchOutput, now_secs,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -251,7 +251,7 @@ async fn current_access(
 ) -> Option<(String, Option<String>)> {
     let tokens = match store.resolve(key, None)? {
         Credential::OAuth(tokens) => tokens,
-        Credential::ApiKey(secret) => {
+        Credential::ApiKey(secret) | Credential::ApiKeyWithEndpoint { secret, .. } => {
             let access = secret.expose().to_owned();
             let account = account_id(&access);
             return Some((access, account));
@@ -452,6 +452,15 @@ impl Provider for CodexProvider {
             tools: true,
             auth: AuthMethod::OAuth,
             images: true,
+        }
+    }
+
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            env_var: None,
+            validation: "oauth",
+            endpoint: None,
+            oauth: Some("browser or device"),
         }
     }
 

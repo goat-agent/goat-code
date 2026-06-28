@@ -19,6 +19,7 @@ use render::{build_static_lines, hang, is_blank, queued_rows, stable_prefix_len,
 pub(crate) struct RenderCtx<'a> {
     pub theme: Theme,
     pub scroll: usize,
+    pub left_pad: u16,
     pub spinner: &'static str,
     pub working: Option<&'a Working>,
     pub queued: &'a [String],
@@ -60,6 +61,20 @@ pub struct Transcript {
 struct ItemMemoCache {
     width: u16,
     entries: Vec<render::ItemMemo>,
+}
+
+fn pad_left(mut line: Line<'static>, width: u16, theme: Theme) -> Line<'static> {
+    if width == 0 {
+        return line;
+    }
+    let style = line
+        .spans
+        .first()
+        .filter(|span| span.style.bg == theme.user_panel().bg)
+        .map_or_else(|| theme.base(), |span| span.style);
+    line.spans
+        .insert(0, Span::styled(" ".repeat(usize::from(width)), style));
+    line
 }
 
 impl Transcript {
@@ -347,14 +362,15 @@ impl Transcript {
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
-        self.ensure_cache(ctx.theme, area.width, ctx.hl);
+        let body_width = area.width.saturating_sub(ctx.left_pad);
+        self.ensure_cache(ctx.theme, body_width, ctx.hl);
         let guard = self.cache.borrow();
         let Some(cache) = guard.as_ref() else {
             return;
         };
         let tail = self.tail_rows(
             ctx.theme,
-            area.width,
+            body_width,
             ctx.hl,
             ctx.spinner,
             ctx.working,
@@ -374,12 +390,17 @@ impl Transcript {
             {
                 *span = Span::styled(ctx.spinner, ctx.theme.accent());
             }
-            visible.push(line);
+            visible.push(pad_left(line, ctx.left_pad, ctx.theme));
         }
         if end > cache.lines.len() {
             let from = start.saturating_sub(cache.lines.len());
             let to = end - cache.lines.len();
-            visible.extend(tail.into_iter().take(to).skip(from));
+            visible.extend(
+                tail.into_iter()
+                    .take(to)
+                    .skip(from)
+                    .map(|line| pad_left(line, ctx.left_pad, ctx.theme)),
+            );
         }
         frame.render_widget(Paragraph::new(visible), area);
         let Some(picker) = ctx.picker else {
@@ -401,9 +422,9 @@ impl Transcript {
                 continue;
             };
             let rect = Rect {
-                x: area.x,
+                x: area.x + ctx.left_pad,
                 y: area.y + u16::try_from(top).unwrap_or(u16::MAX),
-                width: area.width,
+                width: body_width,
                 height: placement.rows,
             };
             img.render(frame, rect, picker);
@@ -699,6 +720,7 @@ mod tests {
                     &super::RenderCtx {
                         theme: Theme::dark(),
                         scroll: h - 2,
+                        left_pad: 0,
                         spinner: symbols::SPINNER[0],
                         working: None,
                         queued: &[],
@@ -724,6 +746,7 @@ mod tests {
                     &super::RenderCtx {
                         theme: Theme::dark(),
                         scroll: 0,
+                        left_pad: 0,
                         spinner: symbols::SPINNER[3],
                         working: None,
                         queued: &[],
@@ -740,14 +763,24 @@ mod tests {
         terminal.backend().buffer()[(x, y)].style().bg
     }
 
+    fn row_has_bg(
+        terminal: &Terminal<TestBackend>,
+        y: u16,
+        bg: Option<ratatui::style::Color>,
+    ) -> bool {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.width).all(|x| buffer[(x, y)].style().bg == bg)
+    }
+
     #[test]
     fn user_rows_render_padded_panel_background() {
         let mut t = Transcript::default();
         t.push_user("hello\nworld");
         commit(&mut t, "answer");
+        assert_eq!(height(&t, 20), 4);
         let theme = Theme::dark();
         let panel_bg = theme.user_panel().bg;
-        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(21, 4)).unwrap();
         terminal
             .draw(|frame| {
                 t.render(
@@ -756,6 +789,7 @@ mod tests {
                     &super::RenderCtx {
                         theme,
                         scroll: 0,
+                        left_pad: 1,
                         spinner: symbols::SPINNER[0],
                         working: None,
                         queued: &[],
@@ -765,13 +799,11 @@ mod tests {
                 );
             })
             .unwrap();
-        assert_eq!(cell_bg(&terminal, 0, 0), panel_bg);
-        assert_eq!(cell_bg(&terminal, 8, 0), panel_bg);
-        assert_ne!(cell_bg(&terminal, 9, 0), panel_bg);
-        assert_eq!(cell_bg(&terminal, 0, 1), panel_bg);
-        assert_eq!(cell_bg(&terminal, 8, 1), panel_bg);
-        assert_ne!(cell_bg(&terminal, 9, 1), panel_bg);
-        assert_ne!(cell_bg(&terminal, 0, 3), panel_bg);
+        assert!(row_has_bg(&terminal, 0, panel_bg));
+        assert!(row_has_bg(&terminal, 1, panel_bg));
+        assert!(buffer_row(&terminal, 0).contains("hello"));
+        assert!(buffer_row(&terminal, 1).contains("world"));
+        assert_ne!(cell_bg(&terminal, 0, 2), panel_bg);
     }
 
     #[test]
@@ -785,6 +817,7 @@ mod tests {
                 label: "demo.png".to_owned(),
             }],
         );
+        assert_eq!(height(&t, 24), 2);
         let theme = Theme::dark();
         let panel_bg = theme.user_panel().bg;
         let mut terminal = Terminal::new(TestBackend::new(24, 3)).unwrap();
@@ -796,6 +829,7 @@ mod tests {
                     &super::RenderCtx {
                         theme,
                         scroll: 0,
+                        left_pad: 1,
                         spinner: symbols::SPINNER[0],
                         working: None,
                         queued: &[],
@@ -805,12 +839,11 @@ mod tests {
                 );
             })
             .unwrap();
+        assert!(buffer_row(&terminal, 0).contains("hi"));
         assert!(buffer_row(&terminal, 1).contains("[image: demo.png]"));
-        assert_eq!(cell_bg(&terminal, 0, 0), panel_bg);
-        assert_eq!(cell_bg(&terminal, 20, 0), panel_bg);
-        assert_eq!(cell_bg(&terminal, 20, 1), panel_bg);
-        assert_ne!(cell_bg(&terminal, 21, 0), panel_bg);
-        assert_ne!(cell_bg(&terminal, 21, 1), panel_bg);
+        assert!(row_has_bg(&terminal, 0, panel_bg));
+        assert!(row_has_bg(&terminal, 1, panel_bg));
+        assert_ne!(cell_bg(&terminal, 0, 2), panel_bg);
     }
 
     #[test]

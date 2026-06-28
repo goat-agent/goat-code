@@ -4,7 +4,7 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
     AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, Request, StreamEvent, Usage,
+    ProviderId, ProviderMetadata, Request, StreamError, StreamEvent, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -12,12 +12,62 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::common;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatValidation {
+    ModelsEndpoint,
+    CatalogOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatDiscovery {
+    ModelsEndpoint,
+    CatalogOnly,
+}
+
+#[derive(Clone)]
+struct ChatOptions {
+    tools: bool,
+    images: bool,
+    stream_options: bool,
+    reasoning_effort: bool,
+    model_filter: Option<fn(&str) -> bool>,
+    vision_filter: fn(&str) -> bool,
+    effort_options: fn(&str) -> Vec<Effort>,
+    effort_wire: fn(Effort) -> Option<&'static str>,
+    catalog: &'static [&'static str],
+    context_windows: &'static [(&'static str, u32)],
+    validation: ChatValidation,
+    discovery: ChatDiscovery,
+    metadata: ProviderMetadata,
+}
+
+impl Default for ChatOptions {
+    fn default() -> Self {
+        Self {
+            tools: true,
+            images: true,
+            stream_options: true,
+            reasoning_effort: true,
+            model_filter: None,
+            vision_filter: crate::vision::known_openai_compatible_vision_model,
+            effort_options: default_efforts,
+            effort_wire: chat_effort_wire,
+            catalog: &[],
+            context_windows: &[],
+            validation: ChatValidation::ModelsEndpoint,
+            discovery: ChatDiscovery::ModelsEndpoint,
+            metadata: ProviderMetadata::default(),
+        }
+    }
+}
+
 pub struct OpenAiCompatProvider {
     id: ProviderId,
     base_url: String,
     bearer: Option<String>,
     auth: AuthMethod,
     client: reqwest::Client,
+    options: ChatOptions,
 }
 
 impl OpenAiCompatProvider {
@@ -29,10 +79,11 @@ impl OpenAiCompatProvider {
     ) -> Self {
         Self {
             id,
-            base_url: base_url.into(),
+            base_url: normalize_base_url(&base_url.into()),
             bearer,
             auth,
             client: common::http_client(),
+            options: ChatOptions::default(),
         }
     }
 
@@ -43,7 +94,99 @@ impl OpenAiCompatProvider {
             None,
             AuthMethod::None,
         )
+        .with_metadata(ProviderMetadata {
+            env_var: None,
+            validation: "local",
+            endpoint: Some(base_url),
+            oauth: None,
+        })
     }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    #[must_use]
+    pub fn with_tools(mut self, enabled: bool) -> Self {
+        self.options.tools = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_images(mut self, enabled: bool) -> Self {
+        self.options.images = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_stream_options(mut self, enabled: bool) -> Self {
+        self.options.stream_options = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_reasoning_effort(mut self, enabled: bool) -> Self {
+        self.options.reasoning_effort = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_model_filter(mut self, filter: fn(&str) -> bool) -> Self {
+        self.options.model_filter = Some(filter);
+        self
+    }
+
+    #[must_use]
+    pub fn with_vision_filter(mut self, filter: fn(&str) -> bool) -> Self {
+        self.options.vision_filter = filter;
+        self
+    }
+
+    #[must_use]
+    pub fn with_efforts(mut self, efforts: fn(&str) -> Vec<Effort>) -> Self {
+        self.options.effort_options = efforts;
+        self
+    }
+
+    #[must_use]
+    pub fn with_effort_wire(mut self, effort_wire: fn(Effort) -> Option<&'static str>) -> Self {
+        self.options.effort_wire = effort_wire;
+        self
+    }
+
+    #[must_use]
+    pub fn with_catalog(mut self, catalog: &'static [&'static str]) -> Self {
+        self.options.catalog = catalog;
+        self
+    }
+
+    #[must_use]
+    pub fn with_context_windows(mut self, windows: &'static [(&'static str, u32)]) -> Self {
+        self.options.context_windows = windows;
+        self
+    }
+
+    #[must_use]
+    pub fn with_validation(mut self, validation: ChatValidation) -> Self {
+        self.options.validation = validation;
+        self
+    }
+
+    #[must_use]
+    pub fn with_discovery(mut self, discovery: ChatDiscovery) -> Self {
+        self.options.discovery = discovery;
+        self
+    }
+
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: ProviderMetadata) -> Self {
+        self.options.metadata = metadata;
+        self
+    }
+}
+
+fn normalize_base_url(base_url: &str) -> String {
+    base_url.trim_end_matches('/').to_owned()
 }
 
 #[derive(Serialize)]
@@ -51,7 +194,8 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<serde_json::Value>,
     stream: bool,
-    stream_options: StreamOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +207,10 @@ struct ChatRequest<'a> {
 #[derive(Serialize)]
 struct StreamOptions {
     include_usage: bool,
+}
+
+fn default_efforts(_model: &str) -> Vec<Effort> {
+    vec![Effort::Low, Effort::Medium, Effort::High]
 }
 
 fn chat_effort_wire(effort: Effort) -> Option<&'static str> {
@@ -178,6 +326,52 @@ fn to_chat_tools(req: &Request) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+fn request_has_images(req: &Request) -> bool {
+    req.messages.iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::Image { .. } => true,
+            ContentBlock::ToolResult { content, .. } => content
+                .iter()
+                .any(|item| matches!(item, ContentBlock::Image { .. })),
+            _ => false,
+        })
+    })
+}
+
+fn build_chat_body(req: &Request, options: &ChatOptions) -> Result<serde_json::Value, StreamError> {
+    if request_has_images(req) && (!options.images || !(options.vision_filter)(&req.model)) {
+        return Err(StreamError::invalid_request(
+            "this provider or model does not support image input; switch to a vision-capable model",
+        ));
+    }
+    let tools = if options.tools {
+        to_chat_tools(req)
+    } else {
+        Vec::new()
+    };
+    let tool_choice = (options.tools
+        && !req.tools.is_empty()
+        && matches!(req.tool_choice, goat_provider::ToolChoice::None))
+    .then_some("none");
+    let reasoning_effort = if options.reasoning_effort {
+        req.effort.and_then(options.effort_wire)
+    } else {
+        None
+    };
+    let body = ChatRequest {
+        model: &req.model,
+        messages: to_chat_messages(&req.messages),
+        stream: true,
+        stream_options: options.stream_options.then_some(StreamOptions {
+            include_usage: true,
+        }),
+        tool_choice,
+        tools,
+        reasoning_effort,
+    };
+    serde_json::to_value(body).map_err(|err| StreamError::other(err.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -332,48 +526,65 @@ impl Provider for OpenAiCompatProvider {
         common::authenticated(self.auth, &self.bearer)
     }
 
+    fn verifies_credentials(&self) -> bool {
+        matches!(self.options.validation, ChatValidation::ModelsEndpoint)
+    }
+
     fn validate(&self) -> JoinHandle<Result<(), String>> {
-        common::validate_bearer(
-            self.client.clone(),
-            format!("{}/models", self.base_url),
-            self.auth,
-            self.bearer.clone(),
-        )
+        match self.options.validation {
+            ChatValidation::ModelsEndpoint => common::validate_bearer(
+                self.client.clone(),
+                format!("{}/models", self.base_url),
+                self.auth,
+                self.bearer.clone(),
+            ),
+            ChatValidation::CatalogOnly => tokio::spawn(async move { Ok(()) }),
+        }
     }
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            tools: true,
+            tools: self.options.tools,
             auth: self.auth,
-            images: true,
+            images: self.options.images,
         }
     }
 
-    fn supports_images(&self, model: &str) -> bool {
-        crate::vision::known_openai_compatible_vision_model(model)
+    fn metadata(&self) -> ProviderMetadata {
+        self.options.metadata
     }
 
-    fn efforts(&self, _model: &str) -> Vec<Effort> {
-        vec![Effort::Low, Effort::Medium, Effort::High]
+    fn catalog(&self) -> &'static [&'static str] {
+        self.options.catalog
+    }
+
+    fn supports_images(&self, model: &str) -> bool {
+        self.options.images && (self.options.vision_filter)(model)
+    }
+
+    fn efforts(&self, model: &str) -> Vec<Effort> {
+        (self.options.effort_options)(model)
+    }
+
+    fn context_window(&self, model: &str) -> Option<u32> {
+        self.options
+            .context_windows
+            .iter()
+            .find_map(|(prefix, window)| model.starts_with(prefix).then_some(*window))
     }
 
     fn stream(&self, req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
         let client = self.client.clone();
         let url = format!("{}/chat/completions", self.base_url);
         let bearer = self.bearer.clone();
+        let options = self.options.clone();
         tokio::spawn(async move {
-            let body = ChatRequest {
-                model: &req.model,
-                messages: to_chat_messages(&req.messages),
-                stream: true,
-                stream_options: StreamOptions {
-                    include_usage: true,
-                },
-                tool_choice: (!req.tools.is_empty()
-                    && matches!(req.tool_choice, goat_provider::ToolChoice::None))
-                .then_some("none"),
-                tools: to_chat_tools(&req),
-                reasoning_effort: req.effort.and_then(chat_effort_wire),
+            let body = match build_chat_body(&req, &options) {
+                Ok(body) => body,
+                Err(error) => {
+                    let _ = events.send(StreamEvent::Failed { error }).await;
+                    return;
+                }
             };
             let mut builder = client.post(&url).json(&body);
             if let Some(token) = &bearer {
@@ -406,29 +617,147 @@ impl Provider for OpenAiCompatProvider {
     }
 
     fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
-        common::discover_models(
-            self.client.clone(),
-            format!("{}/models", self.base_url),
-            self.bearer.clone(),
-            None,
-            crate::vision::known_openai_compatible_vision_model,
-            out,
-        )
+        match self.options.discovery {
+            ChatDiscovery::ModelsEndpoint => common::discover_models(
+                self.client.clone(),
+                format!("{}/models", self.base_url),
+                self.bearer.clone(),
+                self.options.model_filter,
+                self.options.vision_filter,
+                out,
+            ),
+            ChatDiscovery::CatalogOnly => {
+                let catalog = self.options.catalog;
+                let vision_filter = self.options.vision_filter;
+                let images = self.options.images;
+                tokio::spawn(async move {
+                    for id in catalog {
+                        if out
+                            .send(Model {
+                                id: (*id).to_owned(),
+                                supports_images: images && vision_filter(id),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                })
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatChunk, ToolAccumulator, accumulate_tool_calls, data_has_error, drain_tool_calls,
+        ChatChunk, ChatDiscovery, ChatOptions, ChatValidation, OpenAiCompatProvider,
+        ToolAccumulator, accumulate_tool_calls, build_chat_body, data_has_error, drain_tool_calls,
         to_chat_messages,
     };
-    use goat_provider::{ContentBlock, Message, MessageRole, StreamEvent};
+    use goat_provider::{
+        AuthMethod, ContentBlock, Effort, Message, MessageRole, Provider, Request, StreamEvent,
+        ToolChoice, ToolDefinition,
+    };
     use serde_json::json;
 
     fn chunk_tool_calls(data: &str) -> Vec<super::ToolCallChunk> {
         let chunk: ChatChunk = serde_json::from_str(data).unwrap();
         chunk.choices.into_iter().next().unwrap().delta.tool_calls
+    }
+
+    fn request() -> Request {
+        Request {
+            model: "model".to_owned(),
+            messages: vec![Message::text(MessageRole::User, "hi")],
+            tools: vec![ToolDefinition {
+                name: "read_file".to_owned(),
+                description: "read".to_owned(),
+                input_schema: json!({ "type": "object" }),
+            }],
+            effort: Some(Effort::High),
+            tool_choice: ToolChoice::None,
+        }
+    }
+
+    #[test]
+    fn normalizes_base_url() {
+        let provider = OpenAiCompatProvider::new(
+            "test".into(),
+            "https://api.example.com/v1/",
+            None,
+            AuthMethod::ApiKey,
+        );
+        assert_eq!(provider.base_url(), "https://api.example.com/v1");
+    }
+
+    #[test]
+    fn validation_mode_controls_verification_hint() {
+        let provider = OpenAiCompatProvider::new(
+            "test".into(),
+            "https://api.example.com/v1",
+            Some("key".to_owned()),
+            AuthMethod::ApiKey,
+        )
+        .with_validation(ChatValidation::CatalogOnly);
+        assert!(!provider.verifies_credentials());
+    }
+
+    #[test]
+    fn catalog_only_discovery_returns_catalog_models() {
+        const CATALOG: &[&str] = &["a", "b"];
+        let provider = OpenAiCompatProvider::new(
+            "test".into(),
+            "https://api.example.com/v1",
+            None,
+            AuthMethod::ApiKey,
+        )
+        .with_catalog(CATALOG)
+        .with_discovery(ChatDiscovery::CatalogOnly);
+        assert_eq!(provider.catalog(), CATALOG);
+    }
+
+    #[test]
+    fn build_body_can_omit_provider_specific_fields() {
+        let options = ChatOptions {
+            tools: false,
+            stream_options: false,
+            reasoning_effort: false,
+            ..ChatOptions::default()
+        };
+        let body = build_chat_body(&request(), &options).unwrap();
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("stream_options").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn image_content_without_vision_support_errors() {
+        let mut req = request();
+        req.messages = vec![Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_owned(),
+                data: "abc".to_owned(),
+            }],
+        }];
+        let options = ChatOptions {
+            images: false,
+            ..ChatOptions::default()
+        };
+        let error = build_chat_body(&req, &options).unwrap_err();
+        assert!(matches!(
+            error,
+            goat_provider::StreamError::InvalidRequest { .. }
+        ));
+    }
+
+    #[test]
+    fn effort_wire_is_serialized() {
+        let body = build_chat_body(&request(), &ChatOptions::default()).unwrap();
+        assert_eq!(body["reasoning_effort"], "high");
     }
 
     #[test]

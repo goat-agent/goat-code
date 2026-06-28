@@ -9,8 +9,8 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_auth::{CredentialKey, CredentialStore, TokenSet};
 use goat_provider::{
-    AuthMethod, Capabilities, Effort, Model, Provider, ProviderId, Request, SearchResult,
-    StreamError, StreamEvent, WebSearchOutput,
+    AuthMethod, Capabilities, Effort, Model, Provider, ProviderId, ProviderMetadata, Request,
+    SearchResult, StreamError, StreamEvent, WebSearchOutput,
 };
 use serde_json::json;
 use tokio::{sync::Mutex, sync::mpsc, task::JoinHandle};
@@ -216,6 +216,15 @@ impl Provider for GeminiProvider {
             tools: true,
             auth: AuthMethod::ApiKeyOrOAuth,
             images: true,
+        }
+    }
+
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            env_var: Some(ENV_VAR),
+            validation: "network",
+            endpoint: None,
+            oauth: Some("browser"),
         }
     }
 
