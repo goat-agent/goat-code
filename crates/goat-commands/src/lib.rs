@@ -247,6 +247,10 @@ mod tests {
             CommandEffect::OpenConfig
         ));
         assert!(matches!(
+            registry.resolve_line("/provider"),
+            CommandEffect::OpenConfig
+        ));
+        assert!(matches!(
             registry.resolve_line("/clear"),
             CommandEffect::ClearConversation
         ));
@@ -319,6 +323,7 @@ mod tests {
         registry.set_skills(&[skill("demo")]);
         let names: Vec<_> = registry.specs().into_iter().map(|spec| spec.name).collect();
         assert!(names.iter().any(|name| name == "model"));
+        assert!(names.iter().any(|name| name == "provider"));
         assert!(names.iter().any(|name| name == "demo"));
     }
 

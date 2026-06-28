@@ -504,7 +504,7 @@ impl Config {
                     Paragraph::new(hint_line(
                         &[
                             (symbols::key::ARROWS_UPDOWN, "move"),
-                            (symbols::key::ENTER, "add"),
+                            (symbols::key::ENTER, "connect"),
                             (symbols::key::BACKSPACE, "remove"),
                             (symbols::key::ARROWS_LEFTRIGHT, "section"),
                             (symbols::key::ESC, "close"),
@@ -548,6 +548,20 @@ impl Config {
                     seen_header = true;
                     let mut spans =
                         vec![Span::styled(format!(" {}", entry.provider), theme.accent())];
+                    spans.push(Span::styled(
+                        format!("{}{}", symbols::ui::SEPARATOR, method_label(entry.login)),
+                        theme.muted(),
+                    ));
+                    if !entry.accounts.is_empty() {
+                        spans.push(Span::styled(
+                            format!(
+                                "{}{} connected",
+                                symbols::ui::SEPARATOR,
+                                entry.accounts.len()
+                            ),
+                            theme.muted(),
+                        ));
+                    }
                     if entry.local {
                         spans.push(Span::styled(
                             format!("{}local", symbols::ui::SEPARATOR),
@@ -582,7 +596,7 @@ impl Config {
                         theme,
                         selected,
                         usize::from(area.width),
-                        vec![Span::styled("+ add account", style)],
+                        vec![Span::styled("+ connect account", style)],
                         None,
                     ));
                 }

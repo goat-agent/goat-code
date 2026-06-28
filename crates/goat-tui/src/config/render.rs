@@ -97,7 +97,7 @@ pub(super) fn render_adding(
     let title = Line::from(vec![
         Span::styled(format!(" {provider}"), theme.key()),
         Span::styled(
-            format!("{}new account", symbols::ui::SEPARATOR),
+            format!("{}connect account", symbols::ui::SEPARATOR),
             theme.muted(),
         ),
     ]);
@@ -172,7 +172,7 @@ pub(super) fn render_adding(
         frame.render_widget(
             Paragraph::new(hint_line(
                 &[
-                    (symbols::key::ENTER, "open browser"),
+                    (symbols::key::ENTER, "device login"),
                     (symbols::key::ESC, "cancel"),
                 ],
                 theme,
@@ -270,7 +270,7 @@ pub(super) fn render_choosing(
         api_area,
     );
     frame.render_widget(
-        Paragraph::new(row(matches!(method, AuthMethod::OAuth), "browser")),
+        Paragraph::new(row(matches!(method, AuthMethod::OAuth), "device code")),
         browser_area,
     );
     frame.render_widget(
