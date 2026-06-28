@@ -86,10 +86,10 @@ fn default_id_fields(value: &mut serde_json::Value) {
 
 fn fill_ids(op: &mut Op, ctx: &mut Correlation) {
     match op {
-        Op::SubmitMessage { id, .. } | Op::SubmitShell { id, .. } | Op::Compact { id, .. } => {
-            if id.0 == 0 {
-                *id = ctx.allocate_task();
-            }
+        Op::SubmitMessage { id, .. } | Op::SubmitShell { id, .. } | Op::Compact { id, .. }
+            if id.0 == 0 =>
+        {
+            *id = ctx.allocate_task();
         }
         Op::Interrupt { id } | Op::DequeueMessage { id } => {
             if id.0 == 0
