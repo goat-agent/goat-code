@@ -9,8 +9,9 @@ pub(crate) const PRINCIPLES: &str = concat!(
     "- Do what the request asks and respect project conventions; surface blocking constraints or ambiguity instead of guessing, and ask the user when a choice is material and you cannot settle it from the workspace.\n",
     "- Ground every claim in files, tool output, or cited sources; never invent code, paths, results, or citations, and say so when you are unsure.\n",
     "- When you work with an external library, framework, or API, treat this project's actual code, configuration, and tool output as authoritative over your trained memory of it; your memory of fast-moving surfaces may be stale or version-skewed, and you may not feel uncertain when it is, so mirror what the project already does rather than what you remember.\n",
-    "- Prefer targeted inspection over broad reading; understand code before changing it, keep changes minimal and consistent with the surrounding code, and leave unrelated lines untouched.\n",
-    "- Verify your work when a check is available and confirm it actually holds before claiming it is done; then report plainly what you did, how you know it holds, and any remaining risks or next steps.\n",
+    "- Prefer targeted inspection over broad reading; understand code before changing it, and fix the underlying cause rather than the surface symptom. Reach for what the project, standard library, or platform already provides before adding new code, dependencies, or abstractions; keep changes minimal and consistent with the surrounding code, and leave unrelated lines untouched.\n",
+    "- Build only what the request needs: question whether a requirement, option, or layer should exist before adding it, but solve the user's actual goal in full rather than substituting a reduced or staged version — and never drop validation, security, or data-safety to get there.\n",
+    "- Verify your work when a check is available and confirm it actually holds before claiming it is done; then report plainly and no longer than the task needs what you did, how you know it holds, and any remaining risks or next steps.\n",
     "- Reply to the user in their language, but keep code, identifiers, paths, commands, tool arguments, and quoted excerpts verbatim; write text stored in the repository (commit messages, comments, PR descriptions) in the project's prevailing language."
 );
 
@@ -83,10 +84,11 @@ pub(crate) fn build_system_prompt(
 }
 
 pub(crate) fn compose_child_system(base_prompt: &str, instructions: Option<&str>) -> String {
-    match instructions {
-        None => base_prompt.to_owned(),
-        Some(content) => format!("{base_prompt}\n\n{content}"),
+    let mut prompt = format!("{PRINCIPLES}\n\n{base_prompt}");
+    if let Some(content) = instructions {
+        let _ = write!(prompt, "\n\n{content}");
     }
+    prompt
 }
 
 pub(crate) fn load_skill_infos(cwd: &std::path::Path) -> Vec<SkillInfo> {
@@ -195,9 +197,28 @@ mod tests {
         let instructions = format!("{heading}\n\nrule");
         let prompt = super::compose_child_system("child base", Some(&instructions));
         assert_eq!(prompt.matches(heading).count(), 1);
-        assert!(prompt.starts_with("child base"));
+        assert!(prompt.contains("child base"));
         assert!(prompt.ends_with(&instructions));
         assert!(!prompt.contains("# Project instructions (AGENTS.md)\n\n# Project instructions"));
+    }
+
+    #[test]
+    fn child_system_carries_shared_principles() {
+        let with_instructions = super::compose_child_system("child base", Some("rule"));
+        assert!(with_instructions.starts_with(super::PRINCIPLES));
+        assert!(with_instructions.contains("child base"));
+        let without = super::compose_child_system("child base", None);
+        assert!(without.starts_with(super::PRINCIPLES));
+        assert!(without.ends_with("child base"));
+    }
+
+    #[test]
+    fn principles_carry_build_discipline() {
+        let prompt = super::build_system_prompt(Path::new("/work"), &[], None, "2025-01-15");
+        assert!(prompt.contains("Build only what the request needs"));
+        assert!(prompt.contains("reduced or staged version"));
+        assert!(prompt.contains("never drop validation, security, or data-safety"));
+        assert!(prompt.contains("fix the underlying cause rather than the surface symptom"));
     }
 
     #[test]
