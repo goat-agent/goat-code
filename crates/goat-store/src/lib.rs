@@ -138,8 +138,8 @@ impl Store {
     pub async fn create_thread(&self, thread: NewThread) -> Result<i64, StoreError> {
         self.run(move |conn| {
             conn.execute(
-                "INSERT INTO threads (cwd, title, provider, model, account, effort, mode, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO threads (cwd, title, provider, model, account, effort, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     thread.cwd,
                     thread.title,
@@ -147,7 +147,6 @@ impl Store {
                     thread.model,
                     thread.account,
                     thread.effort,
-                    thread.mode,
                     thread.created_at,
                     thread.updated_at,
                 ],
@@ -160,7 +159,7 @@ impl Store {
     pub async fn get_thread(&self, id: i64) -> Result<Option<Thread>, StoreError> {
         self.run_read(move |conn| {
             conn.query_row(
-                "SELECT id, cwd, title, provider, model, account, effort, mode, created_at, updated_at
+                "SELECT id, cwd, title, provider, model, account, effort, created_at, updated_at
                  FROM threads WHERE id = ?1",
                 params![id],
                 thread_from_row,
@@ -174,7 +173,7 @@ impl Store {
     pub async fn latest_thread_in(&self, cwd: String) -> Result<Option<Thread>, StoreError> {
         self.run_read(move |conn| {
             conn.query_row(
-                "SELECT id, cwd, title, provider, model, account, effort, mode, created_at, updated_at
+                "SELECT id, cwd, title, provider, model, account, effort, created_at, updated_at
                  FROM threads WHERE cwd = ?1 ORDER BY updated_at DESC, id DESC LIMIT 1",
                 params![cwd],
                 thread_from_row,
@@ -192,7 +191,7 @@ impl Store {
     ) -> Result<Vec<Thread>, StoreError> {
         self.run_read(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, cwd, title, provider, model, account, effort, mode, created_at, updated_at
+                "SELECT id, cwd, title, provider, model, account, effort, created_at, updated_at
                  FROM threads WHERE cwd = ?1 ORDER BY updated_at DESC, id DESC LIMIT ?2",
             )?;
             let rows = stmt.query_map(params![cwd, limit], thread_from_row)?;
@@ -361,22 +360,6 @@ impl Store {
                 "UPDATE threads SET provider = ?2, model = ?3, account = ?4, effort = ?5, updated_at = ?6
                  WHERE id = ?1",
                 params![id, provider, model, account, effort, updated_at],
-            )?;
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn update_thread_mode(
-        &self,
-        id: i64,
-        mode: Option<String>,
-        updated_at: i64,
-    ) -> Result<(), StoreError> {
-        self.run(move |conn| {
-            conn.execute(
-                "UPDATE threads SET mode = ?2, updated_at = ?3 WHERE id = ?1",
-                params![id, mode, updated_at],
             )?;
             Ok(())
         })
@@ -571,7 +554,6 @@ mod tests {
             model: "gpt-x".into(),
             account: "default".into(),
             effort: None,
-            mode: None,
             created_at: 100,
             updated_at: 100,
         }
@@ -585,22 +567,6 @@ mod tests {
         assert_eq!(thread.provider, "openai");
         assert_eq!(thread.model, "gpt-x");
         assert_eq!(thread.title.as_deref(), Some("first"));
-        assert_eq!(thread.mode, None);
-    }
-
-    #[tokio::test]
-    async fn updates_thread_mode() {
-        let store = Store::open_in_memory().unwrap();
-        let id = store.create_thread(sample_thread()).await.unwrap();
-        store
-            .update_thread_mode(id, Some("plan".into()), 200)
-            .await
-            .unwrap();
-        let thread = store.get_thread(id).await.unwrap().unwrap();
-        assert_eq!(thread.mode.as_deref(), Some("plan"));
-        store.update_thread_mode(id, None, 300).await.unwrap();
-        let thread = store.get_thread(id).await.unwrap().unwrap();
-        assert_eq!(thread.mode, None);
     }
 
     #[tokio::test]
@@ -613,7 +579,6 @@ mod tests {
             model: model.into(),
             account: "default".into(),
             effort: None,
-            mode: None,
             created_at: updated,
             updated_at: updated,
         };
@@ -780,7 +745,6 @@ mod tests {
             model: model.into(),
             account: "default".into(),
             effort: Some("high".into()),
-            mode: None,
             created_at: updated,
             updated_at: updated,
         };
@@ -935,7 +899,39 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(has_index, (1, 7));
+        assert_eq!(has_index, (1, 8));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn migrates_v7_database_drops_mode_column() {
+        let path = std::env::temp_dir().join("goat-store-v7-migration-test.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V1).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V2).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V3).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V4).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V5).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V6).unwrap();
+            conn.execute_batch(crate::schema::SCHEMA_V7).unwrap();
+            conn.execute_batch("PRAGMA user_version = 7;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let result = store
+            .run(|conn| {
+                let has_mode: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('threads') WHERE name = 'mode'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+                Ok((has_mode, version))
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, (0, 8));
         let _ = std::fs::remove_file(&path);
     }
 

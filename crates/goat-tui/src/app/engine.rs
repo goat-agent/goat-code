@@ -43,9 +43,7 @@ impl App {
                 entries,
                 context_tokens,
                 compaction_threshold,
-                mode,
             } => {
-                self.on_mode_changed(mode, None);
                 self.transcript.clear();
                 self.reset_agents();
                 self.turn = crate::app::TurnStatus::default();
@@ -360,20 +358,6 @@ impl App {
                     .rate_limits
                     .insert((provider, account), (snapshot, cached_at));
                 self.dirty = true;
-            }
-            EngineEvent::ModeChanged { mode, plan_path } => {
-                self.on_mode_changed(mode, plan_path);
-            }
-            EngineEvent::PlanProposed {
-                id,
-                call,
-                plan,
-                path,
-            } => {
-                self.on_plan_proposed(id, call, plan, path);
-            }
-            EngineEvent::PlanDismissed { .. } => {
-                self.on_plan_dismissed();
             }
         }
         ops

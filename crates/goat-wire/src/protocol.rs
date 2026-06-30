@@ -135,7 +135,6 @@ pub enum ServerFrame {
         transcript: Vec<TranscriptEntry>,
         context_tokens: Option<u32>,
         compaction_threshold: Option<u32>,
-        mode: goat_protocol::Mode,
     },
     Event {
         session: SessionId,

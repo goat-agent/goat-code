@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AccountEntry, InputAttachment, LoginProvider, Mode, ModelEntry, ModelTarget, RateLimitSnapshot,
+    AccountEntry, InputAttachment, LoginProvider, ModelEntry, ModelTarget, RateLimitSnapshot,
     SkillInfo, TaskId, ThreadSummary, ToolCall, ToolCallId, ToolOutcome, TranscriptEntry, Usage,
 };
 
@@ -68,8 +68,6 @@ pub enum Event {
         entries: Vec<TranscriptEntry>,
         context_tokens: Option<u32>,
         compaction_threshold: Option<u32>,
-        #[serde(default)]
-        mode: Mode,
     },
     ThinkingDelta {
         id: TaskId,
@@ -149,20 +147,6 @@ pub enum Event {
         tokens_before: u32,
         tokens_after: u32,
         usage: Usage,
-    },
-    ModeChanged {
-        mode: Mode,
-        plan_path: Option<String>,
-    },
-    PlanProposed {
-        id: TaskId,
-        call: ToolCallId,
-        plan: String,
-        path: String,
-    },
-    PlanDismissed {
-        id: TaskId,
-        call: ToolCallId,
     },
     ThreadBound {
         thread_id: i64,

@@ -9,8 +9,7 @@ pub use types::*;
 #[cfg(test)]
 mod tests {
     use super::{
-        Event, LoginCredential, Op, PlanDecision, TaskId, ToolCallId, ToolImageData, ToolOutcome,
-        TranscriptEntry,
+        Event, LoginCredential, Op, TaskId, ToolCallId, ToolImageData, ToolOutcome, TranscriptEntry,
     };
 
     #[test]
@@ -96,14 +95,6 @@ mod tests {
         assert_eq!(json, r#"{"type":"User","text":"hello"}"#);
         let back: TranscriptEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back, entry);
-    }
-
-    #[test]
-    fn plan_decision_approve_serializes_with_type() {
-        let json = serde_json::to_string(&PlanDecision::Approve {}).unwrap();
-        assert_eq!(json, r#"{"type":"Approve"}"#);
-        let back: PlanDecision = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, PlanDecision::Approve {});
     }
 
     #[test]

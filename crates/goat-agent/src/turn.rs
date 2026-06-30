@@ -1,6 +1,4 @@
-use std::path::PathBuf;
-
-use goat_protocol::{Event, InputAttachment, Mode, ModelTarget, Op, TaskId};
+use goat_protocol::{Event, InputAttachment, ModelTarget, Op, TaskId};
 use goat_provider::{ContentBlock, Message, MessageRole, Provider, ToolDefinition};
 use goat_store::Store;
 use goat_tool::{SandboxPolicy, ToolContext, ToolError};
@@ -15,12 +13,11 @@ use crate::{
         effort_string, ensure_thread, finalize_turn, init_db_turn, now_ms, persist_shell_message,
         thread_title,
     },
-    plan,
     prompt::build_system_prompt,
     rounds::{LoopOutcome, core_loop},
     shell,
     threads::resolve_thread_cwd,
-    tools_exec::{TransitionTool, build_tool_defs},
+    tools_exec::build_tool_defs,
 };
 
 pub(crate) fn user_message(text: &str, attachments: &[InputAttachment]) -> Message {
@@ -42,58 +39,11 @@ pub(crate) fn user_message(text: &str, attachments: &[InputAttachment]) -> Messa
     }
 }
 
-fn top_regime(
-    ctx: &Ctx<'_>,
-    provider: &dyn Provider,
-    mode: Mode,
-) -> (Vec<ToolDefinition>, SandboxPolicy) {
-    match mode {
-        Mode::Normal => (
-            build_tool_defs(ctx, provider, None, true, TransitionTool::Enter),
-            SandboxPolicy::Full,
-        ),
-        Mode::Plan => {
-            let selection = plan::plan_selection(ctx.plan_shell);
-            (
-                build_tool_defs(
-                    ctx,
-                    provider,
-                    Some(&selection),
-                    true,
-                    TransitionTool::Propose,
-                ),
-                SandboxPolicy::ReadOnly { network: false },
-            )
-        }
-    }
-}
-
-async fn apply_set_mode(
-    ctx: &Ctx<'_>,
-    requested: Mode,
-    thread_id: Option<i64>,
-    mode: &mut Mode,
-    plan_path: &mut Option<PathBuf>,
-) {
-    *mode = requested;
-    if requested == Mode::Normal {
-        *plan_path = None;
-    }
-    if let Some(tid) = thread_id
-        && let Err(err) = ctx
-            .store
-            .update_thread_mode(tid, crate::mode_string(requested), now_ms())
-            .await
-    {
-        tracing::warn!(%err, "failed to persist thread mode");
-    }
-    let _ = ctx
-        .events
-        .send(Event::ModeChanged {
-            mode: requested,
-            plan_path: plan_path.as_ref().map(|path| path.display().to_string()),
-        })
-        .await;
+fn top_regime(ctx: &Ctx<'_>, provider: &dyn Provider) -> (Vec<ToolDefinition>, SandboxPolicy) {
+    (
+        build_tool_defs(ctx, provider, None, true),
+        SandboxPolicy::Full,
+    )
 }
 
 const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
@@ -258,16 +208,6 @@ async fn drain_deferred(
                 {
                     return Flow::Shutdown;
                 }
-            }
-            Op::SetMode { mode: requested } => {
-                apply_set_mode(
-                    ctx,
-                    requested,
-                    state.thread_id,
-                    &mut state.mode,
-                    &mut state.plan_path,
-                )
-                .await;
             }
             other => {
                 handle_idle_op(
@@ -451,7 +391,7 @@ pub(crate) async fn handle_compact(
         return Flow::Shutdown;
     }
     let cwd = resolve_thread_cwd(ctx, state.thread_id).await;
-    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref(), state.mode);
+    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref());
     let ids = crate::TurnIds {
         stored_thread: state.thread_id,
         turn_db_id: None,
@@ -465,10 +405,7 @@ pub(crate) async fn handle_compact(
         tool_defs: &tool_defs,
         cwd: &cwd,
         allow_delegate: true,
-        mode: state.mode,
-        plan_path: state.plan_path.clone(),
         exec_policy,
-        transition: None,
     };
     let token = CancellationToken::new();
     let mut shutdown = false;
@@ -610,38 +547,7 @@ async fn run_one_turn(
         &mut state.thread_id,
     )
     .await;
-    if state.mode.is_plan() && state.plan_path.is_none() {
-        state.plan_path = plan::resolve_plan_path(ids.stored_thread, &text);
-        if let Some(tid) = ids.stored_thread
-            && let Err(err) = ctx
-                .store
-                .update_thread_mode(tid, crate::mode_string(Mode::Plan), now_ms())
-                .await
-        {
-            tracing::warn!(%err, "failed to persist thread mode");
-        }
-        if let Some(path) = state.plan_path.as_ref() {
-            let _ = ctx
-                .events
-                .send(Event::ModeChanged {
-                    mode: Mode::Plan,
-                    plan_path: Some(path.display().to_string()),
-                })
-                .await;
-        }
-    }
-    let system = {
-        let mut text = build_system_prompt(ctx.cwd, ctx.skills, ctx.instructions, ctx.date);
-        if state.mode.is_plan()
-            && let Some(path) = state.plan_path.as_ref()
-        {
-            text.push_str(&plan::plan_segment(
-                &path.display().to_string(),
-                ctx.plan_shell,
-            ));
-        }
-        text
-    };
+    let system = build_system_prompt(ctx.cwd, ctx.skills, ctx.instructions, ctx.date);
     if state.conversation.is_empty() {
         state
             .conversation
@@ -669,8 +575,7 @@ async fn run_one_turn(
     }
 
     let cwd = resolve_thread_cwd(ctx, ids.stored_thread).await;
-    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref(), state.mode);
-    let transition_cell: plan::TransitionCell = std::sync::Mutex::new(None);
+    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref());
     let steering: crate::SteeringQueue = std::sync::Mutex::new(seed);
     let run = Run::top(id, &ids, &steering);
     let env = crate::LoopEnv {
@@ -679,10 +584,7 @@ async fn run_one_turn(
         tool_defs: &tool_defs,
         cwd: &cwd,
         allow_delegate: true,
-        mode: state.mode,
-        plan_path: state.plan_path.clone(),
         exec_policy,
-        transition: Some(&transition_cell),
     };
     let token = CancellationToken::new();
     let mut shutdown = false;
@@ -709,15 +611,6 @@ async fn run_one_turn(
                             let _ = ctx
                                 .events
                                 .send(Event::AskDismissed { id, call })
-                                .await;
-                        }
-                    }
-                    Some(Op::ResolvePlan { call, decision, .. }) => {
-                        if let Some(tx) = ctx.plans.lock().await.remove(&call) {
-                            let _ = tx.send(decision);
-                            let _ = ctx
-                                .events
-                                .send(Event::PlanDismissed { id, call })
                                 .await;
                         }
                     }
@@ -760,7 +653,7 @@ async fn run_one_turn(
     };
 
     let turn_end = match outcome {
-        LoopOutcome::Completed | LoopOutcome::Transitioned => TurnEnd::Done,
+        LoopOutcome::Completed => TurnEnd::Done,
         LoopOutcome::Failed(message) => TurnEnd::Failed(message),
         LoopOutcome::Cancelled => {
             if shutdown {
@@ -776,48 +669,11 @@ async fn run_one_turn(
     }
 
     if matches!(turn_end, TurnEnd::Done) {
-        let pending_transition = transition_cell
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let mut leftover = std::mem::take(
+        let leftover = std::mem::take(
             &mut *steering
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        if let Some(transition) = pending_transition {
-            state.mode = transition.mode;
-            if let Some(tid) = ids.stored_thread
-                && let Err(err) = ctx
-                    .store
-                    .update_thread_mode(tid, crate::mode_string(transition.mode), now_ms())
-                    .await
-            {
-                tracing::warn!(%err, "failed to persist thread mode");
-            }
-            let _ = ctx
-                .events
-                .send(Event::ModeChanged {
-                    mode: transition.mode,
-                    plan_path: state
-                        .plan_path
-                        .as_ref()
-                        .map(|path| path.display().to_string()),
-                })
-                .await;
-            let engine_id = TaskId(
-                ctx.engine_ids
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            );
-            let mut queue = std::collections::VecDeque::new();
-            queue.push_back(crate::UserInput {
-                id: engine_id,
-                text: transition.inject,
-                attachments: Vec::new(),
-            });
-            queue.append(&mut leftover);
-            return (TurnFlow::Done(queue), deferred);
-        }
         if !leftover.is_empty() {
             return (TurnFlow::Done(leftover), deferred);
         }

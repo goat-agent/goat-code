@@ -12,7 +12,7 @@ use crate::{
     conversation::Conversation,
     prompt::compose_child_system,
     rounds::{LoopOutcome, core_loop},
-    tools_exec::{TransitionTool, build_tool_defs},
+    tools_exec::build_tool_defs,
 };
 
 pub(crate) const MAX_CONCURRENT_AGENTS: usize = 8;
@@ -120,20 +120,7 @@ pub(crate) async fn run_delegation(
         account: env.target.account.clone(),
         effort,
     };
-    let intersected = env.mode.is_plan().then(|| {
-        crate::agent::intersect(
-            &spec.tools,
-            &crate::plan::plan_child_selection(ctx.plan_shell),
-        )
-    });
-    let selection = intersected.as_ref().unwrap_or(&spec.tools);
-    let tool_defs = build_tool_defs(
-        ctx,
-        provider.as_ref(),
-        Some(selection),
-        false,
-        TransitionTool::None,
-    );
+    let tool_defs = build_tool_defs(ctx, provider.as_ref(), Some(&spec.tools), false);
     let mut conversation = Conversation::new();
     conversation.push(
         Message::text(
@@ -161,10 +148,7 @@ pub(crate) async fn run_delegation(
         tool_defs: &tool_defs,
         cwd: env.cwd,
         allow_delegate: false,
-        mode: env.mode,
-        plan_path: env.plan_path.clone(),
         exec_policy: crate::agent::tighter(&env.exec_policy, &spec.exec_policy),
-        transition: None,
     };
     let child_token = token.child_token();
     let outcome = Box::pin(core_loop(
@@ -177,9 +161,7 @@ pub(crate) async fn run_delegation(
     ))
     .await;
     let result = match outcome {
-        LoopOutcome::Completed | LoopOutcome::Transitioned => {
-            Ok(final_text(conversation.messages()))
-        }
+        LoopOutcome::Completed => Ok(final_text(conversation.messages())),
         LoopOutcome::Cancelled => Ok("(agent interrupted)".to_owned()),
         LoopOutcome::Failed(message) => Err(message),
     };

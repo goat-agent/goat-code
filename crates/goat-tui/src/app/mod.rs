@@ -59,25 +59,8 @@ pub(crate) enum Overlay {
     Files(FileMenu),
     Agents(usize),
     Ask(AskPicker, ToolCallId),
-    Plan(PlanOverlay),
     Usage,
     Help,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlanFocus {
-    Approve,
-    Reject,
-}
-
-pub(crate) struct PlanOverlay {
-    pub(crate) id: TaskId,
-    pub(crate) call: ToolCallId,
-    pub(crate) plan: String,
-    pub(crate) path: String,
-    pub(crate) scroll: u16,
-    pub(crate) focus: PlanFocus,
-    pub(crate) feedback: Option<String>,
 }
 
 const TICK: Duration = Duration::from_millis(120);
@@ -134,7 +117,6 @@ pub struct App {
     pub(crate) compaction_threshold: Option<u32>,
     pub(crate) focused: bool,
     pub(crate) notification_pending: Option<crate::notification::Notification>,
-    pub(crate) mode: goat_protocol::Mode,
     pub(crate) picker: Option<ratatui_image::picker::Picker>,
 }
 
@@ -212,7 +194,6 @@ impl App {
             compaction_threshold: None,
             focused: true,
             notification_pending: None,
-            mode: goat_protocol::Mode::Normal,
             picker: None,
         }
     }
@@ -456,73 +437,12 @@ impl App {
                 self.dirty = true;
                 Vec::new()
             }
-            CommandEffect::PlanMode(text) => self.plan_command(text),
             CommandEffect::Noop => Vec::new(),
             CommandEffect::Quit => {
                 self.should_quit = true;
                 Vec::new()
             }
         }
-    }
-
-    fn plan_command(&mut self, text: Option<String>) -> Vec<Op> {
-        let target = if text.is_some() || self.mode == goat_protocol::Mode::Normal {
-            goat_protocol::Mode::Plan
-        } else {
-            goat_protocol::Mode::Normal
-        };
-        let mut ops = vec![Op::SetMode { mode: target }];
-        if self.turn.active.is_some() {
-            self.push_toast(
-                NotifyKind::Info,
-                format!("{} mode starts after this turn", mode_label(target)),
-            );
-            if text.is_some() {
-                self.push_toast(
-                    NotifyKind::Info,
-                    "resend your request once plan mode is active".to_owned(),
-                );
-            }
-        } else if let Some(text) = text {
-            ops.extend(self.submit_text(text));
-        }
-        self.dirty = true;
-        ops
-    }
-
-    pub(crate) fn on_mode_changed(
-        &mut self,
-        mode: goat_protocol::Mode,
-        _plan_path: Option<String>,
-    ) {
-        self.mode = mode;
-        self.dirty = true;
-    }
-
-    pub(crate) fn on_plan_proposed(
-        &mut self,
-        id: TaskId,
-        call: ToolCallId,
-        plan: String,
-        path: String,
-    ) {
-        self.overlay = Overlay::Plan(PlanOverlay {
-            id,
-            call,
-            plan,
-            path,
-            scroll: 0,
-            focus: PlanFocus::Approve,
-            feedback: None,
-        });
-        self.dirty = true;
-    }
-
-    pub(crate) fn on_plan_dismissed(&mut self) {
-        if matches!(self.overlay, Overlay::Plan(_)) {
-            self.overlay = Overlay::None;
-        }
-        self.dirty = true;
     }
 
     pub(crate) fn apply_config_outcome(&mut self, outcome: ConfigOutcome) -> Vec<Op> {
@@ -845,10 +765,6 @@ impl App {
         self.composer.desired_height(available_width)
     }
 
-    pub(crate) fn plan_prompt_active(&self) -> bool {
-        self.mode == goat_protocol::Mode::Plan && !self.composer.shell()
-    }
-
     pub(crate) fn elapsed_secs(&self) -> Option<u64> {
         self.turn.task_start.map(|t| t.elapsed().as_secs())
     }
@@ -1078,13 +994,6 @@ impl App {
     }
 }
 
-pub(crate) fn mode_label(mode: goat_protocol::Mode) -> &'static str {
-    match mode {
-        goat_protocol::Mode::Normal => "normal",
-        goat_protocol::Mode::Plan => "plan",
-    }
-}
-
 fn slash_command_name(raw: &str) -> Option<&str> {
     let rest = raw.trim().strip_prefix('/')?;
     let name = rest.split_whitespace().next().unwrap_or(rest);
@@ -1243,7 +1152,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use goat_protocol::{AccountChoice, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId};
 
-    use super::{App, Overlay, PlanFocus, PlanOverlay};
+    use super::{App, Overlay};
     use crate::theme::Theme;
 
     fn single_entry(provider: &str, model: &str) -> ModelEntry {
@@ -1439,192 +1348,6 @@ mod tests {
             app.take_notification(),
             Some(crate::notification::Notification::Attention)
         );
-    }
-
-    #[test]
-    fn back_tab_toggles_plan_mode() {
-        use goat_protocol::Mode;
-        let mut app = App::new(Theme::dark());
-        let ops = app.on_key(press(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert!(matches!(ops.as_slice(), [Op::SetMode { mode: Mode::Plan }]));
-        app.on_mode_changed(Mode::Plan, Some("/p.md".to_owned()));
-        let ops = app.on_key(press(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert!(matches!(
-            ops.as_slice(),
-            [Op::SetMode { mode: Mode::Normal }]
-        ));
-    }
-
-    #[test]
-    fn plan_proposed_overlay_approve_and_reject() {
-        use goat_protocol::{PlanDecision, ToolCallId};
-        let mut app = App::new(Theme::dark());
-        app.on_engine(EngineEvent::PlanProposed {
-            id: TaskId(7),
-            call: ToolCallId(3),
-            plan: "do the thing".to_owned(),
-            path: "/p.md".to_owned(),
-        });
-        assert!(matches!(
-            app.overlay,
-            Overlay::Plan(PlanOverlay {
-                focus: PlanFocus::Approve,
-                ..
-            })
-        ));
-        let ops = app.on_key(press(KeyCode::Char('a'), KeyModifiers::NONE));
-        assert!(matches!(
-            ops.as_slice(),
-            [Op::ResolvePlan {
-                decision: PlanDecision::Approve {},
-                ..
-            }]
-        ));
-        assert!(matches!(app.overlay, Overlay::None));
-
-        app.on_engine(EngineEvent::PlanProposed {
-            id: TaskId(7),
-            call: ToolCallId(4),
-            plan: "again".to_owned(),
-            path: "/p.md".to_owned(),
-        });
-        app.on_key(press(KeyCode::Char('r'), KeyModifiers::NONE));
-        for ch in "nope".chars() {
-            app.on_key(press(KeyCode::Char(ch), KeyModifiers::NONE));
-        }
-        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(
-            ops.as_slice(),
-            [Op::ResolvePlan {
-                decision: PlanDecision::Reject { feedback },
-                ..
-            }] if feedback == "nope"
-        ));
-    }
-
-    #[test]
-    fn plan_overlay_esc_dismisses() {
-        use goat_protocol::ToolCallId;
-        let mut app = App::new(Theme::dark());
-        app.turn.active = Some(TaskId(7));
-        app.on_engine(EngineEvent::PlanProposed {
-            id: TaskId(7),
-            call: ToolCallId(3),
-            plan: "do the thing".to_owned(),
-            path: "/p.md".to_owned(),
-        });
-        let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(ops.as_slice(), [Op::Interrupt { .. }]));
-        assert!(matches!(app.overlay, Overlay::None));
-    }
-
-    #[test]
-    fn plan_feedback_esc_returns_to_choices() {
-        use goat_protocol::ToolCallId;
-        let mut app = App::new(Theme::dark());
-        app.on_engine(EngineEvent::PlanProposed {
-            id: TaskId(7),
-            call: ToolCallId(3),
-            plan: "do the thing".to_owned(),
-            path: "/p.md".to_owned(),
-        });
-        app.on_key(press(KeyCode::Char('r'), KeyModifiers::NONE));
-        assert!(matches!(
-            app.overlay,
-            Overlay::Plan(PlanOverlay {
-                feedback: Some(_),
-                ..
-            })
-        ));
-        let ops = app.on_key(press(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(ops.is_empty());
-        assert!(matches!(
-            app.overlay,
-            Overlay::Plan(PlanOverlay { feedback: None, .. })
-        ));
-    }
-
-    #[test]
-    fn plan_choice_navigation_matches_picker() {
-        use goat_protocol::{PlanDecision, ToolCallId};
-        let mut app = App::new(Theme::dark());
-        app.on_engine(EngineEvent::PlanProposed {
-            id: TaskId(7),
-            call: ToolCallId(3),
-            plan: "do the thing".to_owned(),
-            path: "/p.md".to_owned(),
-        });
-        assert!(matches!(
-            app.overlay,
-            Overlay::Plan(PlanOverlay {
-                focus: PlanFocus::Approve,
-                ..
-            })
-        ));
-        app.on_key(press(KeyCode::Down, KeyModifiers::NONE));
-        assert!(matches!(
-            app.overlay,
-            Overlay::Plan(PlanOverlay {
-                focus: PlanFocus::Reject,
-                ..
-            })
-        ));
-        app.on_key(press(KeyCode::Up, KeyModifiers::NONE));
-        assert!(matches!(
-            app.overlay,
-            Overlay::Plan(PlanOverlay {
-                focus: PlanFocus::Approve,
-                ..
-            })
-        ));
-        app.on_key(press(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(matches!(
-            app.overlay,
-            Overlay::Plan(PlanOverlay {
-                focus: PlanFocus::Reject,
-                ..
-            })
-        ));
-        app.on_key(press(KeyCode::Up, KeyModifiers::NONE));
-        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(
-            ops.as_slice(),
-            [Op::ResolvePlan {
-                decision: PlanDecision::Approve {},
-                ..
-            }]
-        ));
-    }
-
-    #[test]
-    fn plan_preview_scroll_uses_page_keys() {
-        use goat_protocol::ToolCallId;
-        let mut app = App::new(Theme::dark());
-        app.on_engine(EngineEvent::PlanProposed {
-            id: TaskId(7),
-            call: ToolCallId(3),
-            plan: "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten".to_owned(),
-            path: "/p.md".to_owned(),
-        });
-        app.on_key(press(KeyCode::Down, KeyModifiers::NONE));
-        assert!(matches!(
-            app.overlay,
-            Overlay::Plan(PlanOverlay {
-                scroll: 0,
-                focus: PlanFocus::Reject,
-                ..
-            })
-        ));
-        app.on_key(press(KeyCode::PageDown, KeyModifiers::NONE));
-        assert!(matches!(
-            app.overlay,
-            Overlay::Plan(PlanOverlay { scroll: 10, .. })
-        ));
-        app.on_key(press(KeyCode::PageUp, KeyModifiers::NONE));
-        assert!(matches!(
-            app.overlay,
-            Overlay::Plan(PlanOverlay { scroll: 0, .. })
-        ));
     }
 
     #[test]
@@ -2228,7 +1951,6 @@ mod tests {
             },
             context_tokens: None,
             compaction_threshold: None,
-            mode: goat_protocol::Mode::Normal,
             entries: vec![
                 TranscriptEntry::User {
                     text: "hello".to_owned(),

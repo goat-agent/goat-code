@@ -27,18 +27,6 @@ impl ToolSelection {
     }
 }
 
-pub(crate) fn intersect(spec: &ToolSelection, whitelist: &ToolSelection) -> ToolSelection {
-    match whitelist {
-        ToolSelection::All => ToolSelection::All,
-        ToolSelection::Only(list) => ToolSelection::Only(
-            list.iter()
-                .filter(|name| spec.allows(name))
-                .cloned()
-                .collect(),
-        ),
-    }
-}
-
 pub struct AgentSpec {
     pub name: String,
     pub description: String,

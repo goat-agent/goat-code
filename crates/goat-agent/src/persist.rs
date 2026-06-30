@@ -94,7 +94,6 @@ pub(crate) async fn ensure_thread(
             model: target.model.clone(),
             account: target.account.clone(),
             effort: effort_string(target.effort),
-            mode: None,
             created_at: timestamp,
             updated_at: timestamp,
         })

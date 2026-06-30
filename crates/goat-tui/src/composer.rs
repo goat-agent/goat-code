@@ -434,28 +434,22 @@ impl Composer {
         (row + idx, u16::try_from(col).unwrap_or(u16::MAX))
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool, plan: bool) {
-        let plan = plan && !self.shell;
-        let border = match (self.shell, plan, focused) {
-            (true, _, true) => theme.shell(),
-            (true, _, false) => theme.shell_dim(),
-            (_, true, true) => theme.plan(),
-            (_, true, false) => theme.plan_dim(),
-            (false, false, true) => theme.border(),
-            (false, false, false) => theme.border_dim(),
+    pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool) {
+        let border = match (self.shell, focused) {
+            (true, true) => theme.shell(),
+            (true, false) => theme.shell_dim(),
+            (false, true) => theme.border(),
+            (false, false) => theme.border_dim(),
         };
         let (marker, marker_style) = if self.shell {
             (symbols::marker::SHELL, theme.shell())
         } else {
             (symbols::marker::PROMPT, theme.accent())
         };
-        let mut block = Block::bordered()
+        let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(border)
             .padding(Padding::horizontal(1));
-        if plan {
-            block = block.title(Span::styled(" plan ", theme.plan()));
-        }
         let inner = block.inner(area);
         frame.render_widget(block, area);
 

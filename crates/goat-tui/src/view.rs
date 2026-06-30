@@ -2,12 +2,12 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, Overlay, PlanFocus, PlanOverlay},
+    app::{App, Overlay},
     layout::{LIST_MAX, PAD_X, SCROLL_GUTTER},
     overlay, symbols,
     theme::Theme,
@@ -46,23 +46,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    if let Overlay::Plan(_) = app.overlay() {
-        let panel_h = plan_desired_height(area.height);
-        let [header, transcript_area, _panel] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(panel_h),
-        ])
-        .areas(area);
-        render_header(frame, header, app, theme);
-        render_transcript(frame, transcript_area, app, theme);
-        if let Overlay::Plan(plan) = app.overlay() {
-            render_plan_overlay(frame, area, plan, theme);
-        }
-        render_toasts(frame, area, app, theme);
-        return;
-    }
-
     if let Overlay::Commands(menu) = app.overlay() {
         let panel_h = menu
             .desired_height()
@@ -81,8 +64,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         if let Overlay::Commands(menu) = app.overlay() {
             menu.render(frame, panel, theme);
         }
-        app.composer()
-            .render(frame, composer_area, theme, true, app.plan_prompt_active());
+        app.composer().render(frame, composer_area, theme, true);
         render_toasts(frame, area, app, theme);
         return;
     }
@@ -105,8 +87,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         if let Overlay::Files(menu) = app.overlay() {
             menu.render(frame, panel, theme);
         }
-        app.composer()
-            .render(frame, composer_area, theme, true, app.plan_prompt_active());
+        app.composer().render(frame, composer_area, theme, true);
         render_toasts(frame, area, app, theme);
         return;
     }
@@ -138,8 +119,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 Overlay::Help => crate::help::render(frame, body, theme),
                 _ => {}
             }
-            app.composer()
-                .render(frame, composer, theme, false, app.plan_prompt_active());
+            app.composer().render(frame, composer, theme, false);
             render_toasts(frame, area, app, theme);
             return;
         }
@@ -162,8 +142,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_transcript(frame, body, app, theme);
         render_agent_panel(frame, panel, app, theme, cursor);
         render_agent_footer(frame, footer, theme);
-        app.composer()
-            .render(frame, composer, theme, false, app.plan_prompt_active());
+        app.composer().render(frame, composer, theme, false);
         render_toasts(frame, area, app, theme);
         return;
     }
@@ -178,8 +157,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .areas(area);
         render_header(frame, header, app, theme);
         render_transcript(frame, body, app, theme);
-        app.composer()
-            .render(frame, composer, theme, true, app.plan_prompt_active());
+        app.composer().render(frame, composer, theme, true);
         render_footer(frame, footer, app, theme);
     } else {
         let [header, body, composer] = Layout::vertical([
@@ -190,8 +168,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .areas(area);
         render_header(frame, header, app, theme);
         render_transcript(frame, body, app, theme);
-        app.composer()
-            .render(frame, composer, theme, true, app.plan_prompt_active());
+        app.composer().render(frame, composer, theme, true);
     }
     render_toasts(frame, area, app, theme);
 }
@@ -389,119 +366,6 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         spans.push(Span::styled(label, theme.meter(pct)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
-}
-
-fn plan_desired_height(area_height: u16) -> u16 {
-    let max = area_height.saturating_sub(3).max(9);
-    let preferred = (area_height / 3).max(9);
-    preferred.min(max)
-}
-
-fn render_plan_overlay(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme: Theme) {
-    let panel_h = plan_desired_height(area.height);
-    let [_, outer] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(panel_h)]).areas(area);
-    let Some(inner) = overlay::overlay_frame(frame, outer, theme) else {
-        return;
-    };
-    let [title, preview, actions, hint] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(2),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    render_plan_title(frame, title, plan, theme);
-    render_plan_preview(frame, preview, plan, theme);
-    if let Some(feedback) = &plan.feedback {
-        render_plan_feedback(frame, actions, feedback, theme);
-        render_plan_feedback_hint(frame, hint, theme);
-    } else {
-        render_plan_choices(frame, actions, plan.focus, theme);
-        render_plan_choice_hint(frame, hint, theme);
-    }
-}
-
-fn render_plan_title(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme: Theme) {
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" plan", theme.plan()),
-            Span::styled(format!("  {}", plan.path), theme.muted()),
-        ])),
-        area,
-    );
-}
-
-fn render_plan_preview(frame: &mut Frame, area: Rect, plan: &PlanOverlay, theme: Theme) {
-    let para = Paragraph::new(plan.plan.as_str())
-        .wrap(Wrap { trim: false })
-        .scroll((plan.scroll, 0))
-        .style(theme.base());
-    frame.render_widget(para, area);
-}
-
-fn render_plan_choices(frame: &mut Frame, area: Rect, focus: PlanFocus, theme: Theme) {
-    let width = usize::from(area.width);
-    let lines = vec![
-        overlay::selection_row(
-            theme,
-            focus == PlanFocus::Approve,
-            width,
-            vec![Span::styled("Approve plan", theme.base())],
-            Some(Span::styled("implement this plan", theme.muted())),
-        ),
-        overlay::selection_row(
-            theme,
-            focus == PlanFocus::Reject,
-            width,
-            vec![Span::styled("Request changes", theme.base())],
-            Some(Span::styled("send feedback", theme.muted())),
-        ),
-    ];
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn render_plan_feedback(frame: &mut Frame, area: Rect, feedback: &str, theme: Theme) {
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" feedback: ", theme.muted()),
-            Span::styled(feedback.to_owned(), theme.base()),
-            Span::styled(symbols::ui::STREAM_CURSOR, theme.accent()),
-        ])),
-        area,
-    );
-    let col = 11 + UnicodeWidthStr::width(feedback);
-    let x = area.x + u16::try_from(col).unwrap_or(u16::MAX);
-    frame.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));
-}
-
-fn render_plan_choice_hint(frame: &mut Frame, area: Rect, theme: Theme) {
-    frame.render_widget(
-        Paragraph::new(overlay::hint_line(
-            &[
-                (symbols::key::ARROWS_UPDOWN, "choose"),
-                ("pgup/pgdn", "scroll"),
-                (symbols::key::ENTER, "select"),
-                (symbols::key::ESC, "dismiss"),
-            ],
-            theme,
-        )),
-        area,
-    );
-}
-
-fn render_plan_feedback_hint(frame: &mut Frame, area: Rect, theme: Theme) {
-    frame.render_widget(
-        Paragraph::new(overlay::hint_line(
-            &[
-                (symbols::key::ENTER, "send"),
-                (symbols::key::ESC, "back"),
-                ("pgup/pgdn", "scroll"),
-            ],
-            theme,
-        )),
-        area,
-    );
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {

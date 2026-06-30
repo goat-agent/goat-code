@@ -36,8 +36,6 @@ pub struct Theme {
     panel: Color,
     shell: Color,
     shell_dim: Color,
-    plan: Color,
-    plan_dim: Color,
     pub code: CodePalette,
 }
 
@@ -67,8 +65,6 @@ impl Theme {
             panel: Color::Rgb(0x1b, 0x1b, 0x1e),
             shell: Color::Rgb(0xdb, 0x4b, 0x4b),
             shell_dim: Color::Rgb(0x54, 0x29, 0x2e),
-            plan: Color::Rgb(0x56, 0x9c, 0xd6),
-            plan_dim: Color::Rgb(0x2b, 0x40, 0x52),
             code: CodePalette {
                 bg: Color::Reset,
                 keyword: Color::Rgb(0x56, 0x9c, 0xd6),
@@ -104,8 +100,6 @@ impl Theme {
             panel: Color::Rgb(0xee, 0xee, 0xf0),
             shell: Color::Rgb(0xb0, 0x35, 0x54),
             shell_dim: Color::Rgb(0xe6, 0xc2, 0xcb),
-            plan: Color::Rgb(0x26, 0x7f, 0x99),
-            plan_dim: Color::Rgb(0xc2, 0xd8, 0xe1),
             code: CodePalette {
                 bg: Color::Reset,
                 keyword: Color::Rgb(0x00, 0x00, 0xff),
@@ -156,14 +150,6 @@ impl Theme {
 
     pub fn shell_dim(self) -> Style {
         Style::new().fg(self.shell_dim)
-    }
-
-    pub fn plan(self) -> Style {
-        Style::new().fg(self.plan)
-    }
-
-    pub fn plan_dim(self) -> Style {
-        Style::new().fg(self.plan_dim)
     }
 
     pub fn role_user(self) -> Style {

@@ -45,7 +45,7 @@ impl Correlation {
         match event {
             Event::TaskStarted { id } => self.active_turn = Some(*id),
             Event::TaskDone { .. } => self.active_turn = None,
-            Event::AskStarted { id, call, .. } | Event::PlanProposed { id, call, .. } => {
+            Event::AskStarted { id, call, .. } => {
                 self.last_prompt = Some((*id, *call));
             }
             _ => {}
@@ -98,7 +98,7 @@ fn fill_ids(op: &mut Op, ctx: &mut Correlation) {
                 *id = active;
             }
         }
-        Op::Answer { id, call, .. } | Op::ResolvePlan { id, call, .. } => {
+        Op::Answer { id, call, .. } => {
             if let Some((prompt_id, prompt_call)) = ctx.last_prompt {
                 if id.0 == 0 {
                     *id = prompt_id;
