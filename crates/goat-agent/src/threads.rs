@@ -140,13 +140,6 @@ pub(crate) async fn handle_resume(
             return;
         }
     };
-    let restored_mode = crate::mode_from_string(thread.mode.as_deref());
-    state.mode = restored_mode;
-    state.plan_path = if restored_mode.is_plan() {
-        crate::plan::resolve_plan_path(Some(tid), "")
-    } else {
-        None
-    };
     let new_target = ModelTarget {
         provider: thread.provider.clone(),
         model: thread.model.clone(),
@@ -328,7 +321,6 @@ pub(crate) async fn handle_resume(
             entries,
             context_tokens,
             compaction_threshold: None,
-            mode: restored_mode,
         })
         .await;
     if store.last_turn_interrupted(tid).await.unwrap_or(false) {

@@ -17,7 +17,6 @@ pub struct Config {
     pub computer_use_enabled: bool,
     pub browser_enabled: bool,
     pub mouse_capture_enabled: bool,
-    pub plan_shell_without_sandbox: bool,
     pub remote: RemoteConfig,
     pub search: SearchConfig,
 }
@@ -91,7 +90,6 @@ impl Default for Config {
             computer_use_enabled: false,
             browser_enabled: false,
             mouse_capture_enabled: true,
-            plan_shell_without_sandbox: false,
             remote: RemoteConfig::default(),
             search: SearchConfig::default(),
         }
@@ -163,10 +161,6 @@ pub fn skills_dir() -> Option<PathBuf> {
 
 pub fn browser_dir() -> Option<PathBuf> {
     app_home().map(|home| home.join("browser"))
-}
-
-pub fn plans_dir() -> Option<PathBuf> {
-    app_home().map(|home| home.join("plans"))
 }
 
 pub fn browser_profile_dir() -> Option<PathBuf> {
@@ -269,7 +263,6 @@ mod tests {
             computer_use_enabled: false,
             browser_enabled: true,
             mouse_capture_enabled: false,
-            plan_shell_without_sandbox: true,
             remote: RemoteConfig::default(),
             search: SearchConfig::default(),
         };

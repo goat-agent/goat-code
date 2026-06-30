@@ -219,30 +219,6 @@ impl fmt::Display for Effort {
     }
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum Mode {
-    #[default]
-    Normal,
-    Plan,
-}
-
-impl Mode {
-    #[must_use]
-    pub fn is_plan(self) -> bool {
-        matches!(self, Self::Plan)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "type")]
-pub enum PlanDecision {
-    Approve {},
-    Reject { feedback: String },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelTarget {
     pub provider: String,

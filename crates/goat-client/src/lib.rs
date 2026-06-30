@@ -233,8 +233,7 @@ async fn run_connection(
                             }
                             Op::Interrupt { .. }
                             | Op::Answer { .. }
-                            | Op::DequeueMessage { .. }
-                            | Op::ResolvePlan { .. } => {
+                            | Op::DequeueMessage { .. } => {
                                 let mut op = op;
                                 shared.idmap.lock().await.translate_outbound(&mut op);
                                 ClientFrame::Control { session, op }
@@ -364,14 +363,12 @@ fn frame_to_event(frame: ServerFrame) -> Option<Event> {
             transcript,
             context_tokens,
             compaction_threshold,
-            mode,
             ..
         } => target.map(|target| Event::ConversationRestored {
             target,
             entries: transcript,
             context_tokens,
             compaction_threshold,
-            mode,
         }),
         ServerFrame::Threads { threads } => Some(Event::ThreadsListed {
             threads: threads
@@ -629,7 +626,6 @@ mod tests {
             transcript: Vec::new(),
             context_tokens: None,
             compaction_threshold: None,
-            mode: goat_protocol::Mode::default(),
         };
         assert_eq!(
             sequenced_delivery(&mut expected, &mut replaying, &snapshot),

@@ -66,10 +66,7 @@ impl IdMap {
 
 fn op_id_mut(op: &mut Op) -> Option<&mut TaskId> {
     match op {
-        Op::Interrupt { id }
-        | Op::Answer { id, .. }
-        | Op::DequeueMessage { id }
-        | Op::ResolvePlan { id, .. } => Some(id),
+        Op::Interrupt { id } | Op::Answer { id, .. } | Op::DequeueMessage { id } => Some(id),
         _ => None,
     }
 }
@@ -93,8 +90,6 @@ fn event_ids_mut(event: &mut Event) -> Vec<&mut TaskId> {
         | Event::MessageDequeued { id, .. }
         | Event::CompactionStarted { id }
         | Event::CompactionDone { id, .. }
-        | Event::PlanProposed { id, .. }
-        | Event::PlanDismissed { id, .. }
         | Event::AgentDone { id, .. }
         | Event::Error { id: Some(id), .. } => ids.push(id),
         Event::AgentStarted { id, parent, .. } => {

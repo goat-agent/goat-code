@@ -1,7 +1,6 @@
 mod config;
 mod effort;
 mod model;
-mod plan;
 mod provider;
 mod usage;
 
@@ -10,7 +9,6 @@ use goat_command::Command;
 pub use config::Config;
 pub use effort::Effort;
 pub use model::Model;
-pub use plan::Plan;
 pub use provider::Provider;
 pub use usage::Usage;
 
@@ -21,6 +19,5 @@ pub fn all() -> Vec<Box<dyn Command>> {
         Box::new(Config),
         Box::new(Provider),
         Box::new(Usage),
-        Box::new(Plan),
     ]
 }

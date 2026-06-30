@@ -38,7 +38,6 @@ pub(crate) struct RestoredSnapshot {
     pub(crate) entries: Vec<goat_protocol::TranscriptEntry>,
     pub(crate) context_tokens: Option<u32>,
     pub(crate) compaction_threshold: Option<u32>,
-    pub(crate) mode: goat_protocol::Mode,
 }
 
 #[derive(Clone)]
@@ -74,8 +73,8 @@ impl SessionInner {
     pub(crate) fn record_and_fanout(&mut self, event: Event) -> Option<PersistEvent> {
         update_state_from_event(&mut self.state, &event);
         match &event {
-            Event::AskStarted { .. } | Event::PlanProposed { .. } => self.open_asks += 1,
-            Event::AskDismissed { .. } | Event::PlanDismissed { .. } => {
+            Event::AskStarted { .. } => self.open_asks += 1,
+            Event::AskDismissed { .. } => {
                 self.open_asks = self.open_asks.saturating_sub(1);
             }
             Event::Usage { usage, .. } => {
@@ -92,7 +91,6 @@ impl SessionInner {
             entries,
             context_tokens,
             compaction_threshold,
-            mode,
         } = &event
         {
             self.snapshot = Some(RestoredSnapshot {
@@ -101,7 +99,6 @@ impl SessionInner {
                 entries: entries.clone(),
                 context_tokens: *context_tokens,
                 compaction_threshold: *compaction_threshold,
-                mode: *mode,
             });
             self.awaits_restore = false;
             self.ready.notify_waiters();
@@ -164,22 +161,9 @@ fn prompt_action(event: &Event) -> Option<PromptAction> {
             payload: serde_json::to_string(questions).unwrap_or_default(),
             task_id: id.0,
         }),
-        Event::PlanProposed {
-            id,
-            call,
-            plan,
-            path,
-        } => Some(PromptAction::Open {
+        Event::AskDismissed { call, .. } => Some(PromptAction::Close {
             call_id: format!("{}", call.0),
-            kind: "plan".to_owned(),
-            payload: serde_json::to_string(&(plan, path)).unwrap_or_default(),
-            task_id: id.0,
         }),
-        Event::AskDismissed { call, .. } | Event::PlanDismissed { call, .. } => {
-            Some(PromptAction::Close {
-                call_id: format!("{}", call.0),
-            })
-        }
         _ => None,
     }
 }
@@ -260,7 +244,6 @@ mod tests {
             entries: Vec::new(),
             context_tokens: None,
             compaction_threshold: None,
-            mode: goat_protocol::Mode::default(),
         };
         inner.record_and_fanout(event);
         let snap = inner.snapshot.clone().expect("snapshot recorded");

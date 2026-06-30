@@ -278,7 +278,6 @@ impl Manager {
                     transcript: snap.entries,
                     context_tokens: snap.context_tokens,
                     compaction_threshold: snap.compaction_threshold,
-                    mode: snap.mode,
                 });
             }
             for (seq, event) in &inner.log {
@@ -567,7 +566,6 @@ fn spawn_subscriber_bridge(
 fn rewrite_resurrected_answer(inner: &mut SessionInner, op: &Op) -> Option<(u64, String)> {
     let (call, message) = match op {
         Op::Answer { call, answers, .. } => (call.0, format!("My answer: {}", answers.join(", "))),
-        Op::ResolvePlan { call, decision, .. } => (call.0, format!("Plan decision: {decision:?}")),
         _ => return None,
     };
     if inner.resurrected.remove(&call) {
@@ -682,18 +680,6 @@ async fn resurrect_open_prompts(inner: &Arc<Mutex<SessionInner>>, store: &Store,
                     questions,
                 }
             }
-            "plan" => {
-                let Ok((plan, path)) = serde_json::from_str::<(String, String)>(&prompt.payload)
-                else {
-                    continue;
-                };
-                goat_protocol::Event::PlanProposed {
-                    id: goat_protocol::TaskId(prompt.task_id),
-                    call: goat_protocol::ToolCallId(call),
-                    plan,
-                    path,
-                }
-            }
             _ => continue,
         };
         let mut guard = inner.lock().await;
@@ -771,7 +757,6 @@ mod tests {
             model: "m".to_owned(),
             account: "a".to_owned(),
             effort: None,
-            mode: None,
             created_at: 0,
             updated_at: 0,
         }

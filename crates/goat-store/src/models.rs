@@ -16,7 +16,6 @@ pub struct NewThread {
     pub model: String,
     pub account: String,
     pub effort: Option<String>,
-    pub mode: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -30,7 +29,6 @@ pub struct Thread {
     pub model: String,
     pub account: String,
     pub effort: Option<String>,
-    pub mode: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -118,8 +116,7 @@ pub(crate) fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Threa
         model: row.get(4)?,
         account: row.get(5)?,
         effort: row.get(6)?,
-        mode: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }

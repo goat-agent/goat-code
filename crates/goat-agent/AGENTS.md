@@ -3,8 +3,8 @@
 `GoatAgent` is the production `Engine`. The crate is split by responsibility; `lib.rs` is the
 shared-types hub (`GoatAgent`, `run()` op loop, `Ctx`, `SessionState`, `Run`/`Report`/`TurnIds`,
 `LoopEnv`, `Flow`) and every module imports from it. `Ctx` bundles the immutable shared services
-for a turn; `SessionState` bundles the six mutable per-session fields (`target`, `conversation`,
-`tracker`, `thread_id`, `mode`, `plan_path`) threaded through the turn lifecycle.
+for a turn; `SessionState` bundles the four mutable per-session fields (`target`, `conversation`,
+`tracker`, `thread_id`) threaded through the turn lifecycle.
 
 ## Modules
 
@@ -24,7 +24,6 @@ for a turn; `SessionState` bundles the six mutable per-session fields (`target`,
 | `rate_limit_cache` | rate-limit snapshot persistence |
 | `shell` | `<shell-input>`/`<shell-output>` history encode/decode for `SubmitShell` |
 | `websearch` | the engine-level `WebSearch` tool (provider `web_search`) |
-| `plan` | `EnterPlanMode`/`ProposePlan` engine tools, plan-mode tool gating, plan-file IO |
 | `conversation` | the `Conversation` history (messages + db row ids) |
 | `retry` | exponential-backoff retry over classified provider errors |
 | `compaction` | `ContextTracker` budget and LLM-summarization auto-compaction |

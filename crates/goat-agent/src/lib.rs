@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use goat_auth::CredentialStore;
 use goat_core::Engine;
-use goat_protocol::{Event, Mode, ModelTarget, Op, PlanDecision, SkillInfo, TaskId, ToolCallId};
+use goat_protocol::{Event, ModelTarget, Op, SkillInfo, TaskId, ToolCallId};
 use goat_provider::{Provider, ToolDefinition};
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use goat_store::Store;
@@ -27,7 +27,6 @@ mod conversation;
 mod delegate;
 mod instructions;
 mod persist;
-mod plan;
 mod prompt;
 mod rate_limit_cache;
 mod retry;
@@ -41,21 +40,6 @@ mod websearch;
 pub use agent::{AgentRegistry, AgentSpec, ToolSelection};
 
 const CHILD_ID_BASE: u64 = 1 << 32;
-const ENGINE_TURN_ID_BASE: u64 = 1 << 48;
-
-pub(crate) fn mode_string(mode: Mode) -> Option<String> {
-    match mode {
-        Mode::Normal => None,
-        Mode::Plan => Some("plan".to_owned()),
-    }
-}
-
-pub(crate) fn mode_from_string(raw: Option<&str>) -> Mode {
-    match raw {
-        Some("plan") => Mode::Plan,
-        _ => Mode::Normal,
-    }
-}
 
 pub struct GoatAgent {
     registry: Registry,
@@ -121,9 +105,6 @@ pub(crate) struct Ctx<'a> {
     pub(crate) semaphore: &'a Arc<Semaphore>,
     pub(crate) child_ids: &'a AtomicU64,
     pub(crate) asks: &'a Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>>,
-    pub(crate) plans: &'a Mutex<HashMap<ToolCallId, oneshot::Sender<PlanDecision>>>,
-    pub(crate) engine_ids: &'a AtomicU64,
-    pub(crate) plan_shell: bool,
     pub(crate) rl_cache: &'a std::sync::Mutex<rate_limit_cache::RateLimitCache>,
     pub(crate) rl_path: Option<&'a std::path::Path>,
     pub(crate) cwd: &'a std::path::Path,
@@ -140,8 +121,6 @@ pub(crate) struct SessionState {
     pub(crate) conversation: conversation::Conversation,
     pub(crate) tracker: compaction::ContextTracker,
     pub(crate) thread_id: Option<i64>,
-    pub(crate) mode: Mode,
-    pub(crate) plan_path: Option<PathBuf>,
 }
 
 pub(crate) struct TurnIds {
@@ -220,10 +199,7 @@ pub(crate) struct LoopEnv<'a> {
     pub(crate) tool_defs: &'a [ToolDefinition],
     pub(crate) cwd: &'a Path,
     pub(crate) allow_delegate: bool,
-    pub(crate) mode: Mode,
-    pub(crate) plan_path: Option<PathBuf>,
     pub(crate) exec_policy: SandboxPolicy,
-    pub(crate) transition: Option<&'a plan::TransitionCell>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -242,8 +218,6 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
         conversation: conversation::Conversation::new(),
         tracker: compaction::ContextTracker::new(),
         thread_id: None,
-        mode: Mode::Normal,
-        plan_path: None,
     };
 
     if state.target.is_none() {
@@ -257,12 +231,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     let session_date = prompt::current_utc_date();
     let semaphore = Arc::new(Semaphore::new(delegate::MAX_CONCURRENT_AGENTS));
     let child_ids = AtomicU64::new(CHILD_ID_BASE);
-    let engine_ids = AtomicU64::new(ENGINE_TURN_ID_BASE);
     let asks: Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>> = Mutex::new(HashMap::new());
-    let plans: Mutex<HashMap<ToolCallId, oneshot::Sender<PlanDecision>>> =
-        Mutex::new(HashMap::new());
-    let plan_shell =
-        goat_sandbox::backend_available() || goat_config::Config::load().plan_shell_without_sandbox;
     let _ = events
         .send(Event::SkillsChanged {
             skills: skills.clone(),
@@ -306,9 +275,6 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 semaphore: &semaphore,
                 child_ids: &child_ids,
                 asks: &asks,
-                plans: &plans,
-                engine_ids: &engine_ids,
-                plan_shell,
                 rl_cache: &rl_cache,
                 rl_path: rl_path.as_deref(),
                 cwd: &cwd,
@@ -331,32 +297,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     break;
                 }
             }
-            Op::Interrupt { .. }
-            | Op::Answer { .. }
-            | Op::DequeueMessage { .. }
-            | Op::ResolvePlan { .. }
-            | Op::Clear {} => {}
-            Op::SetMode { mode: requested } => {
-                state.mode = requested;
-                if requested == Mode::Normal {
-                    state.plan_path = None;
-                }
-                if let Some(tid) = state.thread_id
-                    && let Err(err) = store
-                        .update_thread_mode(tid, mode_string(state.mode), persist::now_ms())
-                        .await
-                {
-                    tracing::warn!(%err, "failed to persist thread mode");
-                }
-                let _ = events
-                    .send(Event::ModeChanged {
-                        mode: state.mode,
-                        plan_path: state
-                            .plan_path
-                            .as_ref()
-                            .map(|path| path.display().to_string()),
-                    })
-                    .await;
+            Op::Interrupt { .. } | Op::Answer { .. } | Op::DequeueMessage { .. } | Op::Clear {} => {
             }
             Op::Compact { id, instructions } => {
                 let ctx = ctx!();

@@ -10,19 +10,8 @@ use crate::{
     ask::{ASK_TOOL_NAME, ask_call_display, ask_tool_def, run_ask},
     delegate::{AGENT_TOOL_NAME, agent_call_display, agent_tool_def, run_delegation},
     persist::{create_tool_call_record, finish_tool_db},
-    plan::{
-        ENTER_PLAN_TOOL_NAME, PROPOSE_PLAN_TOOL_NAME, enter_plan_display, enter_plan_tool_def,
-        propose_plan_display, propose_plan_tool_def, run_enter_plan, run_propose_plan,
-    },
     websearch::{WEB_SEARCH_TOOL_NAME, run_web_search, web_search_display, web_search_tool_def},
 };
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TransitionTool {
-    None,
-    Enter,
-    Propose,
-}
 
 pub(crate) struct ToolExecResult {
     result_content: ContentBlock,
@@ -75,8 +64,6 @@ pub(crate) fn call_display(tools: &ToolRegistry, name: &str, input: &str) -> Too
     match name {
         AGENT_TOOL_NAME => agent_call_display(input),
         ASK_TOOL_NAME => ask_call_display(input),
-        ENTER_PLAN_TOOL_NAME => enter_plan_display(),
-        PROPOSE_PLAN_TOOL_NAME => propose_plan_display(),
         WEB_SEARCH_TOOL_NAME => web_search_display(input),
         _ => tools.get(name).map_or_else(
             || goat_tool::display::generic(input),
@@ -145,14 +132,6 @@ async fn execute_tool(
     {
         Some(
             run_web_search(env, prep.input_json, token)
-                .await
-                .map(ToolOutput::text),
-        )
-    } else if prep.name == ENTER_PLAN_TOOL_NAME && env.transition.is_some() {
-        Some(run_enter_plan(env).map(ToolOutput::text))
-    } else if prep.name == PROPOSE_PLAN_TOOL_NAME && env.transition.is_some() {
-        Some(
-            run_propose_plan(ctx, run, env, ToolCallId(prep.tui_id), token)
                 .await
                 .map(ToolOutput::text),
         )
@@ -293,7 +272,6 @@ pub(crate) fn build_tool_defs(
     provider: &dyn Provider,
     selection: Option<&ToolSelection>,
     allow_delegate: bool,
-    transition: TransitionTool,
 ) -> Vec<ToolDefinition> {
     if !provider.capabilities().tools {
         return Vec::new();
@@ -317,11 +295,6 @@ pub(crate) fn build_tool_defs(
             defs.push(agent_tool_def(ctx));
         }
         defs.push(ask_tool_def());
-    }
-    match transition {
-        TransitionTool::None => {}
-        TransitionTool::Enter => defs.push(enter_plan_tool_def()),
-        TransitionTool::Propose => defs.push(propose_plan_tool_def()),
     }
     defs
 }

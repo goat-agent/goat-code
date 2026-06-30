@@ -57,7 +57,6 @@ pub(crate) enum LoopOutcome {
     Completed,
     Cancelled,
     Failed(String),
-    Transitioned,
 }
 
 async fn drain_steering(ctx: &Ctx<'_>, run: &Run<'_>, conversation: &mut Conversation) {
@@ -406,12 +405,6 @@ pub(crate) async fn core_loop(
         Err(err) => return LoopOutcome::Failed(err.to_string()),
     };
     tool_ctx.exec_policy = env.exec_policy.clone();
-    tool_ctx.extra_path = env.plan_path.clone();
-    tool_ctx.write_allow = if env.mode.is_plan() && run.is_top() {
-        env.plan_path.clone()
-    } else {
-        None
-    };
     let mut rounds = 0usize;
     let mut call_seq = 0u64;
     let mut compacted_for_overflow = false;
@@ -478,13 +471,6 @@ pub(crate) async fn core_loop(
             RoundOutcome::Done => return LoopOutcome::Completed,
             RoundOutcome::Cancelled => return LoopOutcome::Cancelled,
             RoundOutcome::Continue => {}
-        }
-        if env.transition.is_some_and(|cell| {
-            cell.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_some()
-        }) {
-            return LoopOutcome::Transitioned;
         }
     }
 }
