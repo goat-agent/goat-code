@@ -746,6 +746,8 @@ impl Provider for AnthropicProvider {
             validation: "network",
             endpoint: None,
             oauth: Some("browser"),
+            login_endpoint: None,
+            setup: &[],
         }
     }
 

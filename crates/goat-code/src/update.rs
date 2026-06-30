@@ -12,6 +12,8 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::style::{ColorMode, Palette, print_row};
+
 const REPOSITORY: &str = "goat-agent/goat-code";
 const INSTALL_DIR: &str = "/usr/local/bin";
 const INSTALL_URL: &str = "https://raw.githubusercontent.com/goat-agent/goat-code/main/install.sh";
@@ -44,7 +46,10 @@ pub async fn run(force: bool) -> color_eyre::Result<()> {
     let latest = parse_tag(&release.tag_name)?;
 
     if latest <= current && !force {
-        println!("Already up to date.");
+        let color = ColorMode::detect();
+        println!("{}", color.paint("goat is up to date", Palette::Success));
+        print_row(color, "current", current.to_string(), Palette::Value);
+        print_row(color, "latest", latest.to_string(), Palette::Value);
         return Ok(());
     }
 
@@ -53,10 +58,15 @@ pub async fn run(force: bool) -> color_eyre::Result<()> {
     let archive_name = format!("goat-code-{target}.tar.gz");
     let archive_url = asset_url(&release, &archive_name)?;
     let checksums_url = asset_url(&release, "SHA256SUMS")?;
-    println!("Downloading goat {latest}...");
+    let color = ColorMode::detect();
+    println!("{}", color.paint("updating goat", Palette::Provider));
+    print_row(color, "current", current.to_string(), Palette::Value);
+    print_row(color, "latest", latest.to_string(), Palette::Value);
+    print_row(color, "target", target, Palette::Value);
     let archive = download(&client, archive_url).await?;
     let checksums = String::from_utf8(download(&client, checksums_url).await?)?;
     verify_checksum(&archive_name, &archive, &checksums)?;
+    print_row(color, "checksum", "verified", Palette::Success);
 
     let staged_dir = stage_dir(&latest, target)?;
     reset_dir(&staged_dir)?;
@@ -65,7 +75,12 @@ pub async fn run(force: bool) -> color_eyre::Result<()> {
     require_file(&staged_dir.join(exe_name("goat-update")))?;
 
     let paths = install_paths()?;
-    println!("Installing goat {latest}...");
+    print_row(
+        color,
+        "install",
+        paths.bin_path.display().to_string(),
+        Palette::Value,
+    );
     run_helper(&staged_dir, &paths, &latest)?;
     Ok(())
 }

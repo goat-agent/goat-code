@@ -72,6 +72,8 @@ pub fn build(store: &CredentialStore, account: &str) -> ResponsesProvider {
         validation: "network",
         endpoint: None,
         oauth: Some("not supported"),
+        login_endpoint: None,
+        setup: &[],
     })
 }
 

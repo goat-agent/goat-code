@@ -1,43 +1,24 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
-use color_eyre::eyre::eyre;
+use color_eyre::eyre::{Result, eyre};
+use crossterm::{
+    cursor,
+    event::{self, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{self, ClearType},
+};
 use goat_auth::{
     Credential, CredentialKey, CredentialKind, CredentialService, CredentialStore, SecretString,
 };
-use goat_provider::{AuthMethod, ProviderId};
+use goat_provider::{AuthMethod, ProviderId, ProviderMetadata};
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use tokio::sync::mpsc;
 
-use crate::cli::{AuthCommand, ProviderCommand};
-
-pub async fn run(command: AuthCommand) -> color_eyre::Result<()> {
-    let path = goat_config::auth_path().ok_or_else(|| eyre!(goat_config::HOME_NOT_FOUND))?;
-    let store = CredentialStore::new(path);
-    match command {
-        AuthCommand::Login {
-            provider,
-            account,
-            key,
-            service,
-        } => {
-            let account = account.as_deref().unwrap_or(DEFAULT_ACCOUNT);
-            login(&store, &provider, account, key, None, service.into()).await
-        }
-        AuthCommand::List => {
-            list(&store, None);
-            Ok(())
-        }
-        AuthCommand::Logout {
-            provider,
-            account,
-            service,
-        } => {
-            let account = account.as_deref().unwrap_or(DEFAULT_ACCOUNT);
-            logout(&store, &provider, account, service.into())
-        }
-    }
-}
+use crate::{
+    cli::ProviderCommand,
+    style::{ColorMode, Palette, print_row},
+};
 
 pub async fn run_provider(command: ProviderCommand) -> color_eyre::Result<()> {
     let path = goat_config::auth_path().ok_or_else(|| eyre!(goat_config::HOME_NOT_FOUND))?;
@@ -49,34 +30,151 @@ pub async fn run_provider(command: ProviderCommand) -> color_eyre::Result<()> {
             key,
             endpoint,
         } => {
+            let provider = match provider {
+                Some(provider) => provider,
+                None => pick_login_provider(&store)?,
+            };
             let account = account.as_deref().unwrap_or(DEFAULT_ACCOUNT);
-            login(
-                &store,
-                &provider,
-                account,
-                key,
-                endpoint,
-                CredentialService::Model,
-            )
-            .await
+            login(&store, &provider, account, key, endpoint).await
         }
-        ProviderCommand::List { accounts } => {
-            if accounts {
-                list_provider_accounts(&store);
-            } else {
-                list_providers(&store);
-            }
-            Ok(())
-        }
-        ProviderCommand::Accounts => {
-            list_provider_accounts(&store);
+        ProviderCommand::List => {
+            list_providers(&store);
             Ok(())
         }
         ProviderCommand::Info { provider } => provider_info(&store, &provider),
         ProviderCommand::Logout { provider, account } => {
-            let account = account.as_deref().unwrap_or(DEFAULT_ACCOUNT);
-            logout(&store, &provider, account, CredentialService::Model)
+            logout(&store, &provider, &account, CredentialService::Model)
         }
+    }
+}
+
+fn pick_login_provider(store: &CredentialStore) -> Result<String> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(eyre!(
+            "provider is required when stdin/stdout is not a terminal"
+        ));
+    }
+    let registry = Registry::new(store);
+    let stored = store.entries();
+    let choices = registry
+        .all()
+        .iter()
+        .filter(|provider| !matches!(provider.capabilities().auth, AuthMethod::None))
+        .map(|provider| {
+            let id = provider.id().to_string();
+            let caps = provider.capabilities();
+            let metadata = provider.metadata();
+            let accounts = provider_accounts(&stored, &id);
+            let status = connection_status(caps.auth, metadata.env_var, &accounts);
+            ProviderChoice { id, status }
+        })
+        .collect::<Vec<_>>();
+    if choices.is_empty() {
+        return Err(eyre!("no login-capable providers available"));
+    }
+    ProviderPicker::new(choices).pick()
+}
+
+struct ProviderChoice {
+    id: String,
+    status: ConnectionStatus,
+}
+
+struct ProviderPicker {
+    choices: Vec<ProviderChoice>,
+    selected: usize,
+    rendered_lines: u16,
+}
+
+impl ProviderPicker {
+    fn new(choices: Vec<ProviderChoice>) -> Self {
+        Self {
+            choices,
+            selected: 0,
+            rendered_lines: 0,
+        }
+    }
+
+    fn pick(mut self) -> Result<String> {
+        terminal::enable_raw_mode()?;
+        let result = self.pick_raw();
+        terminal::disable_raw_mode()?;
+        result
+    }
+
+    fn pick_raw(&mut self) -> Result<String> {
+        let mut stdout = std::io::stdout();
+        execute!(stdout, cursor::Hide)?;
+        loop {
+            self.render(&mut stdout)?;
+            if let TermEvent::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Up => self.move_up(),
+                    KeyCode::Down => self.move_down(),
+                    KeyCode::Char('k') if key.modifiers.is_empty() => self.move_up(),
+                    KeyCode::Char('j') if key.modifiers.is_empty() => self.move_down(),
+                    KeyCode::Enter => {
+                        let id = self.choices[self.selected].id.clone();
+                        self.clear(&mut stdout)?;
+                        execute!(stdout, cursor::Show)?;
+                        return Ok(id);
+                    }
+                    KeyCode::Esc => {
+                        self.clear(&mut stdout)?;
+                        execute!(stdout, cursor::Show)?;
+                        return Err(eyre!("provider login cancelled"));
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.clear(&mut stdout)?;
+                        execute!(stdout, cursor::Show)?;
+                        return Err(eyre!("provider login cancelled"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    fn move_down(&mut self) {
+        self.selected = (self.selected + 1).min(self.choices.len().saturating_sub(1));
+    }
+
+    fn render(&mut self, stdout: &mut std::io::Stdout) -> Result<()> {
+        self.clear(stdout)?;
+        let color = ColorMode::detect();
+        writeln!(stdout, "select provider")?;
+        for (index, choice) in self.choices.iter().enumerate() {
+            let marker = if index == self.selected { "›" } else { " " };
+            writeln!(
+                stdout,
+                "{} {} {}",
+                color.paint(marker, Palette::Provider),
+                color.cell(&choice.id, Palette::Provider, PROVIDER_WIDTH),
+                color.paint(choice.status.compact_label(), choice.status.palette())
+            )?;
+        }
+        stdout.flush()?;
+        self.rendered_lines = self.choices.len().saturating_add(1).min(u16::MAX as usize) as u16;
+        Ok(())
+    }
+
+    fn clear(&self, stdout: &mut std::io::Stdout) -> Result<()> {
+        if self.rendered_lines > 0 {
+            execute!(
+                stdout,
+                cursor::MoveUp(self.rendered_lines),
+                cursor::MoveToColumn(0),
+                terminal::Clear(ClearType::FromCursorDown)
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -86,21 +184,19 @@ async fn login(
     account: &str,
     key: Option<String>,
     endpoint: Option<String>,
-    service: CredentialService,
 ) -> color_eyre::Result<()> {
-    if service == CredentialService::Search {
-        return login_search(store, provider, account, key);
-    }
     let registry = Registry::new(store);
-    let method = registry
+    let provider_handle = registry
         .all()
         .iter()
         .find(|p| p.id().to_string() == provider)
-        .map(|p| p.capabilities().auth)
+        .cloned()
         .ok_or_else(|| unknown_provider_error(provider, &registry))?;
+    let method = provider_handle.capabilities().auth;
+    let metadata = provider_handle.metadata();
 
-    if endpoint.is_some() && provider != goat_provider_hosted::QWEN {
-        return Err(eyre!("--endpoint is only supported for qwen"));
+    if endpoint.is_some() && metadata.login_endpoint.is_none() {
+        return Err(eyre!("--endpoint is not supported for provider {provider}"));
     }
     if key.is_some() && matches!(method, AuthMethod::OAuth) {
         return Err(eyre!(
@@ -149,21 +245,7 @@ async fn login(
         if secret.is_empty() {
             return Err(eyre!("no API key provided"));
         }
-        let credential = if provider == goat_provider_hosted::QWEN {
-            let endpoint = endpoint
-                .or_else(|| std::env::var("QWEN_BASE_URL").ok())
-                .unwrap_or_else(|| {
-                    "https://dashscope-us.aliyuncs.com/compatible-mode/v1".to_owned()
-                });
-            let endpoint = goat_provider_hosted::validate_qwen_endpoint(&endpoint)
-                .map_err(|err| eyre!(err))?;
-            Credential::ApiKeyWithEndpoint {
-                secret: SecretString::from(secret),
-                endpoint,
-            }
-        } else {
-            Credential::ApiKey(SecretString::from(secret))
-        };
+        let credential = api_key_credential(secret, endpoint, metadata)?;
         store
             .store(&credential_key, credential)
             .map_err(|err| eyre!(err.to_string()))?;
@@ -174,37 +256,31 @@ async fn login(
     Ok(())
 }
 
-fn login_search(
-    store: &CredentialStore,
-    provider: &str,
-    account: &str,
-    key: Option<String>,
-) -> color_eyre::Result<()> {
-    match provider {
-        "brave" | "tavily" => {}
-        "duckduckgo" | "browser" | "searxng" => {
-            println!("{provider} search accounts do not require secret credentials");
-            return Ok(());
-        }
-        other => return Err(eyre!("unknown search provider: {other}")),
-    }
-    let secret = match key {
-        Some(key) => key,
-        None => prompt(&format!("enter API key for search {provider}: "))?,
+fn api_key_credential(
+    secret: String,
+    endpoint: Option<String>,
+    metadata: ProviderMetadata,
+) -> color_eyre::Result<Credential> {
+    let Some(endpoint_metadata) = metadata.login_endpoint else {
+        return Ok(Credential::ApiKey(SecretString::from(secret)));
     };
-    let secret = secret.trim().to_owned();
-    if secret.is_empty() {
-        return Err(eyre!("no API key provided"));
-    }
-    let credential_key = CredentialKey::search(provider, account);
-    store
-        .store(
-            &credential_key,
-            Credential::ApiKey(SecretString::from(secret)),
-        )
-        .map_err(|err| eyre!(err.to_string()))?;
-    println!("stored search credential for {provider} ({account})");
-    Ok(())
+    let endpoint = endpoint
+        .or_else(|| {
+            endpoint_metadata
+                .env_var
+                .and_then(|env_var| std::env::var(env_var).ok())
+        })
+        .or_else(|| endpoint_metadata.default.map(str::to_owned))
+        .ok_or_else(|| eyre!("endpoint is required for this provider"))?;
+    let endpoint = if let Some(validate) = endpoint_metadata.validate {
+        validate(&endpoint).map_err(|err| eyre!(err))?
+    } else {
+        endpoint
+    };
+    Ok(Credential::ApiKeyWithEndpoint {
+        secret: SecretString::from(secret),
+        endpoint,
+    })
 }
 
 async fn verify(store: &CredentialStore, provider: &str, account: &str) {
@@ -233,37 +309,58 @@ async fn verify(store: &CredentialStore, provider: &str, account: &str) {
     }
 }
 
+const PROVIDER_WIDTH: usize = 15;
+const STATUS_WIDTH: usize = 10;
+const ACCOUNT_WIDTH: usize = 22;
+
+#[cfg(test)]
 fn list_provider_lines(store: &CredentialStore) -> Vec<String> {
+    let color = ColorMode::detect();
+    list_provider_lines_with_color(store, color)
+}
+
+fn list_provider_lines_with_color(store: &CredentialStore, color: ColorMode) -> Vec<String> {
     let registry = Registry::new(store);
     let stored = store.entries();
     let mut lines = vec![format!(
-        "{:<16}  {:<22}  {:<18}  {:<42}  {}",
-        "provider", "auth", "status", "setup", "models"
+        "  {} {} {}",
+        color.cell("provider", Palette::Muted, PROVIDER_WIDTH),
+        color.cell("status", Palette::Muted, STATUS_WIDTH),
+        color.paint("account", Palette::Muted)
     )];
     for provider in registry.all() {
         let id = provider.id().to_string();
         let caps = provider.capabilities();
         let metadata = provider.metadata();
         let accounts = provider_accounts(&stored, &id);
-        lines.push(format!(
-            "{:<16}  {:<22}  {:<18}  {:<42}  {}",
-            id,
-            auth_label(caps.auth),
-            connection_status(caps.auth, metadata.env_var, &accounts),
-            setup_hint(&id, caps.auth, metadata.env_var),
-            model_preview(provider.catalog()),
-        ));
+        let status = connection_status(caps.auth, metadata.env_var, &accounts);
+        let account = account_preview(&accounts);
+        let line = if account.is_empty() {
+            format!(
+                "{} {} {}",
+                color.paint(status.icon(), status.palette()),
+                color.cell(&id, Palette::Provider, PROVIDER_WIDTH),
+                color.paint(status.compact_label(), status.palette())
+            )
+        } else {
+            format!(
+                "{} {} {} {}",
+                color.paint(status.icon(), status.palette()),
+                color.cell(&id, Palette::Provider, PROVIDER_WIDTH),
+                color.cell(status.compact_label(), status.palette(), STATUS_WIDTH),
+                color.paint(account, Palette::Value)
+            )
+        };
+        lines.push(line);
     }
     lines
 }
 
 fn list_providers(store: &CredentialStore) {
-    for line in list_provider_lines(store) {
+    let color = ColorMode::detect();
+    for line in list_provider_lines_with_color(store, color) {
         println!("{line}");
     }
-    println!();
-    println!("Use `goat provider info <provider>` for endpoint, OAuth, and validation details.");
-    println!("Use `goat provider accounts` to show stored accounts only.");
 }
 
 fn provider_info(store: &CredentialStore, provider: &str) -> color_eyre::Result<()> {
@@ -278,72 +375,54 @@ fn provider_info(store: &CredentialStore, provider: &str) -> color_eyre::Result<
     let caps = target.capabilities();
     let metadata = target.metadata();
     let accounts = provider_accounts(&stored, &id);
-    println!("{id}");
-    println!("  auth        {}", auth_label(caps.auth));
-    println!(
-        "  status      {}",
-        connection_status(caps.auth, metadata.env_var, &accounts)
+    let status = connection_status(caps.auth, metadata.env_var, &accounts);
+    let color = ColorMode::detect();
+    println!("{}", color.paint(&id, Palette::Provider));
+    print_row(color, "status", status.label(), status.palette());
+    print_row(color, "auth", auth_label(caps.auth), Palette::Value);
+    print_row(
+        color,
+        "accounts",
+        provider_account_details(&accounts),
+        Palette::Value,
     );
-    println!(
-        "  accounts    {}",
-        if accounts.is_empty() {
-            "none".to_owned()
-        } else {
-            accounts
-                .iter()
-                .map(|(account, kind)| format!("{account} ({})", credential_kind_label(*kind)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
+    print_row(
+        color,
+        "env",
+        metadata.env_var.map_or("-".to_owned(), str::to_owned),
+        Palette::Value,
     );
-    println!(
-        "  env         {}",
-        metadata.env_var.map_or("-".to_owned(), str::to_owned)
+    print_row(
+        color,
+        "endpoint",
+        metadata.endpoint.map_or("fixed".to_owned(), str::to_owned),
+        Palette::Value,
     );
-    println!(
-        "  endpoint    {}",
-        metadata.endpoint.map_or("fixed".to_owned(), str::to_owned)
-    );
-    println!("  validation  {}", metadata.validation);
-    println!(
-        "  oauth       {}",
+    print_row(color, "validation", metadata.validation, Palette::Value);
+    print_row(
+        color,
+        "oauth",
         metadata.oauth.map_or_else(
             || match caps.auth {
                 AuthMethod::OAuth | AuthMethod::ApiKeyOrOAuth => "device code".to_owned(),
                 AuthMethod::ApiKey | AuthMethod::None => "-".to_owned(),
             },
             str::to_owned,
-        )
+        ),
+        Palette::Value,
     );
-    println!("  models      {}", model_preview(target.catalog()));
+    print_row(
+        color,
+        "models",
+        model_preview(target.catalog()),
+        Palette::Value,
+    );
     println!();
-    println!("setup");
-    for line in setup_lines(&id, caps.auth, metadata.env_var) {
-        println!("  {line}");
+    println!("{}", color.paint("setup", Palette::Muted));
+    for line in provider_setup_lines(&id, caps.auth, metadata) {
+        println!("  {}", color.paint(line, Palette::Value));
     }
     Ok(())
-}
-
-fn list_provider_accounts(store: &CredentialStore) {
-    let entries: Vec<_> = store
-        .entries()
-        .into_iter()
-        .filter(|(key, _)| key.service == CredentialService::Model)
-        .collect();
-    if entries.is_empty() {
-        println!("no model provider accounts stored");
-        println!("run `goat provider list` to see available providers");
-        return;
-    }
-    println!("{:<16}  {:<16}  method", "provider", "account");
-    for (key, kind) in entries {
-        println!(
-            "{:<16}  {:<16}  {}",
-            key.provider,
-            key.account,
-            credential_kind_label(kind)
-        );
-    }
 }
 
 fn provider_accounts(
@@ -357,88 +436,139 @@ fn provider_accounts(
         .collect()
 }
 
+fn account_preview(accounts: &[(String, CredentialKind)]) -> String {
+    match accounts {
+        [] => String::new(),
+        [(account, _)] => truncate_label(account, ACCOUNT_WIDTH),
+        [(first, _), (second, _)] => truncate_label(&format!("{first}, {second}"), ACCOUNT_WIDTH),
+        [(first, _), (second, _), rest @ ..] => {
+            truncate_label(&format!("{first}, {second} +{}", rest.len()), ACCOUNT_WIDTH)
+        }
+    }
+}
+
+fn provider_account_details(accounts: &[(String, CredentialKind)]) -> String {
+    if accounts.is_empty() {
+        return "none".to_owned();
+    }
+    accounts
+        .iter()
+        .map(|(account, kind)| format!("{account} ({})", credential_kind_label(*kind)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn truncate_label(label: &str, width: usize) -> String {
+    let count = label.chars().count();
+    if count <= width {
+        return label.to_owned();
+    }
+    let keep = width.saturating_sub(1);
+    let mut truncated = label.chars().take(keep).collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
+struct ConnectionStatus {
+    kind: ConnectionKind,
+    label: String,
+}
+
+impl ConnectionStatus {
+    fn icon(&self) -> &'static str {
+        match self.kind {
+            ConnectionKind::Connected | ConnectionKind::Env => "●",
+            ConnectionKind::Local => "◆",
+            ConnectionKind::Disconnected => "○",
+        }
+    }
+
+    fn palette(&self) -> Palette {
+        match self.kind {
+            ConnectionKind::Connected => Palette::Success,
+            ConnectionKind::Env => Palette::Info,
+            ConnectionKind::Local => Palette::Local,
+            ConnectionKind::Disconnected => Palette::Warning,
+        }
+    }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn compact_label(&self) -> &str {
+        match self.kind {
+            ConnectionKind::Connected => "connected",
+            ConnectionKind::Env => "env",
+            ConnectionKind::Local => "local",
+            ConnectionKind::Disconnected => "missing",
+        }
+    }
+}
+
+enum ConnectionKind {
+    Connected,
+    Env,
+    Local,
+    Disconnected,
+}
+
 fn connection_status(
     auth: AuthMethod,
     env_var: Option<&str>,
     accounts: &[(String, CredentialKind)],
-) -> String {
+) -> ConnectionStatus {
     if !accounts.is_empty() {
-        return if accounts.len() == 1 {
+        let label = if accounts.len() == 1 {
             format!("connected: {}", accounts[0].0)
         } else {
-            format!("connected: {}", accounts.len())
+            format!("connected: {} accounts", accounts.len())
+        };
+        return ConnectionStatus {
+            kind: ConnectionKind::Connected,
+            label,
         };
     }
     if let Some(var) = env_var
         && std::env::var(var).is_ok_and(|value| !value.is_empty())
     {
-        return format!("env: {var}");
+        return ConnectionStatus {
+            kind: ConnectionKind::Env,
+            label: format!("env: {var}"),
+        };
     }
     if matches!(auth, AuthMethod::None) {
-        "local".to_owned()
-    } else {
-        "not connected".to_owned()
-    }
-}
-
-fn setup_hint(id: &str, auth: AuthMethod, env_var: Option<&str>) -> String {
-    match id {
-        goat_provider_hosted::KIMI => "OAuth users: goat provider login kimi-code".to_owned(),
-        goat_provider_hosted::KIMI_CODE => "goat provider login kimi-code".to_owned(),
-        goat_provider_hosted::QWEN => {
-            "goat provider login qwen --endpoint ... --key ...".to_owned()
+        ConnectionStatus {
+            kind: ConnectionKind::Local,
+            label: "local".to_owned(),
         }
-        goat_provider_hosted::ZAI_CODING => "goat provider login zai-coding --key ...".to_owned(),
-        _ => match auth {
-            AuthMethod::None => "no login needed".to_owned(),
-            AuthMethod::OAuth => format!("goat provider login {id}"),
-            AuthMethod::ApiKey | AuthMethod::ApiKeyOrOAuth => env_var.map_or_else(
-                || format!("goat provider login {id} --key ..."),
-                |var| format!("set {var} or login --key ..."),
-            ),
-        },
+    } else {
+        ConnectionStatus {
+            kind: ConnectionKind::Disconnected,
+            label: "not connected".to_owned(),
+        }
     }
 }
 
-fn setup_lines(id: &str, auth: AuthMethod, env_var: Option<&str>) -> Vec<String> {
-    match id {
-        goat_provider_hosted::KIMI => vec![
-            "Kimi Platform API key provider.".to_owned(),
-            "For Kimi Code OAuth, use `goat provider login kimi-code`.".to_owned(),
-            "API-key setup: `goat provider login kimi --key sk-...`.".to_owned(),
+fn provider_setup_lines(id: &str, auth: AuthMethod, metadata: ProviderMetadata) -> Vec<String> {
+    if !metadata.setup.is_empty() {
+        return metadata.setup.iter().map(ToString::to_string).collect();
+    }
+    match auth {
+        AuthMethod::None => {
+            vec!["No login required. Make sure the local server is running.".to_owned()]
+        }
+        AuthMethod::OAuth => vec![format!(
+            "Run `goat provider login {id}` for device-code login."
+        )],
+        AuthMethod::ApiKey => vec![metadata.env_var.map_or_else(
+            || format!("Run `goat provider login {id} --key sk-...`."),
+            |var| format!("Set `{var}` or run `goat provider login {id} --key sk-...`."),
+        )],
+        AuthMethod::ApiKeyOrOAuth => vec![
+            format!("Run `goat provider login {id}` for OAuth device-code login."),
+            format!("Run `goat provider login {id} --key sk-...` to store an API key."),
         ],
-        goat_provider_hosted::KIMI_CODE => vec![
-            "Kimi Code OAuth device-code login.".to_owned(),
-            "Run `goat provider login kimi-code`, open the URL, and enter the code.".to_owned(),
-        ],
-        goat_provider_hosted::QWEN => vec![
-            "Qwen DashScope API-key provider.".to_owned(),
-            "Default endpoint: https://dashscope-us.aliyuncs.com/compatible-mode/v1".to_owned(),
-            "Non-US workspaces: `goat provider login qwen --endpoint <url> --key sk-...`."
-                .to_owned(),
-            "Qwen OAuth enrollment is discontinued upstream.".to_owned(),
-        ],
-        goat_provider_hosted::ZAI_CODING => vec![
-            "Z.AI Coding Plan API-key provider.".to_owned(),
-            "Use `ZAI_CODING_API_KEY` or `goat provider login zai-coding --key sk-...`.".to_owned(),
-            "This is not OAuth and does not reuse the standard `zai` credential.".to_owned(),
-        ],
-        _ => match auth {
-            AuthMethod::None => {
-                vec!["No login required. Make sure the local server is running.".to_owned()]
-            }
-            AuthMethod::OAuth => vec![format!(
-                "Run `goat provider login {id}` for device-code login."
-            )],
-            AuthMethod::ApiKey => vec![env_var.map_or_else(
-                || format!("Run `goat provider login {id} --key sk-...`."),
-                |var| format!("Set `{var}` or run `goat provider login {id} --key sk-...`."),
-            )],
-            AuthMethod::ApiKeyOrOAuth => vec![
-                format!("Run `goat provider login {id}` for OAuth device-code login."),
-                format!("Run `goat provider login {id} --key sk-...` to store an API key."),
-            ],
-        },
     }
 }
 
@@ -501,28 +631,6 @@ fn closest_provider_ids(provider: &str, ids: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn list(store: &CredentialStore, service: Option<CredentialService>) {
-    let entries: Vec<_> = store
-        .entries()
-        .into_iter()
-        .filter(|(key, _)| service.is_none_or(|service| key.service == service))
-        .collect();
-    if entries.is_empty() {
-        println!("no credentials stored");
-        return;
-    }
-    for (key, kind) in entries {
-        let kind = credential_kind_label(kind);
-        println!(
-            "{}/{}  {}/{}",
-            service_name(key.service),
-            key.provider,
-            key.account,
-            kind
-        );
-    }
-}
-
 fn logout(
     store: &CredentialStore,
     provider: &str,
@@ -537,18 +645,11 @@ fn logout(
         println!("disconnected {provider} ({account})");
     } else if service == CredentialService::Model {
         println!("no stored account found for {provider} ({account})");
-        println!("run `goat provider accounts` to see stored provider accounts");
+        println!("run `goat provider list` to see stored provider accounts");
     } else {
         println!("no credential found for {provider} ({account})");
     }
     Ok(())
-}
-
-fn service_name(service: CredentialService) -> &'static str {
-    match service {
-        CredentialService::Model => "model",
-        CredentialService::Search => "search",
-    }
 }
 
 fn prompt(message: &str) -> color_eyre::Result<String> {

@@ -3,6 +3,15 @@ mod grep;
 mod web_search;
 
 pub use glob::GlobTool;
+pub use goat_search_provider::{
+    SearchBuiltinTarget, SearchCredentialMetadata, SearchProviderKind, SearchProviderMetadata,
+    SearchTargetMetadata,
+};
+pub use goat_search_providers::{
+    build_search_account_config, configured_search_account, configured_search_provider,
+    configured_search_target, default_search_target, is_builtin_search_target,
+    search_builtin_targets, search_provider, search_providers,
+};
 pub use grep::GrepTool;
 pub use web_search::WebSearchTool;
 

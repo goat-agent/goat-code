@@ -314,12 +314,23 @@ impl StreamError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub type EndpointValidator = fn(&str) -> Result<String, String>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct LoginEndpointMetadata {
+    pub env_var: Option<&'static str>,
+    pub default: Option<&'static str>,
+    pub validate: Option<EndpointValidator>,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct ProviderMetadata {
     pub env_var: Option<&'static str>,
     pub validation: &'static str,
     pub endpoint: Option<&'static str>,
     pub oauth: Option<&'static str>,
+    pub login_endpoint: Option<LoginEndpointMetadata>,
+    pub setup: &'static [&'static str],
 }
 
 impl ProviderMetadata {
@@ -329,6 +340,8 @@ impl ProviderMetadata {
             validation: "network",
             endpoint: None,
             oauth: None,
+            login_endpoint: None,
+            setup: &[],
         }
     }
 }

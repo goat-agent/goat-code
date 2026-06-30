@@ -27,6 +27,12 @@ goat-provider-anthropic = { path = "crates/goat-provider-anthropic" }
 goat-provider-gemini = { path = "crates/goat-provider-gemini" }
 goat-provider-local = { path = "crates/goat-provider-local" }
 goat-providers = { path = "crates/goat-providers" }
+goat-search-provider = { path = "crates/goat-search-provider" }
+goat-search-provider-duckduckgo = { path = "crates/goat-search-provider-duckduckgo" }
+goat-search-provider-searxng = { path = "crates/goat-search-provider-searxng" }
+goat-search-provider-brave = { path = "crates/goat-search-provider-brave" }
+goat-search-provider-tavily = { path = "crates/goat-search-provider-tavily" }
+goat-search-providers = { path = "crates/goat-search-providers" }
 goat-agent = { path = "crates/goat-agent" }
 goat-tool = { path = "crates/goat-tool" }
 goat-sandbox = { path = "crates/goat-sandbox" }
