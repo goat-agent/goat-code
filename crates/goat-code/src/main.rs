@@ -3,12 +3,16 @@ mod cli;
 mod headless;
 mod logging;
 mod search;
+mod style;
 mod update;
 
 use clap::Parser;
 use color_eyre::eyre::eyre;
 
-use crate::cli::{Cli, Command, DaemonCommand, RemoteCommand, WorktreeCommand};
+use crate::{
+    cli::{Cli, Command, DaemonCommand, RemoteCommand, WorktreeCommand},
+    style::{ColorMode, Palette, print_row},
+};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -28,11 +32,6 @@ async fn main() -> color_eyre::Result<()> {
             reject_worktree(cli.worktree.as_ref())?;
             reject_continue(cli.r#continue)?;
             update::run(force).await
-        }
-        Some(Command::Auth(command)) => {
-            reject_worktree(cli.worktree.as_ref())?;
-            reject_continue(cli.r#continue)?;
-            auth::run(command).await
         }
         Some(Command::Provider(command)) => {
             reject_worktree(cli.worktree.as_ref())?;
@@ -202,25 +201,30 @@ async fn run_daemon_command(command: DaemonCommand) -> color_eyre::Result<()> {
             .await
             .map_err(color_eyre::Report::from)
         }
-        DaemonCommand::Status => {
+        DaemonCommand::List => {
             let sessions = goat_client::status(&socket_path).await?;
+            let color = ColorMode::detect();
             if sessions.is_empty() {
-                println!("no live sessions");
+                println!("{}", color.paint("no live sessions", Palette::Muted));
             } else {
-                for s in sessions {
-                    let flag = match s.state {
-                        goat_wire::SessionLiveState::WaitingOnAsk {} => " (waiting on ask)",
-                        _ => "",
-                    };
+                println!(
+                    "  {} {} {} {} {}",
+                    color.cell("session", Palette::Muted, 10),
+                    color.cell("state", Palette::Muted, 14),
+                    color.cell("windows", Palette::Muted, 8),
+                    color.cell("age", Palette::Muted, 8),
+                    color.paint("cwd", Palette::Muted)
+                );
+                for session in sessions {
+                    let (state, palette) = daemon_state(session.state);
                     println!(
-                        "#{} [{:?}] windows={} tokens={} age={}s {}{}",
-                        s.session.0,
-                        s.state,
-                        s.windows,
-                        s.tokens,
-                        s.age_ms / 1000,
-                        s.cwd,
-                        flag
+                        "{} {} {} {} {} {}",
+                        color.paint("●", palette),
+                        color.cell(format!("#{}", session.session.0), Palette::Provider, 10),
+                        color.cell(state, palette, 14),
+                        color.cell(session.windows.to_string(), Palette::Value, 8),
+                        color.cell(format!("{}s", session.age_ms / 1000), Palette::Value, 8),
+                        color.paint(session.cwd, Palette::Value)
                     );
                 }
             }
@@ -236,6 +240,14 @@ async fn run_daemon_command(command: DaemonCommand) -> color_eyre::Result<()> {
             println!("killed session #{session}");
             Ok(())
         }
+    }
+}
+
+fn daemon_state(state: goat_wire::SessionLiveState) -> (&'static str, Palette) {
+    match state {
+        goat_wire::SessionLiveState::Idle {} => ("idle", Palette::Local),
+        goat_wire::SessionLiveState::Active {} => ("active", Palette::Success),
+        goat_wire::SessionLiveState::WaitingOnAsk {} => ("waiting", Palette::Warning),
     }
 }
 
@@ -263,23 +275,48 @@ async fn run_remote_command(command: RemoteCommand) -> color_eyre::Result<()> {
         RemoteCommand::Pair { label } => {
             let label = label.unwrap_or_else(|| "device".to_owned());
             let info = goat_client::pair_device(&socket_path, label).await?;
-            println!("pairing code: {}", info.code);
-            println!("server fingerprint: {}", info.server_fingerprint);
-            if info.advertised.is_empty() {
-                println!("advertised address: (none configured)");
-            } else {
-                println!("advertised address: {}", info.advertised.join(", "));
-            }
+            let color = ColorMode::detect();
+            println!("{}", color.paint("pairing", Palette::Provider));
+            print_row(color, "code", &info.code, Palette::Value);
+            print_row(
+                color,
+                "fingerprint",
+                &info.server_fingerprint,
+                Palette::Value,
+            );
+            print_row(
+                color,
+                "address",
+                if info.advertised.is_empty() {
+                    "none configured".to_owned()
+                } else {
+                    info.advertised.join(", ")
+                },
+                Palette::Value,
+            );
             print_pairing_qr(&info);
             Ok(())
         }
-        RemoteCommand::Devices => {
+        RemoteCommand::List => {
             let devices = goat_client::list_devices(&socket_path).await?;
+            let color = ColorMode::detect();
             if devices.is_empty() {
-                println!("no paired devices");
+                println!("{}", color.paint("no paired devices", Palette::Muted));
             } else {
-                for d in devices {
-                    println!("{} [{}] paired_at={}", d.id, d.label, d.paired_at);
+                println!(
+                    "  {} {} {}",
+                    color.cell("device", Palette::Muted, 20),
+                    color.cell("label", Palette::Muted, 18),
+                    color.paint("paired", Palette::Muted)
+                );
+                for device in devices {
+                    println!(
+                        "{} {} {} {}",
+                        color.paint("●", Palette::Success),
+                        color.cell(device.id, Palette::Provider, 20),
+                        color.cell(device.label, Palette::Value, 18),
+                        color.paint(device.paired_at.to_string(), Palette::Value)
+                    );
                 }
             }
             Ok(())

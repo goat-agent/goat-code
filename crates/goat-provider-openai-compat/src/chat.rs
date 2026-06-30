@@ -99,6 +99,8 @@ impl OpenAiCompatProvider {
             validation: "local",
             endpoint: Some(base_url),
             oauth: None,
+            login_endpoint: None,
+            setup: &[],
         })
     }
 

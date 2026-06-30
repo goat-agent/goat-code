@@ -1,5 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
-use goat_auth::CredentialService;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "goat", version, about = "goat — a terminal coding agent")]
@@ -28,45 +27,49 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    #[command(about = "Update goat")]
     Update {
         #[arg(long)]
         force: bool,
     },
-    #[command(subcommand)]
-    Auth(AuthCommand),
     #[command(
         subcommand,
-        about = "Discover, connect, and disconnect model providers",
-        after_help = "Common flow:\n  goat provider list\n  goat provider info kimi-code\n  goat provider login kimi-code\n  goat provider accounts\n\nUse `goat provider accounts` for stored credentials only. Use `goat provider list` to discover available providers."
+        about = "Manage model providers",
+        after_help = "Common flow:
+  goat provider list
+  goat provider info <provider>
+  goat provider login <provider> --key <key>
+  goat provider logout <provider> <account>"
     )]
     Provider(ProviderCommand),
-    #[command(subcommand)]
+    #[command(subcommand, about = "Manage search providers")]
     Search(SearchCommand),
-    #[command(subcommand)]
+    #[command(subcommand, about = "Manage git worktrees")]
     Worktree(WorktreeCommand),
-    #[command(subcommand)]
+    #[command(subcommand, about = "Manage the local daemon")]
     Daemon(DaemonCommand),
-    #[command(subcommand)]
+    #[command(subcommand, about = "Manage paired remote devices")]
     Remote(RemoteCommand),
 }
 
 #[derive(Subcommand)]
 pub enum RemoteCommand {
+    #[command(about = "Pair a remote device")]
     Pair {
         #[arg(long, short)]
         label: Option<String>,
     },
-    #[command(visible_alias = "ls")]
-    Devices,
-    #[command(visible_alias = "rm")]
+    #[command(visible_alias = "ls", about = "List paired remote devices")]
+    List,
+    #[command(visible_alias = "rm", about = "Revoke a remote device")]
     Revoke { device: String },
 }
 
 #[derive(Subcommand)]
 pub enum DaemonCommand {
     Serve,
-    #[command(visible_alias = "ls")]
-    Status,
+    #[command(visible_alias = "ls", about = "List daemon sessions")]
+    List,
     Stop,
     Kill {
         session: u64,
@@ -74,104 +77,69 @@ pub enum DaemonCommand {
 }
 
 #[derive(Subcommand)]
-pub enum AuthCommand {
-    #[command(visible_alias = "add")]
-    Login {
-        provider: String,
-        #[arg(long, short)]
-        account: Option<String>,
-        #[arg(long)]
-        key: Option<String>,
-        #[arg(long, value_enum, default_value = "model")]
-        service: AuthServiceArg,
-    },
-    #[command(visible_alias = "ls")]
-    List,
-    #[command(visible_alias = "rm")]
-    Logout {
-        provider: String,
-        #[arg(long, short)]
-        account: Option<String>,
-        #[arg(long, value_enum, default_value = "model")]
-        service: AuthServiceArg,
-    },
-}
-
-#[derive(Subcommand)]
 pub enum ProviderCommand {
     #[command(
-        visible_alias = "add",
+        visible_alias = "ls",
+        about = "List model providers",
+        after_help = "Use `goat provider info <provider>` for setup details. Run bare `goat provider login` to pick from available providers."
+    )]
+    List,
+    #[command(
         about = "Connect a provider account",
-        after_help = "Examples:\n  goat provider login openrouter --key sk-...\n  goat provider login kimi-code\n  goat provider login zai-coding --key sk-...\n  goat provider login qwen --endpoint https://dashscope-us.aliyuncs.com/compatible-mode/v1 --key sk-...\n\nRun `goat provider list` to see available providers. Run `goat provider info <provider>` for setup details."
+        after_help = "Examples:
+  goat provider login
+  goat provider login <provider> --key <key>
+  goat provider login <provider>"
     )]
     Login {
-        #[arg(help = "Provider id, for example openrouter, kimi-code, or zai-coding")]
-        provider: String,
+        #[arg(help = "Provider id")]
+        provider: Option<String>,
         #[arg(long, short, help = "Account name to store, default: default")]
         account: Option<String>,
         #[arg(long, help = "API key for API-key providers")]
         key: Option<String>,
-        #[arg(
-            long,
-            value_name = "URL",
-            help = "Qwen DashScope OpenAI-compatible endpoint"
-        )]
+        #[arg(long, value_name = "URL", help = "Provider endpoint override")]
         endpoint: Option<String>,
     },
-    #[command(visible_alias = "ls", about = "List available model providers")]
-    List {
-        #[arg(
-            long,
-            help = "Show stored provider accounts instead of provider discovery"
-        )]
-        accounts: bool,
-    },
-    #[command(about = "Show stored model provider accounts")]
-    Accounts,
     #[command(about = "Show setup details for one provider")]
     Info { provider: String },
-    #[command(visible_alias = "rm", about = "Disconnect a stored provider account")]
+    #[command(visible_alias = "rm", about = "Remove a provider account")]
     Logout {
         provider: String,
-        #[arg(long, short)]
-        account: Option<String>,
+        #[arg(help = "Account name to remove")]
+        account: String,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum AuthServiceArg {
-    Model,
-    Search,
-}
-
-impl From<AuthServiceArg> for CredentialService {
-    fn from(value: AuthServiceArg) -> Self {
-        match value {
-            AuthServiceArg::Model => Self::Model,
-            AuthServiceArg::Search => Self::Search,
-        }
-    }
 }
 
 #[derive(Subcommand)]
 pub enum SearchCommand {
-    Add {
+    #[command(visible_alias = "ls", about = "List search providers")]
+    List,
+    #[command(about = "Show setup details for one search provider")]
+    Info {
+        provider: String,
+    },
+    #[command(about = "Connect a search provider account")]
+    Login {
         provider: String,
         #[arg(long, short)]
-        account: String,
+        account: Option<String>,
         #[arg(long)]
         endpoint: Option<String>,
         #[arg(long)]
         engine: Option<String>,
+        #[arg(long)]
+        key: Option<String>,
         #[arg(long)]
         default: bool,
     },
     Default {
         target: String,
     },
-    List,
-    Remove {
-        target: String,
+    #[command(visible_alias = "rm", about = "Remove a search provider account")]
+    Logout {
+        provider: String,
+        account: String,
     },
 }
 
@@ -187,7 +155,9 @@ pub enum WorktreeCommand {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command, ProviderCommand, WorktreeCommand};
+    use super::{
+        Cli, Command, DaemonCommand, ProviderCommand, RemoteCommand, SearchCommand, WorktreeCommand,
+    };
 
     #[test]
     fn parses_short_worktree_flag() {
@@ -271,7 +241,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Provider(ProviderCommand::Login { provider, key, .. }))
-                if provider == "openrouter" && key.as_deref() == Some("sk")
+                if provider.as_deref() == Some("openrouter") && key.as_deref() == Some("sk")
         ));
     }
 
@@ -280,25 +250,28 @@ mod tests {
         let cli = Cli::try_parse_from(["goat", "provider", "list"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Provider(ProviderCommand::List { accounts: false }))
+            Some(Command::Provider(ProviderCommand::List))
         ));
     }
 
     #[test]
-    fn parses_provider_list_accounts() {
-        let cli = Cli::try_parse_from(["goat", "provider", "list", "--accounts"]).unwrap();
+    fn parses_provider_list_alias() {
+        let cli = Cli::try_parse_from(["goat", "provider", "ls"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Provider(ProviderCommand::List { accounts: true }))
+            Some(Command::Provider(ProviderCommand::List))
         ));
     }
 
     #[test]
-    fn parses_provider_accounts() {
-        let cli = Cli::try_parse_from(["goat", "provider", "accounts"]).unwrap();
+    fn parses_provider_login_picker() {
+        let cli = Cli::try_parse_from(["goat", "provider", "login"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Provider(ProviderCommand::Accounts))
+            Some(Command::Provider(ProviderCommand::Login {
+                provider: None,
+                ..
+            }))
         ));
     }
 
@@ -318,16 +291,16 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Provider(ProviderCommand::Login { provider, endpoint, .. }))
-                if provider == "qwen" && endpoint.as_deref() == Some("https://dashscope-us.aliyuncs.com/compatible-mode/v1")
+                if provider.as_deref() == Some("qwen") && endpoint.as_deref() == Some("https://dashscope-us.aliyuncs.com/compatible-mode/v1")
         ));
     }
 
     #[test]
-    fn provider_login_help_mentions_list() {
+    fn provider_login_help_shows_examples() {
         let Err(error) = Cli::try_parse_from(["goat", "provider", "login", "--help"]) else {
             panic!("expected help error");
         };
-        assert!(error.to_string().contains("goat provider list"));
+        assert!(error.to_string().contains("goat provider login <provider>"));
     }
 
     #[test]
@@ -340,22 +313,40 @@ mod tests {
     }
 
     #[test]
-    fn provider_help_mentions_accounts() {
+    fn provider_help_mentions_login_flow() {
         let Err(error) = Cli::try_parse_from(["goat", "provider", "--help"]) else {
             panic!("expected help error");
         };
         let help = error.to_string();
-        assert!(help.contains("Discover, connect, and disconnect model providers"));
-        assert!(help.contains("goat provider accounts"));
+        assert!(help.contains("Manage model providers"));
+        assert!(help.contains("goat provider login <provider>"));
     }
 
     #[test]
     fn parses_provider_logout() {
-        let cli = Cli::try_parse_from(["goat", "provider", "logout", "openrouter"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["goat", "provider", "logout", "openrouter", "default"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Provider(ProviderCommand::Logout { provider, .. })) if provider == "openrouter"
+            Some(Command::Provider(ProviderCommand::Logout { provider, account }))
+                if provider == "openrouter" && account == "default"
         ));
+    }
+
+    #[test]
+    fn parses_provider_logout_alias() {
+        let cli = Cli::try_parse_from(["goat", "provider", "rm", "openrouter", "school"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Provider(ProviderCommand::Logout { provider, account }))
+                if provider == "openrouter" && account == "school"
+        ));
+    }
+
+    #[test]
+    fn provider_logout_requires_account() {
+        let result = Cli::try_parse_from(["goat", "provider", "rm", "openrouter"]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -372,19 +363,75 @@ mod tests {
     }
 
     #[test]
-    fn auth_still_accepts_service() {
-        let cli = Cli::try_parse_from([
-            "goat",
-            "auth",
-            "login",
-            "brave",
-            "--service",
-            "search",
-            "--key",
-            "key",
-        ])
-        .unwrap();
-        assert!(matches!(cli.command, Some(Command::Auth(_))));
+    fn parses_search_list() {
+        let cli = Cli::try_parse_from(["goat", "search", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Search(SearchCommand::List))
+        ));
+    }
+
+    #[test]
+    fn parses_search_login() {
+        let cli =
+            Cli::try_parse_from(["goat", "search", "login", "brave", "--key", "key"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Search(SearchCommand::Login { provider, key, .. }))
+                if provider == "brave" && key.as_deref() == Some("key")
+        ));
+    }
+
+    #[test]
+    fn search_add_alias_is_removed() {
+        let result = Cli::try_parse_from(["goat", "search", "add", "brave"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_search_logout_alias() {
+        let cli = Cli::try_parse_from(["goat", "search", "rm", "brave", "default"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Search(SearchCommand::Logout { provider, account }))
+                if provider == "brave" && account == "default"
+        ));
+    }
+
+    #[test]
+    fn parses_daemon_list_alias() {
+        let cli = Cli::try_parse_from(["goat", "daemon", "ls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Daemon(DaemonCommand::List))
+        ));
+    }
+
+    #[test]
+    fn daemon_status_is_removed() {
+        let result = Cli::try_parse_from(["goat", "daemon", "status"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_remote_list_alias() {
+        let cli = Cli::try_parse_from(["goat", "remote", "ls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Remote(RemoteCommand::List))
+        ));
+    }
+
+    #[test]
+    fn remote_devices_is_removed() {
+        let result = Cli::try_parse_from(["goat", "remote", "devices"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn auth_command_is_removed() {
+        let result = Cli::try_parse_from(["goat", "auth", "list"]);
+        assert!(result.is_err());
     }
 
     #[test]

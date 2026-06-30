@@ -461,6 +461,8 @@ impl Provider for CodexProvider {
             validation: "oauth",
             endpoint: None,
             oauth: Some("browser or device"),
+            login_endpoint: None,
+            setup: &[],
         }
     }
 

@@ -2,13 +2,35 @@ use std::path::PathBuf;
 
 use goat_auth::{Credential, CredentialKey, CredentialStore, TokenSet, ensure_valid};
 use goat_provider::{
-    AuthMethod, Capabilities, Effort, Model, Provider, ProviderId, ProviderMetadata, Request,
-    StreamError, StreamEvent, WebSearchOutput,
+    AuthMethod, Capabilities, Effort, LoginEndpointMetadata, Model, Provider, ProviderId,
+    ProviderMetadata, Request, StreamError, StreamEvent, WebSearchOutput,
 };
 use goat_provider_openai_compat::{ChatDiscovery, ChatValidation, OpenAiCompatProvider};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use serde::Deserialize;
 use tokio::{sync::mpsc, task::JoinHandle};
+
+const KIMI_SETUP: &[&str] = &[
+    "Kimi Platform API key provider.",
+    "For Kimi Code OAuth, use `goat provider login kimi-code`.",
+    "API-key setup: `goat provider login kimi --key sk-...`.",
+];
+const KIMI_CODE_SETUP: &[&str] = &[
+    "Kimi Code OAuth device-code login.",
+    "Run `goat provider login kimi-code`, open the URL, and enter the code.",
+];
+const QWEN_DEFAULT_ENDPOINT: &str = "https://dashscope-us.aliyuncs.com/compatible-mode/v1";
+const QWEN_SETUP: &[&str] = &[
+    "Qwen DashScope API-key provider.",
+    "Default endpoint: https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+    "Non-US workspaces: `goat provider login qwen --endpoint <url> --key sk-...`.",
+    "Qwen OAuth enrollment is discontinued upstream.",
+];
+const ZAI_CODING_SETUP: &[&str] = &[
+    "Z.AI Coding Plan API-key provider.",
+    "Use `ZAI_CODING_API_KEY` or `goat provider login zai-coding --key sk-...`.",
+    "This is not OAuth and does not reuse the standard `zai` credential.",
+];
 
 pub const OPENROUTER: &str = "openrouter";
 pub const GROQ: &str = "groq";
@@ -294,6 +316,8 @@ pub fn build_zai(store: &CredentialStore, account: &str) -> OpenAiCompatProvider
         validation: "catalog-only",
         endpoint: None,
         oauth: Some("not supported by Z.AI API docs"),
+        login_endpoint: None,
+        setup: &[],
     })
 }
 
@@ -317,6 +341,8 @@ pub fn build_zai_coding(store: &CredentialStore, account: &str) -> OpenAiCompatP
         validation: "catalog-only",
         endpoint: Some("https://api.z.ai/api/coding/paas/v4"),
         oauth: Some("not OAuth; uses Z.AI Coding Plan API key"),
+        login_endpoint: None,
+        setup: ZAI_CODING_SETUP,
     })
 }
 
@@ -340,6 +366,8 @@ pub fn build_kimi(store: &CredentialStore, account: &str) -> OpenAiCompatProvide
         validation: "catalog-only",
         endpoint: None,
         oauth: Some("Kimi Code OAuth is provider id kimi-code"),
+        login_endpoint: None,
+        setup: KIMI_SETUP,
     })
 }
 
@@ -359,7 +387,7 @@ pub fn build_qwen(store: &CredentialStore, account: &str) -> OpenAiCompatProvide
     });
     let endpoint = match endpoint_source {
         Some(raw) => validate_qwen_endpoint(&raw).ok(),
-        None => Some("https://dashscope-us.aliyuncs.com/compatible-mode/v1".to_owned()),
+        None => Some(QWEN_DEFAULT_ENDPOINT.to_owned()),
     };
     let bearer = endpoint.as_ref().and_then(|_| {
         store
@@ -368,8 +396,7 @@ pub fn build_qwen(store: &CredentialStore, account: &str) -> OpenAiCompatProvide
     });
     OpenAiCompatProvider::new(
         ProviderId::from(QWEN),
-        endpoint
-            .unwrap_or_else(|| "https://dashscope-us.aliyuncs.com/compatible-mode/v1".to_owned()),
+        endpoint.unwrap_or_else(|| QWEN_DEFAULT_ENDPOINT.to_owned()),
         bearer,
         AuthMethod::ApiKey,
     )
@@ -383,6 +410,12 @@ pub fn build_qwen(store: &CredentialStore, account: &str) -> OpenAiCompatProvide
         validation: "network",
         endpoint: Some("required for non-US DashScope workspaces"),
         oauth: Some("Qwen OAuth enrollment discontinued"),
+        login_endpoint: Some(LoginEndpointMetadata {
+            env_var: Some("QWEN_BASE_URL"),
+            default: Some(QWEN_DEFAULT_ENDPOINT),
+            validate: Some(validate_qwen_endpoint),
+        }),
+        setup: QWEN_SETUP,
     })
 }
 
@@ -409,6 +442,8 @@ fn hosted(
         validation: "network",
         endpoint: None,
         oauth: Some("not supported"),
+        login_endpoint: None,
+        setup: &[],
     })
 }
 
@@ -599,6 +634,8 @@ fn kimi_code_metadata() -> ProviderMetadata {
         validation: "network",
         endpoint: Some(KIMI_CODE_BASE_URL),
         oauth: Some("device code"),
+        login_endpoint: None,
+        setup: KIMI_CODE_SETUP,
     }
 }
 

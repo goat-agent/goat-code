@@ -225,6 +225,8 @@ impl Provider for GeminiProvider {
             validation: "network",
             endpoint: None,
             oauth: Some("browser"),
+            login_endpoint: None,
+            setup: &[],
         }
     }
 

@@ -19,12 +19,13 @@ goat-client = { workspace = true }
 goat-wire = { workspace = true }
 goat-protocol = { workspace = true }
 goat-provider = { workspace = true }
-goat-provider-hosted = { workspace = true }
 goat-providers = { workspace = true }
+goat-tool-search = { workspace = true }
 goat-auth = { workspace = true }
 goat-worktree = { workspace = true }
 tokio = { workspace = true, features = ["io-std"] }
 clap = { workspace = true }
+crossterm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 color-eyre = { workspace = true }
