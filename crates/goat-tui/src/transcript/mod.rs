@@ -106,6 +106,14 @@ impl Transcript {
         text: impl Into<String>,
         attachments: Vec<InputAttachment>,
     ) {
+        self.push_user_with_display(text, attachments);
+    }
+
+    pub fn push_user_with_display(
+        &mut self,
+        text: impl Into<String>,
+        attachments: Vec<InputAttachment>,
+    ) {
         self.bump_version();
         self.items.push(Item::User(UserMessage {
             text: text.into(),

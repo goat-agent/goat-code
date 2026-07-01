@@ -82,6 +82,7 @@ async fn drain_steering(ctx: &Ctx<'_>, run: &Run<'_>, conversation: &mut Convers
             .send(Event::UserMessage {
                 id: input.id,
                 text: input.text,
+                display: input.display,
                 attachments: input.attachments,
             })
             .await;

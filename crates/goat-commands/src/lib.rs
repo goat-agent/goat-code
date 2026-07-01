@@ -93,13 +93,17 @@ impl CommandRegistry {
 
 fn resolve_skill(skill: &SkillInfo, raw: &str, args: &str) -> CommandEffect {
     if skill.command.is_none() {
-        return CommandEffect::Submit(skill_invocation(&skill.name, args));
+        return CommandEffect::SubmitCommand {
+            display: skill_display(&skill.name, args),
+            prompt: skill_invocation(&skill.name, args),
+        };
     }
     let spec = skill_spec(skill);
     match spec.parse(raw, args) {
-        Ok(invocation) => {
-            CommandEffect::Submit(structured_skill_invocation(&skill.name, invocation))
-        }
+        Ok(invocation) => CommandEffect::SubmitCommand {
+            display: invocation.raw.clone(),
+            prompt: structured_skill_invocation(&skill.name, invocation),
+        },
         Err(error) => CommandEffect::Error(error.message()),
     }
 }
@@ -184,26 +188,27 @@ fn skill_value(value: &SkillParameterValue) -> ParameterValue {
     }
 }
 
-fn skill_invocation(name: &str, args: &str) -> String {
+fn skill_display(name: &str, args: &str) -> String {
     let args = args.trim();
     if args.is_empty() {
-        format!("Use the \"{name}\" skill.")
+        format!("/{name}")
     } else {
-        format!("Use the \"{name}\" skill.\n\n{args}")
+        format!("/{name} {args}")
     }
 }
 
-fn structured_skill_invocation(name: &str, invocation: CommandInvocation) -> String {
-    let mut text = format!("Use the \"{name}\" skill.");
-    if invocation.subcommand.is_some() || !invocation.parameters.is_empty() {
-        text.push_str("\n\nInvocation:");
-        if let Some(subcommand) = invocation.subcommand {
-            let _ = write!(text, "\n- subcommand: {subcommand}");
-        }
+fn skill_invocation(name: &str, args: &str) -> String {
+    skill_display(name, args)
+}
+
+fn structured_skill_invocation(_name: &str, invocation: CommandInvocation) -> String {
+    let mut text = invocation.raw.clone();
+    if !invocation.parameters.is_empty() {
+        text.push_str("\n\nArguments:");
         for parameter in invocation.parameters {
             let _ = write!(
                 text,
-                "\n- {}: {}",
+                "\n{}: {}",
                 parameter.name,
                 parsed_value(parameter.value)
             );
@@ -286,11 +291,11 @@ mod tests {
         let mut registry = CommandRegistry::builtin();
         registry.set_skills(&[skill("demo")]);
         match registry.resolve_line("/demo with args") {
-            CommandEffect::Submit(text) => {
-                assert!(text.contains("demo"));
-                assert!(text.contains("with args"));
+            CommandEffect::SubmitCommand { display, prompt } => {
+                assert_eq!(display, "/demo with args");
+                assert_eq!(prompt, "/demo with args");
             }
-            _ => panic!("expected submit effect"),
+            _ => panic!("expected submit command effect"),
         }
     }
 
@@ -313,7 +318,7 @@ mod tests {
         ));
         assert!(matches!(
             registry.resolve_line("/new"),
-            CommandEffect::Submit(_)
+            CommandEffect::SubmitCommand { .. }
         ));
     }
 
@@ -375,11 +380,16 @@ mod tests {
                 }],
             }),
         }]);
-        let CommandEffect::Submit(text) = registry.resolve_line("/review src/lib.rs") else {
-            panic!("expected submit");
+        let CommandEffect::SubmitCommand { display, prompt } =
+            registry.resolve_line("/review src/lib.rs")
+        else {
+            panic!("expected submit command");
         };
-        assert!(text.contains("Invocation:"));
-        assert!(text.contains("target: src/lib.rs"));
+        assert_eq!(display, "/review src/lib.rs");
+        assert_eq!(
+            prompt,
+            "/review src/lib.rs\n\nArguments:\ntarget: src/lib.rs"
+        );
     }
 
     #[test]
@@ -401,12 +411,16 @@ mod tests {
                 }],
             }),
         }]);
-        let CommandEffect::Submit(text) = registry.resolve_line("/review security auth flow")
+        let CommandEffect::SubmitCommand { display, prompt } =
+            registry.resolve_line("/review security auth flow")
         else {
-            panic!("expected submit");
+            panic!("expected submit command");
         };
-        assert!(text.contains("subcommand: security"));
-        assert!(text.contains("focus: auth flow"));
+        assert_eq!(display, "/review security auth flow");
+        assert_eq!(
+            prompt,
+            "/review security auth flow\n\nArguments:\nfocus: auth flow"
+        );
     }
 
     #[test]

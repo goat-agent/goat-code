@@ -145,6 +145,7 @@ pub(crate) async fn handle_turn(
     ctx: &Ctx<'_>,
     id: TaskId,
     text: String,
+    display: Option<String>,
     attachments: Vec<InputAttachment>,
     state: &mut SessionState,
     ops: &mut mpsc::Receiver<Op>,
@@ -154,6 +155,7 @@ pub(crate) async fn handle_turn(
         crate::UserInput {
             id,
             text,
+            display,
             attachments,
         },
         std::collections::VecDeque::new(),
@@ -259,11 +261,11 @@ pub(crate) async fn handle_shell(
                 biased;
                 output = &mut work => break ShellEnd::Done(output),
                 maybe_op = ops.recv() => match maybe_op {
-                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, attachments }) => {
+                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, display, attachments }) => {
                         steering
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push_back(crate::UserInput { id: msg_id, text: msg_text, attachments });
+                            .push_back(crate::UserInput { id: msg_id, text: msg_text, display, attachments });
                     }
                     Some(Op::DequeueMessage { id: msg_id }) => {
                         let removed = {
@@ -281,6 +283,7 @@ pub(crate) async fn handle_shell(
                                 .send(Event::MessageDequeued {
                                     id: queued.id,
                                     text: queued.text,
+                                    display: queued.display,
                                     attachments: queued.attachments,
                                 })
                                 .await;
@@ -427,11 +430,11 @@ pub(crate) async fn handle_compact(
                 biased;
                 outcome = &mut work => break outcome,
                 maybe_op = ops.recv() => match maybe_op {
-                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, attachments }) => {
+                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, display, attachments }) => {
                         steering
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push_back(crate::UserInput { id: msg_id, text: msg_text, attachments });
+                            .push_back(crate::UserInput { id: msg_id, text: msg_text, display, attachments });
                     }
                     Some(Op::DequeueMessage { id: msg_id }) => {
                         let removed = {
@@ -449,6 +452,7 @@ pub(crate) async fn handle_compact(
                                 .send(Event::MessageDequeued {
                                     id: queued.id,
                                     text: queued.text,
+                                    display: queued.display,
                                     attachments: queued.attachments,
                                 })
                                 .await;
@@ -561,6 +565,7 @@ async fn run_one_turn(
         .send(Event::UserMessage {
             id,
             text: text.clone(),
+            display: input.display.clone(),
             attachments: attachments.clone(),
         })
         .await
@@ -614,11 +619,11 @@ async fn run_one_turn(
                                 .await;
                         }
                     }
-                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, attachments }) => {
+                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, display, attachments }) => {
                         steering
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push_back(crate::UserInput { id: msg_id, text: msg_text, attachments });
+                            .push_back(crate::UserInput { id: msg_id, text: msg_text, display, attachments });
                     }
                     Some(Op::DequeueMessage { id: msg_id }) => {
                         let removed = {
@@ -636,6 +641,7 @@ async fn run_one_turn(
                                 .send(Event::MessageDequeued {
                                     id: queued.id,
                                     text: queued.text,
+                                    display: queued.display,
                                     attachments: queued.attachments,
                                 })
                                 .await;

@@ -129,12 +129,16 @@ pub enum Event {
     UserMessage {
         id: TaskId,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<InputAttachment>,
     },
     MessageDequeued {
         id: TaskId,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<InputAttachment>,
     },

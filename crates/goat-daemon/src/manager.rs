@@ -440,6 +440,7 @@ impl Manager {
                 .send(Op::SubmitMessage {
                     id: goat_protocol::TaskId(0),
                     text: message,
+                    display: None,
                     attachments: Vec::new(),
                 })
                 .await

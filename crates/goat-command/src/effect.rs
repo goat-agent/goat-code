@@ -11,6 +11,7 @@ pub enum CommandEffect {
     CompactConversation(Option<String>),
     RenameConversation(String),
     Submit(String),
+    SubmitCommand { display: String, prompt: String },
     Notice(String),
     Error(String),
     OpenUsage,
