@@ -1,5 +1,5 @@
 pub mod marker {
-    pub const USER: &str = "› ";
+    pub const USER: &str = "❯ ";
     pub const AGENT: &str = "● ";
     pub const NOTICE: &str = "→ ";
     pub const ERROR: &str = "✗ ";
