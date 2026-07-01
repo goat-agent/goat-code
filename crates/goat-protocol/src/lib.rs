@@ -65,6 +65,7 @@ mod tests {
         let op = Op::SubmitMessage {
             id: TaskId(1),
             text: "hi".to_owned(),
+            display: None,
             attachments: Vec::new(),
         };
         let json = serde_json::to_string(&op).unwrap();

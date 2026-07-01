@@ -93,7 +93,12 @@ pub struct App {
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
     pub(crate) clear_arm: Option<u16>,
-    pub(crate) queued: Vec<(TaskId, String, Vec<goat_protocol::InputAttachment>)>,
+    pub(crate) queued: Vec<(
+        TaskId,
+        String,
+        Option<String>,
+        Vec<goat_protocol::InputAttachment>,
+    )>,
     pub(crate) should_quit: bool,
     pub(crate) dirty: bool,
     pub(crate) scroll: usize,
@@ -423,6 +428,9 @@ impl App {
                 vec![Op::Compact { id, instructions }]
             }
             CommandEffect::Submit(text) => self.submit_text(text),
+            CommandEffect::SubmitCommand { display, prompt } => {
+                self.submit_command(display, prompt)
+            }
             CommandEffect::Notice(message) => {
                 self.push_toast(NotifyKind::Info, message);
                 Vec::new()
@@ -575,11 +583,32 @@ impl App {
             self.turn.active = Some(id);
             self.reset_agents();
         }
-        self.queued.push((id, text.clone(), attachments.clone()));
+        self.queued
+            .push((id, text.clone(), None, attachments.clone()));
         vec![Op::SubmitMessage {
             id,
             text,
+            display: None,
             attachments,
+        }]
+    }
+
+    pub(crate) fn submit_command(&mut self, display: String, prompt: String) -> Vec<Op> {
+        let id = TaskId(self.next_task);
+        self.next_task += 1;
+        self.follow = true;
+        self.dirty = true;
+        if self.turn.active.is_none() {
+            self.turn.active = Some(id);
+            self.reset_agents();
+        }
+        self.queued
+            .push((id, prompt.clone(), Some(display.clone()), Vec::new()));
+        vec![Op::SubmitMessage {
+            id,
+            text: prompt,
+            display: Some(display),
+            attachments: Vec::new(),
         }]
     }
 
@@ -589,9 +618,12 @@ impl App {
         }
         self.queued
             .iter()
-            .filter(|(id, _, _)| self.turn.active != Some(*id))
-            .map(|(_, text, attachments)| {
-                text.lines()
+            .filter(|(id, _, _, _)| self.turn.active != Some(*id))
+            .map(|(_, text, display, attachments)| {
+                display
+                    .as_deref()
+                    .unwrap_or(text)
+                    .lines()
                     .find(|line| !line.trim().is_empty())
                     .map_or_else(
                         || {
@@ -613,7 +645,7 @@ impl App {
         let restored: Vec<(String, Vec<goat_protocol::InputAttachment>)> = self
             .queued
             .drain(..)
-            .map(|(_, text, attachments)| (text, attachments))
+            .map(|(_, text, _, attachments)| (text, attachments))
             .collect();
         let draft = self.composer.text();
         self.composer.clear();
@@ -1220,6 +1252,7 @@ mod tests {
         app.on_engine(EngineEvent::UserMessage {
             id,
             text: "hello".to_owned(),
+            display: None,
             attachments: Vec::new(),
         });
         assert_eq!(user_lines(&app), 1);
@@ -1236,6 +1269,7 @@ mod tests {
         app.on_engine(EngineEvent::UserMessage {
             id: TaskId(42),
             text: "from another window".to_owned(),
+            display: None,
             attachments: Vec::new(),
         });
         assert_eq!(user_lines(&app), 1);
@@ -1250,6 +1284,7 @@ mod tests {
         app.on_engine(EngineEvent::UserMessage {
             id: TaskId(2),
             text: "mid turn".to_owned(),
+            display: None,
             attachments: Vec::new(),
         });
         assert_eq!(user_lines(&app), 1);
@@ -1280,6 +1315,7 @@ mod tests {
         app.on_engine(EngineEvent::UserMessage {
             id,
             text: "hello".to_owned(),
+            display: None,
             attachments: Vec::new(),
         });
         app.on_engine(EngineEvent::TaskStarted { id });
@@ -1998,6 +2034,7 @@ mod tests {
         app.on_engine(EngineEvent::UserMessage {
             id: top,
             text: "go".to_owned(),
+            display: None,
             attachments: Vec::new(),
         });
         app.on_engine(EngineEvent::ToolStarted {

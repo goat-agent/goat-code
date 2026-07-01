@@ -132,6 +132,7 @@ pub(crate) struct TurnIds {
 pub(crate) struct UserInput {
     pub(crate) id: TaskId,
     pub(crate) text: String,
+    pub(crate) display: Option<String>,
     pub(crate) attachments: Vec<goat_protocol::InputAttachment>,
 }
 
@@ -288,11 +289,13 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
             Op::SubmitMessage {
                 id,
                 text,
+                display,
                 attachments,
             } => {
                 let ctx = ctx!();
                 if let Flow::Shutdown =
-                    turn::handle_turn(&ctx, id, text, attachments, &mut state, &mut ops).await
+                    turn::handle_turn(&ctx, id, text, display, attachments, &mut state, &mut ops)
+                        .await
                 {
                     break;
                 }
@@ -636,6 +639,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "first".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -643,6 +647,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(2),
             text: "also do this".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -690,6 +695,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "first".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -697,6 +703,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(2),
             text: "typo message".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -732,6 +739,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "first".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -766,6 +774,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "first".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -783,6 +792,7 @@ mod tests {
                     ops.send(Op::SubmitMessage {
                         id: TaskId(2),
                         text: "follow up".to_owned(),
+                        display: None,
                         attachments: Vec::new(),
                     })
                     .await
@@ -888,6 +898,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "long running work".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -977,6 +988,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "long running work".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1105,6 +1117,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "go".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1144,6 +1157,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "go".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1183,6 +1197,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(4),
             text: "go".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1235,6 +1250,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "do it".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1285,6 +1301,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "do it".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1351,6 +1368,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "hi".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1396,6 +1414,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(9),
             text: "hi".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1436,6 +1455,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "hi".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1584,6 +1604,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "hello there".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1676,6 +1697,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "first".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await
@@ -1687,6 +1709,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(2),
             text: "second".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await

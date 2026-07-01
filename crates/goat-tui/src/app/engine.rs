@@ -140,12 +140,13 @@ impl App {
             EngineEvent::UserMessage {
                 id,
                 text,
+                display,
                 attachments,
             } => {
                 let sent_by_us = self
                     .queued
                     .iter()
-                    .position(|(queued_id, _, _)| *queued_id == id)
+                    .position(|(queued_id, _, _, _)| *queued_id == id)
                     .map(|pos| self.queued.remove(pos))
                     .is_some();
                 if !sent_by_us && self.turn.active.is_none() {
@@ -153,18 +154,19 @@ impl App {
                     self.follow = true;
                 }
                 self.transcript
-                    .push_user_with_attachments(text, attachments);
+                    .push_user_with_display(display.unwrap_or_else(|| text.clone()), attachments);
                 self.dirty = true;
             }
             EngineEvent::MessageDequeued {
                 id,
                 text,
+                display: _,
                 attachments,
             } => {
                 if let Some(pos) = self
                     .queued
                     .iter()
-                    .position(|(queued_id, _, _)| *queued_id == id)
+                    .position(|(queued_id, _, _, _)| *queued_id == id)
                 {
                     self.queued.remove(pos);
                 }

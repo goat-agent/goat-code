@@ -46,6 +46,7 @@ mod tests {
         ops.send(Op::SubmitMessage {
             id: TaskId(1),
             text: "hi".to_owned(),
+            display: None,
             attachments: Vec::new(),
         })
         .await

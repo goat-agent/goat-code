@@ -91,6 +91,7 @@ async fn submit_message_flows_back_as_events() {
         op: goat_protocol::Op::SubmitMessage {
             id: goat_protocol::TaskId(1),
             text: "hello".to_owned(),
+            display: None,
             attachments: Vec::new(),
         },
     })
