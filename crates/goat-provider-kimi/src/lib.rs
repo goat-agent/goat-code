@@ -1,7 +1,7 @@
 use goat_auth::CredentialStore;
 use goat_provider::ProviderMetadata;
 use goat_provider_openai_compat::{
-    ChatDiscovery, ChatValidation, OpenAiCompatProvider, api_key, no_efforts, no_vision,
+    ChatDiscovery, ChatValidation, OpenAiCompatProvider, api_key, no_efforts,
 };
 
 pub const PROVIDER_ID: &str = "kimi";
@@ -24,6 +24,7 @@ const CATALOG: &[&str] = &[
     "moonshot-v1-128k",
     "moonshot-v1-32k",
     "moonshot-v1-8k",
+    "moonshot-v1-auto",
 ];
 
 const CONTEXT: &[(&str, u32)] = &[
@@ -39,7 +40,7 @@ pub fn build(store: &CredentialStore, account: &str) -> OpenAiCompatProvider {
     api_key(store, account, PROVIDER_ID, BASE_URL, HOST, ENV_VAR)
         .with_catalog(CATALOG)
         .with_context_windows(CONTEXT)
-        .with_vision_filter(no_vision)
+        .with_vision_filter(kimi_vision_model)
         .with_efforts(no_efforts)
         .with_reasoning_effort(false)
         .with_validation(ChatValidation::CatalogOnly)
@@ -52,4 +53,9 @@ pub fn build(store: &CredentialStore, account: &str) -> OpenAiCompatProvider {
             login_endpoint: None,
             setup: KIMI_SETUP,
         })
+}
+
+fn kimi_vision_model(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    id.starts_with("kimi-k2.6") || id.contains("vision-preview")
 }

@@ -14,16 +14,23 @@ const CATALOG: &[&str] = &[
     "glm-5-turbo",
     "glm-5",
     "glm-4.7",
+    "glm-4.7-flash",
     "glm-4.6",
     "glm-4.5",
+    "glm-4.5-air",
     "glm-4-32b-0414-128k",
+    "glm-5v-turbo",
 ];
 
 const CONTEXT: &[(&str, u32)] = &[
     ("glm-5.2", 128_000),
     ("glm-5.1", 128_000),
     ("glm-5", 128_000),
-    ("glm-4", 128_000),
+    ("glm-4.7", 128_000),
+    ("glm-4.6", 128_000),
+    ("glm-4.5", 128_000),
+    ("glm-4-32b", 128_000),
+    ("glm-5v", 128_000),
 ];
 
 pub fn build(store: &CredentialStore, account: &str) -> OpenAiCompatProvider {
@@ -47,7 +54,11 @@ pub fn build(store: &CredentialStore, account: &str) -> OpenAiCompatProvider {
 
 fn zai_vision_model(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
-    id.contains("glm-4v") || id.contains("vision")
+    id.contains("glm-5v")
+        || id.contains("glm-4.6v")
+        || id.contains("glm-4.5v")
+        || id.contains("glm-4v")
+        || id.contains("vision")
 }
 
 fn zai_efforts(model: &str) -> Vec<Effort> {

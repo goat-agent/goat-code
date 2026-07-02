@@ -9,21 +9,21 @@ const HOST: &str = "openrouter.ai";
 const ENV_VAR: &str = "OPENROUTER_API_KEY";
 
 const CATALOG: &[&str] = &[
-    "anthropic/claude-sonnet-4.5",
-    "openai/gpt-5.1",
+    "anthropic/claude-sonnet-4.6",
+    "openai/gpt-5.4",
     "google/gemini-2.5-pro",
-    "deepseek/deepseek-chat-v3.1",
+    "deepseek/deepseek-chat-v3-0324",
     "qwen/qwen3-coder",
-    "moonshotai/kimi-k2",
+    "moonshotai/kimi-k2.6",
 ];
 
 const CONTEXT_WINDOWS: &[(&str, u32)] = &[
-    ("anthropic/claude-sonnet-4.5", 200_000),
-    ("openai/gpt-5", 400_000),
+    ("anthropic/claude-sonnet-4.6", 1_000_000),
+    ("openai/gpt-5.4", 1_000_000),
     ("google/gemini-2.5", 1_000_000),
-    ("deepseek/deepseek", 128_000),
-    ("qwen/qwen3-coder", 256_000),
-    ("moonshotai/kimi", 256_000),
+    ("deepseek/deepseek-chat-v3", 164_000),
+    ("qwen/qwen3-coder", 1_000_000),
+    ("moonshotai/kimi-k2.6", 262_144),
 ];
 
 fn is_chat_model(id: &str) -> bool {
