@@ -6,7 +6,7 @@ use goat_provider::{
     StreamError, StreamEvent, WebSearchOutput,
 };
 use goat_provider_openai_compat::{
-    OpenAiCompatProvider, enforce_https_host, no_efforts, no_vision,
+    ChatDiscovery, OpenAiCompatProvider, enforce_https_host, no_efforts, no_vision,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 
@@ -186,8 +186,11 @@ impl Provider for KimiCodeProvider {
                 Some(token),
                 AuthMethod::OAuth,
             )
+            .with_catalog(CATALOG)
+            .with_context_windows(CONTEXT_WINDOWS)
             .with_model_filter(chat_model)
-            .with_vision_filter(no_vision);
+            .with_vision_filter(no_vision)
+            .with_discovery(ChatDiscovery::CatalogOnly);
             let handle = provider.discover(out);
             let _ = handle.await;
         })

@@ -146,12 +146,12 @@ impl XaiProvider {
         .with_reasoning_effort(false)
     }
 
-    async fn emit_composer_models(out: &mpsc::Sender<Model>) -> bool {
-        for id in COMPOSER_CATALOG {
+    async fn emit_models(provider: &XaiProvider, out: &mpsc::Sender<Model>) -> bool {
+        for id in provider.list_models() {
             if out
                 .send(Model {
-                    id: (*id).to_owned(),
-                    supports_images: false,
+                    id: id.clone(),
+                    supports_images: vision_model(&id),
                 })
                 .await
                 .is_err()
@@ -193,6 +193,16 @@ impl Provider for XaiProvider {
 
     fn catalog(&self) -> &'static [&'static str] {
         CATALOG
+    }
+
+    fn list_models(&self) -> Vec<String> {
+        match self.store.get(&self.key) {
+            Some(Credential::ApiKey(_) | Credential::ApiKeyWithEndpoint { .. }) => {
+                API_KEY_CATALOG.iter().map(|id| (*id).to_owned()).collect()
+            }
+            Some(Credential::OAuth(_)) => OAUTH_CATALOG.iter().map(|id| (*id).to_owned()).collect(),
+            None => CATALOG.iter().map(|id| (*id).to_owned()).collect(),
+        }
     }
 
     fn efforts(&self, model: &str) -> Vec<Effort> {
@@ -290,39 +300,7 @@ impl Provider for XaiProvider {
         let key = self.key.clone();
         tokio::spawn(async move {
             let provider = XaiProvider { store, key };
-            let Some(auth) = provider.resolve_auth().await else {
-                for id in CATALOG {
-                    if out
-                        .send(Model {
-                            id: (*id).to_owned(),
-                            supports_images: vision_model(id),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                return;
-            };
-            match auth {
-                XaiAuth::ApiKey(bearer) => {
-                    let handle = XaiProvider::chat_provider(bearer).discover(out);
-                    let _ = handle.await;
-                }
-                XaiAuth::OAuth(bearer) => {
-                    let (bridge_tx, mut bridge_rx) = mpsc::channel(32);
-                    let responses = XaiProvider::responses_provider(bearer).discover(bridge_tx);
-                    while let Some(model) = bridge_rx.recv().await {
-                        if out.send(model).await.is_err() {
-                            let _ = responses.await;
-                            return;
-                        }
-                    }
-                    let _ = responses.await;
-                    let _ = XaiProvider::emit_composer_models(&out).await;
-                }
-            }
+            let _ = XaiProvider::emit_models(&provider, &out).await;
         })
     }
 
@@ -395,6 +373,50 @@ mod tests {
         assert_eq!(
             provider.efforts("grok-4.3"),
             vec![Effort::Low, Effort::Medium, Effort::High]
+        );
+    }
+
+    #[test]
+    fn list_models_follows_credential_kind() {
+        use goat_auth::{Credential, CredentialKey, SecretString, TokenSet};
+
+        let store = store("goat-provider-xai-list.json");
+        let oauth = build(&store, "oauth");
+        assert_eq!(oauth.list_models().len(), CATALOG.len());
+
+        store
+            .store(
+                &CredentialKey::model(PROVIDER_ID, "oauth"),
+                Credential::OAuth(TokenSet::from_parts(
+                    "access".to_owned(),
+                    Some("refresh".to_owned()),
+                    Some(3600),
+                    None,
+                )),
+            )
+            .unwrap();
+        let oauth = build(&store, "oauth");
+        assert_eq!(
+            oauth.list_models(),
+            OAUTH_CATALOG
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        );
+
+        store
+            .store(
+                &CredentialKey::model(PROVIDER_ID, "api"),
+                Credential::ApiKey(SecretString::from("xai-key".to_owned())),
+            )
+            .unwrap();
+        let api = build(&store, "api");
+        assert_eq!(
+            api.list_models(),
+            API_KEY_CATALOG
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
         );
     }
 }

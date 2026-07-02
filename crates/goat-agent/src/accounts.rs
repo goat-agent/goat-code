@@ -12,7 +12,7 @@ use goat_protocol::{
     AccountChoice, AccountEntry, AccountInfo, AuthMethod, Effort, Event, LoginCredential,
     LoginProvider, ModelEntry, ModelTarget, NotifyKind,
 };
-use goat_provider::Provider;
+use goat_provider::{ModelListSource, Provider};
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use goat_store::Store;
 use tokio::sync::mpsc;
@@ -140,11 +140,17 @@ pub(crate) async fn announce_startup(
             .await;
     }
     let providers = provider_accounts(registry, credentials);
-    let bg_events = events.clone();
-    tokio::spawn(async move {
-        let entries = discover_entries(providers).await;
-        let _ = bg_events.send(Event::ModelListChanged { entries }).await;
-    });
+    if providers
+        .iter()
+        .any(|(provider, _)| provider.model_list_source() == ModelListSource::Discover)
+    {
+        let bg_events = events.clone();
+        let bg_credentials = credentials.clone();
+        tokio::spawn(async move {
+            let entries = model_list_entries(&providers, &bg_credentials).await;
+            let _ = bg_events.send(Event::ModelListChanged { entries }).await;
+        });
+    }
 }
 
 pub(crate) struct LoginCtx<'a> {
@@ -377,22 +383,72 @@ fn model_entry(
 fn catalog_only(registry: &Registry, credentials: &CredentialStore) -> Vec<ModelEntry> {
     let mut entries = Vec::new();
     for provider in registry.all() {
+        if provider.model_list_source() != ModelListSource::Catalog {
+            continue;
+        }
         let Some(accounts) = accounts_for_provider(credentials, provider.as_ref()) else {
             continue;
         };
-        let provider_id = provider.id().to_string();
-        for &id in provider.catalog() {
-            entries.push(model_entry(
-                &provider_id,
-                id,
-                &accounts,
-                provider.efforts(id),
-                provider.context_window(id),
-                provider.supports_images(id),
-            ));
-        }
+        entries.extend(catalog_entries(credentials, &provider.id(), &accounts));
     }
     entries
+}
+
+fn models_for_provider(
+    credentials: &CredentialStore,
+    provider_id: &goat_provider::ProviderId,
+    accounts: &[String],
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut models = Vec::new();
+    for account in accounts {
+        let registry = Registry::load(credentials, account);
+        let Some(provider) = registry.get(provider_id) else {
+            continue;
+        };
+        for id in provider.list_models() {
+            if seen.insert(id.clone()) {
+                models.push(id);
+            }
+        }
+    }
+    models
+}
+
+fn catalog_entries(
+    credentials: &CredentialStore,
+    provider_id: &goat_provider::ProviderId,
+    accounts: &[String],
+) -> Vec<ModelEntry> {
+    let provider_id_str = provider_id.to_string();
+    models_for_provider(credentials, provider_id, accounts)
+        .into_iter()
+        .map(|id| {
+            let (efforts, context_window, supports_images) = accounts
+                .iter()
+                .find_map(|account| {
+                    Registry::load(credentials, account)
+                        .get(provider_id)
+                        .filter(|provider| provider.list_models().iter().any(|m| m == &id))
+                        .map(|provider| {
+                            (
+                                provider.efforts(&id),
+                                provider.context_window(&id),
+                                provider.supports_images(&id),
+                            )
+                        })
+                })
+                .unwrap_or((Vec::new(), None, false));
+            model_entry(
+                &provider_id_str,
+                &id,
+                accounts,
+                efforts,
+                context_window,
+                supports_images,
+            )
+        })
+        .collect()
 }
 
 fn provider_accounts(
@@ -409,7 +465,7 @@ fn provider_accounts(
         .collect()
 }
 
-async fn discover_provider(provider: Arc<dyn Provider>, accounts: Vec<String>) -> Vec<ModelEntry> {
+async fn discover_entries(provider: Arc<dyn Provider>, accounts: Vec<String>) -> Vec<ModelEntry> {
     let provider_id = provider.id().to_string();
     let (tx, mut rx) = mpsc::channel(32);
     let handle = provider.discover(tx);
@@ -421,45 +477,39 @@ async fn discover_provider(provider: Arc<dyn Provider>, accounts: Vec<String>) -
     };
     let _ = tokio::time::timeout(Duration::from_secs(3), collect).await;
     handle.abort();
-
-    let catalog = provider.catalog();
-    let catalog_ids: HashSet<&str> = catalog.iter().copied().collect();
-
-    let mut entries = Vec::new();
-    for &id in catalog {
-        entries.push(model_entry(
-            &provider_id,
-            id,
-            &accounts,
-            provider.efforts(id),
-            provider.context_window(id),
-            provider.supports_images(id),
-        ));
-    }
-    for info in discovered {
-        if catalog_ids.contains(info.id.as_str()) {
-            continue;
-        }
-        let efforts = provider.efforts(&info.id);
-        let ctx_win = provider.context_window(&info.id);
-        entries.push(model_entry(
-            &provider_id,
-            &info.id,
-            &accounts,
-            efforts,
-            ctx_win,
-            info.supports_images || provider.supports_images(&info.id),
-        ));
-    }
-    entries
+    discovered
+        .into_iter()
+        .map(|info| {
+            model_entry(
+                &provider_id,
+                &info.id,
+                &accounts,
+                provider.efforts(&info.id),
+                provider.context_window(&info.id),
+                info.supports_images || provider.supports_images(&info.id),
+            )
+        })
+        .collect()
 }
 
-async fn discover_entries(providers: Vec<(Arc<dyn Provider>, Vec<String>)>) -> Vec<ModelEntry> {
-    futures::future::join_all(
-        providers
-            .into_iter()
-            .map(|(provider, accounts)| discover_provider(provider, accounts)),
-    )
+async fn model_list_for_provider(
+    provider: Arc<dyn Provider>,
+    accounts: Vec<String>,
+    credentials: &CredentialStore,
+) -> Vec<ModelEntry> {
+    match provider.model_list_source() {
+        ModelListSource::Catalog => catalog_entries(credentials, &provider.id(), &accounts),
+        ModelListSource::Discover => discover_entries(provider, accounts).await,
+    }
+}
+
+async fn model_list_entries(
+    providers: &[(Arc<dyn Provider>, Vec<String>)],
+    credentials: &CredentialStore,
+) -> Vec<ModelEntry> {
+    futures::future::join_all(providers.iter().map(|(provider, accounts)| {
+        model_list_for_provider(Arc::clone(provider), accounts.clone(), credentials)
+    }))
     .await
     .into_iter()
     .flatten()
@@ -470,7 +520,8 @@ pub(crate) async fn discover_ready(
     registry: &Registry,
     credentials: &CredentialStore,
 ) -> Vec<ModelEntry> {
-    discover_entries(provider_accounts(registry, credentials)).await
+    let providers = provider_accounts(registry, credentials);
+    model_list_entries(&providers, credentials).await
 }
 
 pub(crate) fn clear_account_registries(cache: &std::sync::Mutex<HashMap<String, Arc<Registry>>>) {
@@ -496,4 +547,88 @@ pub(crate) fn provider_for(
         .entry(account.to_owned())
         .or_insert_with(|| Arc::new(Registry::load(ctx.credentials, account)))
         .get(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use goat_auth::{Credential, CredentialStore, SecretString};
+    use goat_provider::{ModelListSource, Provider, ProviderId};
+
+    use super::{catalog_only, models_for_provider};
+    use goat_providers::Registry;
+
+    fn store(name: &str) -> CredentialStore {
+        let path = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_file(&path);
+        CredentialStore::new(path)
+    }
+
+    fn model_list_source_check(provider: &dyn Provider) -> ModelListSource {
+        provider.model_list_source()
+    }
+
+    #[test]
+    fn local_providers_use_discover_only_lists() {
+        let store = store("goat-agent-accounts-local.json");
+        let registry = Registry::new(&store);
+        let ollama = registry
+            .get(&ProviderId::from("ollama"))
+            .expect("ollama provider");
+        assert_eq!(
+            model_list_source_check(ollama.as_ref()),
+            ModelListSource::Discover
+        );
+        assert!(ollama.catalog().is_empty());
+    }
+
+    #[test]
+    fn hosted_providers_use_catalog_lists() {
+        let store = store("goat-agent-accounts-hosted.json");
+        let registry = Registry::new(&store);
+        let openai = registry
+            .get(&ProviderId::from("openai"))
+            .expect("openai provider");
+        assert_eq!(
+            model_list_source_check(openai.as_ref()),
+            ModelListSource::Catalog
+        );
+        assert!(!openai.catalog().is_empty());
+    }
+
+    #[test]
+    fn catalog_only_skips_local_providers() {
+        let store = store("goat-agent-accounts-catalog-only.json");
+        let registry = Registry::new(&store);
+        let entries = catalog_only(&registry, &store);
+        assert!(entries.iter().all(|entry| entry.provider != "ollama"));
+    }
+
+    #[test]
+    fn xai_models_follow_account_credential_kind() {
+        let store = store("goat-agent-accounts-xai.json");
+        store
+            .store(
+                &goat_auth::CredentialKey::model("xai", "oauth"),
+                Credential::OAuth(goat_auth::TokenSet::from_parts(
+                    "access".to_owned(),
+                    Some("refresh".to_owned()),
+                    Some(3600),
+                    None,
+                )),
+            )
+            .unwrap();
+        store
+            .store(
+                &goat_auth::CredentialKey::model("xai", "api"),
+                Credential::ApiKey(SecretString::from("xai-key".to_owned())),
+            )
+            .unwrap();
+        let oauth_models =
+            models_for_provider(&store, &ProviderId::from("xai"), &["oauth".to_owned()]);
+        assert!(oauth_models.iter().any(|id| id == "grok-4.3"));
+        assert!(!oauth_models.iter().any(|id| id == "grok-4"));
+        let api_models = models_for_provider(&store, &ProviderId::from("xai"), &["api".to_owned()]);
+        assert!(api_models.iter().any(|id| id == "grok-4"));
+        assert!(!api_models.iter().any(|id| id == "grok-composer-2.5-fast"));
+    }
 }
