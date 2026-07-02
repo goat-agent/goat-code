@@ -11,6 +11,7 @@ publish = false
 goat-protocol = { workspace = true }
 goat-commands = { workspace = true }
 goat-config = { workspace = true }
+goat-worktree = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 ratatui = { workspace = true }

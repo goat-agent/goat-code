@@ -2643,6 +2643,7 @@ dependencies = [
  "goat-commands",
  "goat-config",
  "goat-protocol",
+ "goat-worktree",
  "image",
  "percent-encoding",
  "pulldown-cmark",
