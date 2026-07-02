@@ -267,6 +267,15 @@ impl Manager {
                 break;
             }
         }
+        let catalog_refresh = {
+            let inner = live.inner.lock().await;
+            if inner.snapshot.is_some() {
+                let credentials = CredentialStore::new(self.inner.auth_path.clone());
+                Some(goat_agent::model_list_entries(&credentials).await)
+            } else {
+                None
+            }
+        };
         let (backlog, live_rx) = {
             let mut inner = live.inner.lock().await;
             let mut backlog = Vec::new();
@@ -290,6 +299,17 @@ impl Manager {
                     session,
                     seq: *seq,
                     event: event.clone(),
+                });
+            }
+            if let Some(entries) = catalog_refresh {
+                let event = goat_protocol::Event::ModelListChanged { entries };
+                let seq = inner.next_seq;
+                inner.next_seq += 1;
+                inner.log.push_back((seq, event.clone()));
+                backlog.push(ServerFrame::Event {
+                    session,
+                    seq,
+                    event,
                 });
             }
             let (bridge_tx, bridge_rx) = mpsc::channel(SUBSCRIBER_QUEUE);

@@ -526,6 +526,15 @@ pub(crate) async fn discover_ready(
     model_list_entries(&providers, credentials).await
 }
 
+pub(crate) async fn refresh_model_list(
+    events: &mpsc::Sender<Event>,
+    registry: &Registry,
+    credentials: &CredentialStore,
+) {
+    let entries = discover_ready(registry, credentials).await;
+    let _ = events.send(Event::ModelListChanged { entries }).await;
+}
+
 pub(crate) fn clear_account_registries(cache: &std::sync::Mutex<HashMap<String, Arc<Registry>>>) {
     cache
         .lock()

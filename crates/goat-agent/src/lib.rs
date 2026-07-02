@@ -39,6 +39,11 @@ mod websearch;
 
 pub use agent::{AgentRegistry, AgentSpec, ToolSelection};
 
+pub async fn model_list_entries(credentials: &CredentialStore) -> Vec<goat_protocol::ModelEntry> {
+    let registry = Registry::new(credentials);
+    accounts::discover_ready(&registry, credentials).await
+}
+
 const CHILD_ID_BASE: u64 = 1 << 32;
 
 pub struct GoatAgent {
@@ -387,6 +392,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     &events,
                 )
                 .await;
+                accounts::refresh_model_list(&events, &registry, &credentials).await;
             }
             Op::ResumeLatest {} => {
                 threads::handle_resume_latest(
@@ -400,6 +406,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     &events,
                 )
                 .await;
+                accounts::refresh_model_list(&events, &registry, &credentials).await;
             }
             Op::RenameThread { title } => {
                 threads::handle_rename(&store, state.thread_id, title, &events).await;
@@ -1566,17 +1573,27 @@ mod tests {
         assert_eq!(messages[0].role, "shell");
 
         ops.send(Op::Resume { thread_id: 1 }).await.unwrap();
+        let mut restored = false;
+        let mut refreshed = false;
         while let Some(event) = events.recv().await {
-            if let Event::ConversationRestored { entries, .. } = event {
-                assert!(entries.iter().any(|entry| matches!(
-                    entry,
-                    goat_protocol::TranscriptEntry::Shell { command, output }
-                        if command == "echo persisted" && output.contains("persisted")
-                )));
-                return;
+            match event {
+                Event::ConversationRestored { entries, .. } => {
+                    assert!(entries.iter().any(|entry| matches!(
+                        entry,
+                        goat_protocol::TranscriptEntry::Shell { command, output }
+                            if command == "echo persisted" && output.contains("persisted")
+                    )));
+                    restored = true;
+                }
+                Event::ModelListChanged { .. } if restored => {
+                    refreshed = true;
+                    break;
+                }
+                _ => {}
             }
         }
-        panic!("expected ConversationRestored");
+        assert!(restored, "expected ConversationRestored");
+        assert!(refreshed, "expected ModelListChanged after resume");
     }
 
     #[tokio::test]
