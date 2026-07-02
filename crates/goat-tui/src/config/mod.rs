@@ -426,9 +426,9 @@ impl Config {
                     .saturating_add(OVERLAY_CHROME)
                     .clamp(10, 30)
             }
-            InputStage::Choosing { .. } => 8,
-            InputStage::Adding { .. } => 9,
-            InputStage::Waiting { .. } => 6,
+            InputStage::Choosing { .. } => clamp_u16(2).saturating_add(OVERLAY_CHROME).clamp(8, 12),
+            InputStage::Adding { .. } => clamp_u16(4).saturating_add(OVERLAY_CHROME).clamp(9, 14),
+            InputStage::Waiting { .. } => clamp_u16(2).saturating_add(OVERLAY_CHROME).clamp(6, 10),
         }
     }
 

@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     cli::ProviderCommand,
-    style::{ColorMode, Palette, print_row},
+    style::{ColorMode, Palette, print_row, truncate_to_width},
 };
 
 pub async fn run_provider(command: ProviderCommand) -> color_eyre::Result<()> {
@@ -83,7 +83,6 @@ struct ProviderChoice {
 struct ProviderPicker {
     choices: Vec<ProviderChoice>,
     selected: usize,
-    rendered_lines: u16,
 }
 
 impl ProviderPicker {
@@ -91,22 +90,27 @@ impl ProviderPicker {
         Self {
             choices,
             selected: 0,
-            rendered_lines: 0,
         }
     }
 
     fn pick(mut self) -> Result<String> {
         terminal::enable_raw_mode()?;
-        let result = self.pick_raw();
+        let mut stdout = std::io::stdout();
+        execute!(
+            stdout,
+            terminal::EnterAlternateScreen,
+            cursor::Hide,
+            terminal::Clear(ClearType::All)
+        )?;
+        let result = self.pick_raw(&mut stdout);
+        execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
         terminal::disable_raw_mode()?;
         result
     }
 
-    fn pick_raw(&mut self) -> Result<String> {
-        let mut stdout = std::io::stdout();
-        execute!(stdout, cursor::Hide)?;
+    fn pick_raw(&mut self, stdout: &mut std::io::Stdout) -> Result<String> {
         loop {
-            self.render(&mut stdout)?;
+            self.render(stdout)?;
             if let TermEvent::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -117,19 +121,10 @@ impl ProviderPicker {
                     KeyCode::Char('k') if key.modifiers.is_empty() => self.move_up(),
                     KeyCode::Char('j') if key.modifiers.is_empty() => self.move_down(),
                     KeyCode::Enter => {
-                        let id = self.choices[self.selected].id.clone();
-                        self.clear(&mut stdout)?;
-                        execute!(stdout, cursor::Show)?;
-                        return Ok(id);
+                        return Ok(self.choices[self.selected].id.clone());
                     }
-                    KeyCode::Esc => {
-                        self.clear(&mut stdout)?;
-                        execute!(stdout, cursor::Show)?;
-                        return Err(eyre!("provider login cancelled"));
-                    }
+                    KeyCode::Esc => return Err(eyre!("provider login cancelled")),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.clear(&mut stdout)?;
-                        execute!(stdout, cursor::Show)?;
                         return Err(eyre!("provider login cancelled"));
                     }
                     _ => {}
@@ -146,36 +141,58 @@ impl ProviderPicker {
         self.selected = (self.selected + 1).min(self.choices.len().saturating_sub(1));
     }
 
-    fn render(&mut self, stdout: &mut std::io::Stdout) -> Result<()> {
-        self.clear(stdout)?;
+    fn render(&self, stdout: &mut std::io::Stdout) -> Result<()> {
+        execute!(
+            stdout,
+            cursor::MoveTo(0, 0),
+            terminal::Clear(ClearType::All)
+        )?;
         let color = ColorMode::detect();
-        writeln!(stdout, "select provider")?;
+        writeln!(stdout)?;
+        writeln!(
+            stdout,
+            "  {}",
+            color.paint("select provider", Palette::Muted)
+        )?;
+        writeln!(stdout)?;
+        writeln!(
+            stdout,
+            "  {} {}",
+            color.cell("provider", Palette::Muted, PROVIDER_WIDTH),
+            color.cell("status", Palette::Muted, STATUS_WIDTH)
+        )?;
         for (index, choice) in self.choices.iter().enumerate() {
             let marker = if index == self.selected { "›" } else { " " };
             writeln!(
                 stdout,
-                "{} {} {}",
-                color.paint(marker, Palette::Provider),
-                color.cell(&choice.id, Palette::Provider, PROVIDER_WIDTH),
-                color.paint(choice.status.compact_label(), choice.status.palette())
+                "  {}",
+                format_provider_row(color, marker, &choice.id, &choice.status, Palette::Provider,)
             )?;
         }
+        writeln!(stdout)?;
+        writeln!(
+            stdout,
+            "  {}",
+            color.paint("↑↓ choose   ↵ continue   esc cancel", Palette::Muted)
+        )?;
         stdout.flush()?;
-        self.rendered_lines = self.choices.len().saturating_add(1).min(u16::MAX as usize) as u16;
         Ok(())
     }
+}
 
-    fn clear(&self, stdout: &mut std::io::Stdout) -> Result<()> {
-        if self.rendered_lines > 0 {
-            execute!(
-                stdout,
-                cursor::MoveUp(self.rendered_lines),
-                cursor::MoveToColumn(0),
-                terminal::Clear(ClearType::FromCursorDown)
-            )?;
-        }
-        Ok(())
-    }
+fn format_provider_row(
+    color: ColorMode,
+    marker: &str,
+    id: &str,
+    status: &ConnectionStatus,
+    id_palette: Palette,
+) -> String {
+    format!(
+        "{} {} {}",
+        color.paint(marker, id_palette),
+        color.cell(id, id_palette, PROVIDER_WIDTH),
+        color.cell(status.compact_label(), status.palette(), STATUS_WIDTH)
+    )
 }
 
 async fn login(
@@ -337,17 +354,13 @@ fn list_provider_lines_with_color(store: &CredentialStore, color: ColorMode) -> 
         let account = account_preview(&accounts);
         let line = if account.is_empty() {
             format!(
-                "{} {} {}",
-                color.paint(status.icon(), status.palette()),
-                color.cell(&id, Palette::Provider, PROVIDER_WIDTH),
-                color.paint(status.compact_label(), status.palette())
+                "  {}",
+                format_provider_row(color, status.icon(), &id, &status, Palette::Provider)
             )
         } else {
             format!(
-                "{} {} {} {}",
-                color.paint(status.icon(), status.palette()),
-                color.cell(&id, Palette::Provider, PROVIDER_WIDTH),
-                color.cell(status.compact_label(), status.palette(), STATUS_WIDTH),
+                "  {} {}",
+                format_provider_row(color, status.icon(), &id, &status, Palette::Provider),
                 color.paint(account, Palette::Value)
             )
         };
@@ -459,14 +472,7 @@ fn provider_account_details(accounts: &[(String, CredentialKind)]) -> String {
 }
 
 fn truncate_label(label: &str, width: usize) -> String {
-    let count = label.chars().count();
-    if count <= width {
-        return label.to_owned();
-    }
-    let keep = width.saturating_sub(1);
-    let mut truncated = label.chars().take(keep).collect::<String>();
-    truncated.push('…');
-    truncated
+    truncate_to_width(label, width)
 }
 
 struct ConnectionStatus {
@@ -700,6 +706,24 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("goat provider list"));
+    }
+
+    #[test]
+    fn provider_row_columns_align() {
+        let status = super::ConnectionStatus {
+            kind: super::ConnectionKind::Disconnected,
+            label: "not connected".to_owned(),
+        };
+        let row = super::format_provider_row(
+            crate::style::ColorMode::Plain,
+            "›",
+            "openrouter",
+            &status,
+            crate::style::Palette::Provider,
+        );
+        assert!(row.starts_with("› "));
+        assert!(row.contains("openrouter"));
+        assert!(row.contains("missing"));
     }
 
     #[test]

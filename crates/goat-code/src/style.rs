@@ -1,5 +1,7 @@
 use std::io::IsTerminal;
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 #[derive(Clone, Copy)]
 pub enum ColorMode {
     Plain,
@@ -24,9 +26,9 @@ impl ColorMode {
     }
 
     pub fn cell(self, text: impl AsRef<str>, palette: Palette, width: usize) -> String {
-        let text = text.as_ref();
-        let pad = width.saturating_sub(text.chars().count());
-        format!("{}{}", self.paint(text, palette), " ".repeat(pad))
+        let shown = truncate_to_width(text.as_ref(), width);
+        let pad = width.saturating_sub(shown.width());
+        format!("{}{}", self.paint(&shown, palette), " ".repeat(pad))
     }
 }
 
@@ -55,10 +57,52 @@ impl Palette {
     }
 }
 
+pub fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if s.width() <= max_width {
+        return s.to_owned();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for c in s.chars() {
+        let char_width = UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + char_width + 1 > max_width {
+            break;
+        }
+        out.push(c);
+        width += char_width;
+    }
+    out.push('…');
+    out
+}
+
 pub fn print_row(color: ColorMode, label: &str, value: impl AsRef<str>, palette: Palette) {
     println!(
         "  {} {}",
         color.cell(label, Palette::Muted, 10),
         color.paint(value, palette)
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use unicode_width::UnicodeWidthStr;
+
+    use super::{ColorMode, Palette, truncate_to_width};
+
+    #[test]
+    fn cell_respects_display_width() {
+        let color = ColorMode::Plain;
+        let cell = color.cell("한글provider", Palette::Provider, 12);
+        assert_eq!(cell.width(), 12);
+    }
+
+    #[test]
+    fn truncate_fits_width() {
+        let truncated = truncate_to_width("very long provider name", 10);
+        assert!(truncated.width() <= 10);
+        assert!(truncated.ends_with('…'));
+    }
 }
