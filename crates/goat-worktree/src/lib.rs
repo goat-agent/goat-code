@@ -1,6 +1,9 @@
 mod error;
 mod git;
 mod metadata;
+mod workspace;
+
+pub use workspace::{Workspace, WorkspaceKind, workspace};
 
 use std::{
     fs,
@@ -451,7 +454,10 @@ fn copy_worktree_include(invocation_cwd: &Path, target: &Path) -> Result<(), Wor
 mod tests {
     use std::{fs, path::Path, process::Command, process::Stdio};
 
-    use super::{EXCLUDE_ENTRY, WorktreeError, prepare_from_cwd, remove_from_cwd, validate_label};
+    use super::{
+        EXCLUDE_ENTRY, WorkspaceKind, WorktreeError, prepare_from_cwd, remove_from_cwd,
+        validate_label, workspace,
+    };
     use crate::git::{branch_exists, parse_worktrees};
 
     fn git_available() -> bool {
@@ -584,6 +590,34 @@ mod tests {
             &["status", "--porcelain=v1", "--untracked-files=normal"],
         );
         assert!(status.trim().is_empty());
+    }
+
+    #[test]
+    fn workspace_main_from_repo_root() {
+        let Some(dir) = git_repo_with_origin() else {
+            return;
+        };
+        let repo = dir.path().join("repo");
+        let ws = workspace(&repo).unwrap();
+        assert_eq!(ws.kind, WorkspaceKind::Main);
+        assert_eq!(ws.owner_root, repo.canonicalize().unwrap());
+        assert_eq!(ws.git_branch, "main");
+    }
+
+    #[test]
+    fn workspace_managed_from_worktree_path() {
+        let Some(dir) = git_repo_with_origin() else {
+            return;
+        };
+        let repo = dir.path().join("repo");
+        let launch = prepare_from_cwd("plan", &repo).unwrap();
+        let ws = workspace(&launch.path).unwrap();
+        assert!(matches!(
+            ws.kind,
+            WorkspaceKind::Managed { ref label } if label == "plan"
+        ));
+        assert_eq!(ws.owner_root, repo.canonicalize().unwrap());
+        assert_eq!(ws.git_branch, "worktree-plan");
     }
 
     #[test]

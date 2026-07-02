@@ -1,3 +1,4 @@
+use goat_worktree::WorkspaceKind;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
@@ -7,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, Overlay},
+    app::{App, Overlay, shorten_home},
     layout::{LIST_MAX, PAD_X, SCROLL_GUTTER, format_tokens},
     overlay, symbols,
     theme::Theme,
@@ -294,6 +295,93 @@ fn fit_cwd(cwd: &str, max: usize) -> String {
     )
 }
 
+fn repo_basename(path: &std::path::Path) -> String {
+    path.file_name()
+        .map_or_else(|| shorten_home(path), |n| n.to_string_lossy().into_owned())
+}
+
+pub(crate) fn location_line_full(ws: &goat_worktree::Workspace) -> String {
+    let repo = repo_basename(&ws.owner_root);
+    match &ws.kind {
+        WorkspaceKind::Managed { label } => format!("{repo}@{label}"),
+        WorkspaceKind::Main | WorkspaceKind::OtherWorktree => {
+            if ws.git_branch.is_empty() {
+                repo
+            } else {
+                format!("{repo}:{}", ws.git_branch)
+            }
+        }
+    }
+}
+
+fn fit_location_line(ws: &goat_worktree::Workspace, max: usize) -> String {
+    let full = location_line_full(ws);
+    if full.width() <= max {
+        return full;
+    }
+    let repo = repo_basename(&ws.owner_root);
+    match &ws.kind {
+        WorkspaceKind::Managed { label } => {
+            let tail = format!("@{label}");
+            let repo_max = max.saturating_sub(tail.width());
+            format!("{}{tail}", fit_cwd(&repo, repo_max))
+        }
+        WorkspaceKind::Main | WorkspaceKind::OtherWorktree => {
+            if ws.git_branch.is_empty() {
+                return fit_cwd(&repo, max);
+            }
+            let branch_w = ws.git_branch.width() + 1;
+            let short_repo = fit_cwd(&repo, max.saturating_sub(branch_w));
+            format!("{short_repo}:{}", ws.git_branch)
+        }
+    }
+}
+
+fn workspace_location_spans(
+    ws: &goat_worktree::Workspace,
+    theme: Theme,
+) -> (Vec<Span<'static>>, usize) {
+    let repo = repo_basename(&ws.owner_root);
+    let mut spans = Vec::new();
+    let mut width = 0;
+    match &ws.kind {
+        WorkspaceKind::Managed { label } => {
+            width += repo.width();
+            spans.push(Span::styled(repo.clone(), theme.muted()));
+            width += 1;
+            spans.push(Span::styled("@", theme.muted()));
+            width += label.width();
+            spans.push(Span::styled(label.clone(), theme.text()));
+        }
+        WorkspaceKind::Main | WorkspaceKind::OtherWorktree => {
+            width += repo.width();
+            spans.push(Span::styled(repo, theme.muted()));
+            if !ws.git_branch.is_empty() {
+                width += 1;
+                spans.push(Span::styled(":", theme.muted()));
+                let branch = ws.git_branch.clone();
+                width += branch.width();
+                spans.push(Span::styled(branch, theme.text()));
+            }
+        }
+    }
+    (spans, width)
+}
+
+fn fit_workspace_location_spans(
+    ws: &goat_worktree::Workspace,
+    max: usize,
+    theme: Theme,
+) -> (Vec<Span<'static>>, usize) {
+    let (spans, width) = workspace_location_spans(ws, theme);
+    if width <= max {
+        return (spans, width);
+    }
+    let fitted = fit_location_line(ws, max);
+    let w = fitted.width();
+    (vec![Span::styled(fitted, theme.muted())], w)
+}
+
 pub(crate) fn model_status_label(
     model: &goat_protocol::ModelTarget,
     multiple_accounts: bool,
@@ -378,10 +466,14 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         + usize::from(windows.is_some()))
         * 2;
     let status_w = model_w + ctx_w + rates_w + windows_w + status_gap;
-    let cwd = fit_cwd(app.cwd(), inner_w.saturating_sub(status_w));
-
-    let mut spans: Vec<Span> = vec![Span::styled(cwd.clone(), theme.muted())];
-    let left_w = cwd.width();
+    let left_max = inner_w.saturating_sub(status_w);
+    let (mut spans, left_w) = if let Some(ws) = app.workspace_snapshot() {
+        fit_workspace_location_spans(ws, left_max, theme)
+    } else {
+        let cwd = fit_cwd(app.cwd(), left_max);
+        let w = cwd.width();
+        (vec![Span::styled(cwd, theme.muted())], w)
+    };
     let pad = inner_w.saturating_sub(left_w + status_w);
     if pad > 0 {
         spans.push(Span::raw(" ".repeat(pad)));
@@ -451,6 +543,7 @@ mod tests {
     use goat_protocol::{Effort, ModelTarget};
 
     use super::{format_ctx_status, format_rate_status, model_status_label};
+    use goat_worktree::WorkspaceKind;
 
     fn target(effort: Option<Effort>) -> ModelTarget {
         ModelTarget {
@@ -495,6 +588,30 @@ mod tests {
     fn window_label_shown_for_multiple_windows() {
         assert_eq!(super::window_label(2), Some("\u{29c9} 2".to_owned()));
         assert_eq!(super::window_label(5), Some("\u{29c9} 5".to_owned()));
+    }
+
+    #[test]
+    fn location_line_main() {
+        let ws = goat_worktree::Workspace {
+            owner_root: std::path::PathBuf::from("/x/goat-code"),
+            repo_root: std::path::PathBuf::from("/x/goat-code"),
+            git_branch: "main".to_owned(),
+            kind: WorkspaceKind::Main,
+        };
+        assert_eq!(super::location_line_full(&ws), "goat-code:main");
+    }
+
+    #[test]
+    fn location_line_managed() {
+        let ws = goat_worktree::Workspace {
+            owner_root: std::path::PathBuf::from("/x/goat-code"),
+            repo_root: std::path::PathBuf::from("/x/goat-code/.goat/worktrees/plan"),
+            git_branch: "worktree-plan".to_owned(),
+            kind: WorkspaceKind::Managed {
+                label: "plan".to_owned(),
+            },
+        };
+        assert_eq!(super::location_line_full(&ws), "goat-code@plan");
     }
 
     #[test]
