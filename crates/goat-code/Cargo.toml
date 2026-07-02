@@ -25,7 +25,8 @@ goat-auth = { workspace = true }
 goat-worktree = { workspace = true }
 tokio = { workspace = true, features = ["io-std"] }
 clap = { workspace = true }
-crossterm = { workspace = true }
+dialoguer = { workspace = true }
+console = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 color-eyre = { workspace = true }

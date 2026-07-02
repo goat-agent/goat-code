@@ -10,7 +10,15 @@ pub enum ColorMode {
 
 impl ColorMode {
     pub fn detect() -> Self {
-        if std::env::var_os("NO_COLOR").is_some() || !std::io::stdout().is_terminal() {
+        Self::detect_stream(std::io::stdout().is_terminal())
+    }
+
+    pub fn detect_stderr() -> Self {
+        Self::detect_stream(std::io::stderr().is_terminal())
+    }
+
+    fn detect_stream(is_terminal: bool) -> Self {
+        if std::env::var_os("NO_COLOR").is_some() || !is_terminal {
             Self::Plain
         } else {
             Self::Ansi

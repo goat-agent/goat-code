@@ -1,27 +1,24 @@
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::time::Duration;
 
-use color_eyre::eyre::{Result, eyre};
-use crossterm::{
-    cursor,
-    event::{self, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{self, ClearType},
-};
+use color_eyre::eyre::Result;
 use goat_auth::{
     Credential, CredentialKey, CredentialKind, CredentialService, CredentialStore, SecretString,
 };
-use goat_provider::{AuthMethod, ProviderId, ProviderMetadata};
+use goat_provider::{AuthMethod, LoginEndpointMetadata, ProviderId, ProviderMetadata};
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
 use tokio::sync::mpsc;
 
 use crate::{
     cli::ProviderCommand,
+    cli_ui::{self, AuthPick, ProviderPick},
+    provider_table,
     style::{ColorMode, Palette, print_row, truncate_to_width},
 };
 
 pub async fn run_provider(command: ProviderCommand) -> color_eyre::Result<()> {
-    let path = goat_config::auth_path().ok_or_else(|| eyre!(goat_config::HOME_NOT_FOUND))?;
+    let path =
+        goat_config::auth_path().ok_or_else(|| cli_ui::report(goat_config::HOME_NOT_FOUND))?;
     let store = CredentialStore::new(path);
     match command {
         ProviderCommand::Login {
@@ -49,14 +46,29 @@ pub async fn run_provider(command: ProviderCommand) -> color_eyre::Result<()> {
 }
 
 fn pick_login_provider(store: &CredentialStore) -> Result<String> {
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        return Err(eyre!(
-            "provider is required when stdin/stdout is not a terminal"
-        ));
-    }
     let registry = Registry::new(store);
     let stored = store.entries();
-    let choices = registry
+    let choices = login_provider_choices(&registry, &stored);
+    if choices.is_empty() {
+        return Err(cli_ui::report("no login-capable providers available"));
+    }
+    let items = choices
+        .iter()
+        .map(|choice| ProviderPick {
+            id: choice.id.clone(),
+            status: choice.status.compact_label().to_owned(),
+            status_palette: choice.status.palette(),
+        })
+        .collect::<Vec<_>>();
+    let index = cli_ui::pick_provider(&items)?;
+    Ok(choices[index].id.clone())
+}
+
+fn login_provider_choices(
+    registry: &Registry,
+    stored: &[(CredentialKey, CredentialKind)],
+) -> Vec<LoginProviderChoice> {
+    registry
         .all()
         .iter()
         .filter(|provider| !matches!(provider.capabilities().auth, AuthMethod::None))
@@ -64,135 +76,16 @@ fn pick_login_provider(store: &CredentialStore) -> Result<String> {
             let id = provider.id().to_string();
             let caps = provider.capabilities();
             let metadata = provider.metadata();
-            let accounts = provider_accounts(&stored, &id);
+            let accounts = provider_accounts(stored, &id);
             let status = connection_status(caps.auth, metadata.env_var, &accounts);
-            ProviderChoice { id, status }
+            LoginProviderChoice { id, status }
         })
-        .collect::<Vec<_>>();
-    if choices.is_empty() {
-        return Err(eyre!("no login-capable providers available"));
-    }
-    ProviderPicker::new(choices).pick()
+        .collect()
 }
 
-struct ProviderChoice {
+struct LoginProviderChoice {
     id: String,
     status: ConnectionStatus,
-}
-
-struct ProviderPicker {
-    choices: Vec<ProviderChoice>,
-    selected: usize,
-}
-
-impl ProviderPicker {
-    fn new(choices: Vec<ProviderChoice>) -> Self {
-        Self {
-            choices,
-            selected: 0,
-        }
-    }
-
-    fn pick(mut self) -> Result<String> {
-        terminal::enable_raw_mode()?;
-        let mut stdout = std::io::stdout();
-        execute!(
-            stdout,
-            terminal::EnterAlternateScreen,
-            cursor::Hide,
-            terminal::Clear(ClearType::All)
-        )?;
-        let result = self.pick_raw(&mut stdout);
-        execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
-        terminal::disable_raw_mode()?;
-        result
-    }
-
-    fn pick_raw(&mut self, stdout: &mut std::io::Stdout) -> Result<String> {
-        loop {
-            self.render(stdout)?;
-            if let TermEvent::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Up => self.move_up(),
-                    KeyCode::Down => self.move_down(),
-                    KeyCode::Char('k') if key.modifiers.is_empty() => self.move_up(),
-                    KeyCode::Char('j') if key.modifiers.is_empty() => self.move_down(),
-                    KeyCode::Enter => {
-                        return Ok(self.choices[self.selected].id.clone());
-                    }
-                    KeyCode::Esc => return Err(eyre!("provider login cancelled")),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Err(eyre!("provider login cancelled"));
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    fn move_down(&mut self) {
-        self.selected = (self.selected + 1).min(self.choices.len().saturating_sub(1));
-    }
-
-    fn render(&self, stdout: &mut std::io::Stdout) -> Result<()> {
-        execute!(
-            stdout,
-            cursor::MoveTo(0, 0),
-            terminal::Clear(ClearType::All)
-        )?;
-        let color = ColorMode::detect();
-        writeln!(stdout)?;
-        writeln!(
-            stdout,
-            "  {}",
-            color.paint("select provider", Palette::Muted)
-        )?;
-        writeln!(stdout)?;
-        writeln!(
-            stdout,
-            "  {} {}",
-            color.cell("provider", Palette::Muted, PROVIDER_WIDTH),
-            color.cell("status", Palette::Muted, STATUS_WIDTH)
-        )?;
-        for (index, choice) in self.choices.iter().enumerate() {
-            let marker = if index == self.selected { "›" } else { " " };
-            writeln!(
-                stdout,
-                "  {}",
-                format_provider_row(color, marker, &choice.id, &choice.status, Palette::Provider,)
-            )?;
-        }
-        writeln!(stdout)?;
-        writeln!(
-            stdout,
-            "  {}",
-            color.paint("↑↓ choose   ↵ continue   esc cancel", Palette::Muted)
-        )?;
-        stdout.flush()?;
-        Ok(())
-    }
-}
-
-fn format_provider_row(
-    color: ColorMode,
-    marker: &str,
-    id: &str,
-    status: &ConnectionStatus,
-    id_palette: Palette,
-) -> String {
-    format!(
-        "{} {} {}",
-        color.paint(marker, id_palette),
-        color.cell(id, id_palette, PROVIDER_WIDTH),
-        color.cell(status.compact_label(), status.palette(), STATUS_WIDTH)
-    )
 }
 
 async fn login(
@@ -213,64 +106,115 @@ async fn login(
     let metadata = provider_handle.metadata();
 
     if endpoint.is_some() && metadata.login_endpoint.is_none() {
-        return Err(eyre!("--endpoint is not supported for provider {provider}"));
+        return cli_ui::fail_hint(
+            format!("--endpoint is not supported for provider {provider}"),
+            "omit --endpoint for this provider",
+        );
     }
     if key.is_some() && matches!(method, AuthMethod::OAuth) {
-        return Err(eyre!(
-            "--key is not supported for OAuth-only provider {provider}"
-        ));
+        return cli_ui::fail_hint(
+            format!("--key is not supported for OAuth-only provider {provider}"),
+            "run without --key to start device-code login",
+        );
     }
     if endpoint.is_some() && matches!(method, AuthMethod::OAuth) {
-        return Err(eyre!(
-            "--endpoint is not supported for OAuth-only provider {provider}"
-        ));
+        return cli_ui::fail_hint(
+            format!("--endpoint is not supported for OAuth-only provider {provider}"),
+            "omit --endpoint for this provider",
+        );
     }
 
     let credential_key = CredentialKey::model(provider, account);
 
-    let use_oauth = match method {
-        AuthMethod::None => {
-            println!("{provider} requires no login");
-            return Ok(());
-        }
-        AuthMethod::ApiKey => false,
-        AuthMethod::OAuth => true,
-        AuthMethod::ApiKeyOrOAuth => key.is_none(),
-    };
-
-    if use_oauth {
-        let (status, mut lines) = mpsc::channel::<String>(16);
-        let printer = tokio::spawn(async move {
-            while let Some(line) = lines.recv().await {
-                println!("{line}");
-            }
-        });
-        let tokens = registry
-            .login(provider, status)
-            .await
-            .map_err(|err| eyre!(err))?;
-        let _ = printer.await;
-        store
-            .store(&credential_key, Credential::OAuth(tokens))
-            .map_err(|err| eyre!(err.to_string()))?;
-    } else {
-        let secret = match key {
-            Some(key) => key,
-            None => prompt(&format!("enter API key for {provider}: "))?,
-        };
-        let secret = secret.trim().to_owned();
-        if secret.is_empty() {
-            return Err(eyre!("no API key provided"));
-        }
-        let credential = api_key_credential(secret, endpoint, metadata)?;
-        store
-            .store(&credential_key, credential)
-            .map_err(|err| eyre!(err.to_string()))?;
+    if matches!(method, AuthMethod::None) {
+        return Ok(());
     }
 
-    println!("stored credential for {provider} ({account})");
+    let auth_pick = if key.is_some() {
+        AuthPick::ApiKey
+    } else {
+        cli_ui::pick_auth_method(provider, method)?
+    };
+
+    match auth_pick {
+        AuthPick::OAuth => {
+            let (status, mut lines) = mpsc::channel::<String>(16);
+            let printer = tokio::spawn(async move {
+                while let Some(line) = lines.recv().await {
+                    cli_ui::oauth_status(&line);
+                }
+            });
+            let tokens = registry
+                .login(provider, status)
+                .await
+                .map_err(cli_ui::report)?;
+            let _ = printer.await;
+            store
+                .store(&credential_key, Credential::OAuth(tokens))
+                .map_err(storage_error)?;
+        }
+        AuthPick::ApiKey => {
+            let secret = match key {
+                Some(key) => key,
+                None => cli_ui::prompt_api_key(provider)?,
+            };
+            if secret.is_empty() {
+                return cli_ui::fail("no API key provided");
+            }
+            let endpoint = resolve_login_endpoint(endpoint, metadata.login_endpoint)?;
+            let credential = api_key_credential(secret, Some(endpoint), metadata)?;
+            store
+                .store(&credential_key, credential)
+                .map_err(storage_error)?;
+        }
+    }
+
+    cli_ui::success(&format!("stored credential for {provider} ({account})"));
     verify(store, provider, account).await;
     Ok(())
+}
+
+fn resolve_login_endpoint(
+    endpoint: Option<String>,
+    login_endpoint: Option<LoginEndpointMetadata>,
+) -> color_eyre::Result<String> {
+    let Some(endpoint_metadata) = login_endpoint else {
+        return Ok(String::new());
+    };
+    let endpoint = endpoint
+        .or_else(|| {
+            endpoint_metadata
+                .env_var
+                .and_then(|env_var| std::env::var(env_var).ok())
+        })
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let endpoint = match endpoint {
+        Some(endpoint) => endpoint,
+        None if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() => {
+            cli_ui::prompt_endpoint(endpoint_metadata.default)?
+        }
+        None => endpoint_metadata
+            .default
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                cli_ui::report_hint(
+                    "endpoint is required for this provider",
+                    "pass --endpoint or set the provider env var",
+                )
+            })?,
+    };
+    if endpoint.is_empty() {
+        return Err(cli_ui::report_hint(
+            "endpoint is required for this provider",
+            "pass --endpoint or set the provider env var",
+        ));
+    }
+    if let Some(validate) = endpoint_metadata.validate {
+        validate(&endpoint).map_err(cli_ui::report)
+    } else {
+        Ok(endpoint)
+    }
 }
 
 fn api_key_credential(
@@ -281,16 +225,14 @@ fn api_key_credential(
     let Some(endpoint_metadata) = metadata.login_endpoint else {
         return Ok(Credential::ApiKey(SecretString::from(secret)));
     };
-    let endpoint = endpoint
-        .or_else(|| {
-            endpoint_metadata
-                .env_var
-                .and_then(|env_var| std::env::var(env_var).ok())
-        })
-        .or_else(|| endpoint_metadata.default.map(str::to_owned))
-        .ok_or_else(|| eyre!("endpoint is required for this provider"))?;
+    let endpoint = endpoint.filter(|value| !value.is_empty()).ok_or_else(|| {
+        cli_ui::report_hint(
+            "endpoint is required for this provider",
+            "pass --endpoint or set the provider env var",
+        )
+    })?;
     let endpoint = if let Some(validate) = endpoint_metadata.validate {
-        validate(&endpoint).map_err(|err| eyre!(err))?
+        validate(&endpoint).map_err(cli_ui::report)?
     } else {
         endpoint
     };
@@ -316,18 +258,12 @@ async fn verify(store: &CredentialStore, provider: &str, account: &str) {
     let _ = tokio::time::timeout(Duration::from_secs(5), collect).await;
     handle.abort();
     if count > 0 {
-        println!("verified: {count} models available");
+        cli_ui::success(&format!("verified: {count} models"));
     } else if provider.verifies_credentials() {
-        println!("warning: could not verify credential (no models returned)");
-    } else {
-        println!(
-            "stored but not verified: this provider uses a catalog-only model list; validation will happen on first request"
-        );
+        cli_ui::warning("could not verify credential");
     }
 }
 
-const PROVIDER_WIDTH: usize = 15;
-const STATUS_WIDTH: usize = 10;
 const ACCOUNT_WIDTH: usize = 22;
 
 #[cfg(test)]
@@ -339,12 +275,7 @@ fn list_provider_lines(store: &CredentialStore) -> Vec<String> {
 fn list_provider_lines_with_color(store: &CredentialStore, color: ColorMode) -> Vec<String> {
     let registry = Registry::new(store);
     let stored = store.entries();
-    let mut lines = vec![format!(
-        "  {} {} {}",
-        color.cell("provider", Palette::Muted, PROVIDER_WIDTH),
-        color.cell("status", Palette::Muted, STATUS_WIDTH),
-        color.paint("account", Palette::Muted)
-    )];
+    let mut lines = vec![provider_table::header(color, true)];
     for provider in registry.all() {
         let id = provider.id().to_string();
         let caps = provider.capabilities();
@@ -352,25 +283,23 @@ fn list_provider_lines_with_color(store: &CredentialStore, color: ColorMode) -> 
         let accounts = provider_accounts(&stored, &id);
         let status = connection_status(caps.auth, metadata.env_var, &accounts);
         let account = account_preview(&accounts);
-        let line = if account.is_empty() {
-            format!(
-                "  {}",
-                format_provider_row(color, status.icon(), &id, &status, Palette::Provider)
-            )
-        } else {
-            format!(
-                "  {} {}",
-                format_provider_row(color, status.icon(), &id, &status, Palette::Provider),
-                color.paint(account, Palette::Value)
-            )
-        };
-        lines.push(line);
+        let account = (!account.is_empty()).then_some(account.as_str());
+        lines.push(provider_table::row(
+            color,
+            status.icon(),
+            status.palette(),
+            &id,
+            status.compact_label(),
+            status.palette(),
+            account,
+        ));
     }
     lines
 }
 
 fn list_providers(store: &CredentialStore) {
     let color = ColorMode::detect();
+    println!();
     for line in list_provider_lines_with_color(store, color) {
         println!("{line}");
     }
@@ -615,14 +544,25 @@ fn unknown_provider_error(provider: &str, registry: &Registry) -> color_eyre::Re
     let mut ids: Vec<String> = registry.all().iter().map(|p| p.id().to_string()).collect();
     ids.sort();
     let suggestions = closest_provider_ids(provider, &ids);
-    if suggestions.is_empty() {
-        eyre!("unknown provider: {provider}. run `goat provider list` to see available providers")
+    let message = if suggestions.is_empty() {
+        format!("unknown provider: {provider}")
     } else {
-        eyre!(
-            "unknown provider: {provider}. did you mean {}? run `goat provider list` to see available providers",
+        format!(
+            "unknown provider: {provider} · did you mean {}",
             suggestions.join(", ")
         )
-    }
+    };
+    cli_ui::report_hint(
+        message,
+        "run `goat provider list` to see available providers",
+    )
+}
+
+fn storage_error(err: impl std::fmt::Display) -> color_eyre::Report {
+    cli_ui::report_hint(
+        format!("could not update credential store: {err}"),
+        "check permissions on ~/.goat-code",
+    )
 }
 
 fn closest_provider_ids(provider: &str, ids: &[String]) -> Vec<String> {
@@ -647,23 +587,14 @@ fn logout(
         CredentialService::Model => CredentialKey::model(provider, account),
         CredentialService::Search => CredentialKey::search(provider, account),
     };
-    if store.remove(&key).map_err(|err| eyre!(err.to_string()))? {
-        println!("disconnected {provider} ({account})");
+    if store.remove(&key).map_err(storage_error)? {
+        cli_ui::success(&format!("disconnected {provider} ({account})"));
     } else if service == CredentialService::Model {
-        println!("no stored account found for {provider} ({account})");
-        println!("run `goat provider list` to see stored provider accounts");
+        cli_ui::warning(&format!("no stored account for {provider} ({account})"));
     } else {
-        println!("no credential found for {provider} ({account})");
+        cli_ui::warning(&format!("no credential found for {provider} ({account})"));
     }
     Ok(())
-}
-
-fn prompt(message: &str) -> color_eyre::Result<String> {
-    print!("{message}");
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    Ok(line)
 }
 
 #[cfg(test)]
@@ -706,24 +637,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("goat provider list"));
-    }
-
-    #[test]
-    fn provider_row_columns_align() {
-        let status = super::ConnectionStatus {
-            kind: super::ConnectionKind::Disconnected,
-            label: "not connected".to_owned(),
-        };
-        let row = super::format_provider_row(
-            crate::style::ColorMode::Plain,
-            "›",
-            "openrouter",
-            &status,
-            crate::style::Palette::Provider,
-        );
-        assert!(row.starts_with("› "));
-        assert!(row.contains("openrouter"));
-        assert!(row.contains("missing"));
     }
 
     #[test]

@@ -1,9 +1,12 @@
 mod auth;
 mod cli;
+mod cli_ui;
 mod headless;
 mod logging;
+mod provider_table;
 mod search;
 mod style;
+mod theme;
 mod update;
 
 use clap::Parser;
