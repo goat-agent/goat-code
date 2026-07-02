@@ -1,5 +1,5 @@
 [package]
-name = "goat-provider-openai-compat"
+name = "goat-provider-mistral"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,13 +9,8 @@ publish = false
 
 [dependencies]
 goat-provider = { workspace = true }
+goat-provider-openai-compat = { workspace = true }
 goat-auth = { workspace = true }
-reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-futures = { workspace = true }
-eventsource-stream = { workspace = true }
-tokio = { workspace = true }
 
 [lints]
 workspace = true

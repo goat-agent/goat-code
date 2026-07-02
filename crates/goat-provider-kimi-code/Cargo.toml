@@ -1,5 +1,5 @@
 [package]
-name = "goat-provider-hosted"
+name = "goat-provider-kimi-code"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,6 @@ goat-provider = { workspace = true }
 goat-provider-openai-compat = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 

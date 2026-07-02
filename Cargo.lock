@@ -2151,6 +2151,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "goat-provider-deepseek"
+version = "0.1.18"
+dependencies = [
+ "goat-auth",
+ "goat-provider",
+ "goat-provider-openai-compat",
+]
+
+[[package]]
 name = "goat-provider-gemini"
 version = "0.1.18"
 dependencies = [
@@ -2168,7 +2177,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "goat-provider-hosted"
+name = "goat-provider-groq"
+version = "0.1.18"
+dependencies = [
+ "goat-auth",
+ "goat-provider",
+ "goat-provider-openai-compat",
+]
+
+[[package]]
+name = "goat-provider-kimi"
+version = "0.1.18"
+dependencies = [
+ "goat-auth",
+ "goat-provider",
+ "goat-provider-openai-compat",
+]
+
+[[package]]
+name = "goat-provider-kimi-code"
 version = "0.1.18"
 dependencies = [
  "goat-auth",
@@ -2176,7 +2203,6 @@ dependencies = [
  "goat-provider-openai-compat",
  "reqwest 0.12.28",
  "serde",
- "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -2185,6 +2211,15 @@ dependencies = [
 name = "goat-provider-local"
 version = "0.1.18"
 dependencies = [
+ "goat-provider",
+ "goat-provider-openai-compat",
+]
+
+[[package]]
+name = "goat-provider-mistral"
+version = "0.1.18"
+dependencies = [
+ "goat-auth",
  "goat-provider",
  "goat-provider-openai-compat",
 ]
@@ -2221,11 +2256,63 @@ version = "0.1.18"
 dependencies = [
  "eventsource-stream",
  "futures",
+ "goat-auth",
  "goat-provider",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "goat-provider-openrouter"
+version = "0.1.18"
+dependencies = [
+ "goat-auth",
+ "goat-provider",
+ "goat-provider-openai-compat",
+]
+
+[[package]]
+name = "goat-provider-qwen"
+version = "0.1.18"
+dependencies = [
+ "goat-auth",
+ "goat-provider",
+ "goat-provider-openai-compat",
+ "reqwest 0.12.28",
+]
+
+[[package]]
+name = "goat-provider-xai"
+version = "0.1.18"
+dependencies = [
+ "goat-auth",
+ "goat-provider",
+ "goat-provider-openai-compat",
+ "open",
+ "reqwest 0.12.28",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "goat-provider-zai"
+version = "0.1.18"
+dependencies = [
+ "goat-auth",
+ "goat-provider",
+ "goat-provider-openai-compat",
+]
+
+[[package]]
+name = "goat-provider-zai-coding"
+version = "0.1.18"
+dependencies = [
+ "goat-auth",
+ "goat-provider",
+ "goat-provider-openai-compat",
 ]
 
 [[package]]
@@ -2235,11 +2322,20 @@ dependencies = [
  "goat-auth",
  "goat-provider",
  "goat-provider-anthropic",
+ "goat-provider-deepseek",
  "goat-provider-gemini",
- "goat-provider-hosted",
+ "goat-provider-groq",
+ "goat-provider-kimi",
+ "goat-provider-kimi-code",
  "goat-provider-local",
+ "goat-provider-mistral",
  "goat-provider-openai",
  "goat-provider-openai-codex",
+ "goat-provider-openrouter",
+ "goat-provider-qwen",
+ "goat-provider-xai",
+ "goat-provider-zai",
+ "goat-provider-zai-coding",
  "tokio",
 ]
 
