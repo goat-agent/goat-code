@@ -426,14 +426,18 @@ impl Config {
                     .saturating_add(OVERLAY_CHROME)
                     .clamp(10, 30)
             }
-            InputStage::Choosing { .. } => clamp_u16(2).saturating_add(OVERLAY_CHROME).clamp(8, 12),
-            InputStage::Adding { .. } => clamp_u16(4).saturating_add(OVERLAY_CHROME).clamp(9, 14),
-            InputStage::Waiting { .. } => clamp_u16(2).saturating_add(OVERLAY_CHROME).clamp(6, 10),
+            InputStage::Choosing { .. } => clamp_u16(2).saturating_add(OVERLAY_CHROME),
+            InputStage::Adding { .. } => clamp_u16(3).saturating_add(OVERLAY_CHROME),
+            InputStage::Waiting { .. } => clamp_u16(1).saturating_add(OVERLAY_CHROME),
         }
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        let rect = centered_rect(area, OVERLAY_W, self.desired_height());
+        let height = self
+            .desired_height()
+            .min(area.height.saturating_sub(2))
+            .max(1);
+        let rect = centered_rect(area, OVERLAY_W, height);
         let Some(inner) = overlay_frame(frame, rect, theme) else {
             return;
         };

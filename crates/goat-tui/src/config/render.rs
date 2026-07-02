@@ -143,30 +143,19 @@ pub(super) fn render_adding(
         body_area,
     );
 
-    if api_key {
-        frame.render_widget(
-            Paragraph::new(hint_line(
-                &[
-                    (symbols::key::ENTER, "save"),
-                    (symbols::key::TAB, "next field"),
-                    (symbols::key::ESC, "cancel"),
-                ],
-                theme,
-            )),
-            hint_area,
-        );
+    let hints = if api_key {
+        &[
+            (symbols::key::ENTER, "save"),
+            (symbols::key::TAB, "next field"),
+            (symbols::key::ESC, "cancel"),
+        ][..]
     } else {
-        frame.render_widget(
-            Paragraph::new(hint_line(
-                &[
-                    (symbols::key::ENTER, "device login"),
-                    (symbols::key::ESC, "cancel"),
-                ],
-                theme,
-            )),
-            hint_area,
-        );
-    }
+        &[
+            (symbols::key::ENTER, "device login"),
+            (symbols::key::ESC, "cancel"),
+        ][..]
+    };
+    frame.render_widget(Paragraph::new(hint_line(hints, theme)), hint_area);
 }
 
 fn input_tail(value: &str, max_cols: usize) -> String {
@@ -226,32 +215,38 @@ pub(super) fn render_choosing(
     provider: &str,
     method: AuthMethod,
 ) {
-    let (title_area, body_area, hint_area) = overlay_layout(area);
-    let title = Line::from(vec![
-        Span::styled(format!(" {provider}"), theme.key()),
-        Span::styled(
-            format!("{}sign in with", symbols::ui::SEPARATOR),
-            theme.muted(),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(title), title_area);
+    let (title_area, list_area, hint_area) = overlay_layout(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {provider}"), theme.key()),
+            Span::styled(
+                format!("{}sign in with", symbols::ui::SEPARATOR),
+                theme.muted(),
+            ),
+        ])),
+        title_area,
+    );
 
-    let width = usize::from(body_area.width);
-    let row = |selected: bool, label: &str| {
-        let style = if selected { theme.key() } else { theme.base() };
-        selection_row(
-            theme,
-            selected,
-            width,
-            vec![Span::styled(label.to_owned(), style)],
-            None,
-        )
-    };
-    let lines = vec![
-        row(matches!(method, AuthMethod::ApiKey), "api key"),
-        row(matches!(method, AuthMethod::OAuth), "browser"),
+    let width = usize::from(list_area.width);
+    let options = [
+        ("api key", AuthMethod::ApiKey),
+        ("browser", AuthMethod::OAuth),
     ];
-    frame.render_widget(Paragraph::new(lines), body_area);
+    let lines: Vec<Line> = options
+        .iter()
+        .map(|(label, auth)| {
+            let selected = *auth == method;
+            let style = if selected { theme.key() } else { theme.base() };
+            selection_row(
+                theme,
+                selected,
+                width,
+                vec![Span::styled((*label).to_owned(), style)],
+                None,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list_area);
     frame.render_widget(
         Paragraph::new(hint_line(
             &[
