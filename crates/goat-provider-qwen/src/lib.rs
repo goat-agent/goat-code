@@ -1,4 +1,4 @@
-use goat_auth::{Credential, CredentialKey, CredentialStore};
+use goat_auth::{CredentialKey, CredentialStore};
 use goat_provider::{AuthMethod, LoginEndpointMetadata, ProviderId, ProviderMetadata};
 use goat_provider_openai_compat::{OpenAiCompatProvider, no_efforts};
 
@@ -14,32 +14,25 @@ const QWEN_SETUP: &[&str] = &[
 ];
 
 const CATALOG: &[&str] = &[
-    "qwen-plus",
-    "qwen-max",
-    "qwen-turbo",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-flash",
     "qwen3-coder-plus",
     "qwen3-coder-flash",
-    "qwen-vl-plus",
 ];
 
 const CONTEXT: &[(&str, u32)] = &[
-    ("qwen-plus", 131_072),
-    ("qwen-max", 131_072),
-    ("qwen-turbo", 1_000_000),
+    ("qwen3.7", 1_000_000),
+    ("qwen3.6-flash", 1_000_000),
     ("qwen3-coder", 1_000_000),
-    ("qwen-vl", 129_024),
 ];
 
 pub fn build(store: &CredentialStore, account: &str) -> OpenAiCompatProvider {
     let key = CredentialKey::model(PROVIDER_ID, account);
-    let stored = store.get(&key);
-    let endpoint_source = std::env::var("QWEN_BASE_URL").ok().or_else(|| {
-        stored
-            .as_ref()
-            .and_then(Credential::endpoint)
-            .map(str::to_owned)
-    });
-    let endpoint = match endpoint_source {
+    let stored_endpoint = store
+        .get(&key)
+        .and_then(|cred| cred.endpoint().map(str::to_owned));
+    let endpoint = match stored_endpoint {
         Some(raw) => validate_qwen_endpoint(&raw).ok(),
         None => Some(QWEN_DEFAULT_ENDPOINT.to_owned()),
     };
@@ -128,7 +121,10 @@ fn valid_workspace_id(value: &str) -> bool {
 
 fn qwen_vision_model(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
-    id.contains("qwen-vl") || id.contains("qwen2-vl") || id.contains("qwen2.5-vl")
+    id.contains("qwen3.7")
+        || id.contains("qwen-vl")
+        || id.contains("qwen2-vl")
+        || id.contains("qwen2.5-vl")
 }
 
 #[cfg(test)]
