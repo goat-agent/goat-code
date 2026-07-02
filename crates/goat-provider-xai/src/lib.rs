@@ -6,7 +6,7 @@ use goat_provider::{
     StreamError, StreamEvent, WebSearchOutput,
 };
 use goat_provider_openai_compat::{
-    OpenAiCompatProvider, ResponsesProvider, enforce_https_host, no_efforts,
+    OpenAiCompatProvider, ResponsesProvider, enforce_https_host, no_efforts, no_vision,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 
@@ -14,18 +14,25 @@ pub const PROVIDER_ID: &str = "xai";
 
 const BASE_URL: &str = "https://api.x.ai/v1";
 const ALLOWED_HOST: &str = "api.x.ai";
+const CLI_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
+const CLI_ALLOWED_HOST: &str = "cli-chat-proxy.grok.com";
 
 const SETUP: &[&str] = &[
     "xAI Grok provider (API key or SuperGrok / X Premium+ OAuth).",
     "API key: `goat provider login xai --key xai-...` or `XAI_API_KEY`.",
     "OAuth: `goat provider login xai` (browser or device code; no API key).",
+    "OAuth includes Composer 2.5 (`grok-composer-2.5-fast`) via the Grok CLI proxy.",
 ];
 
+const COMPOSER_CATALOG: &[&str] = &["grok-composer-2.5-fast"];
+
 const OAUTH_CATALOG: &[&str] = &[
+    "grok-composer-2.5-fast",
     "grok-4.3",
     "grok-build-0.1",
-    "grok-4.20-beta-latest-reasoning",
-    "grok-4.20-beta-latest-non-reasoning",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-0309-non-reasoning",
+    "grok-4.20-multi-agent-0309",
 ];
 
 const API_KEY_CATALOG: &[&str] = &[
@@ -38,10 +45,12 @@ const API_KEY_CATALOG: &[&str] = &[
 ];
 
 const CATALOG: &[&str] = &[
+    "grok-composer-2.5-fast",
     "grok-4.3",
     "grok-build-0.1",
-    "grok-4.20-beta-latest-reasoning",
-    "grok-4.20-beta-latest-non-reasoning",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-0309-non-reasoning",
+    "grok-4.20-multi-agent-0309",
     "grok-4",
     "grok-4-fast-reasoning",
     "grok-4-fast-non-reasoning",
@@ -51,15 +60,17 @@ const CATALOG: &[&str] = &[
 ];
 
 const OAUTH_CONTEXT: &[(&str, u32)] = &[
+    ("grok-composer", 200_000),
     ("grok-4.3", 1_000_000),
-    ("grok-build", 512_000),
-    ("grok-4.20", 2_000_000),
+    ("grok-build", 256_000),
+    ("grok-4.20", 1_000_000),
 ];
 
 const API_KEY_CONTEXT: &[(&str, u32)] = &[("grok-4", 256_000), ("grok-3", 131_072)];
 
 pub fn build(store: &CredentialStore, account: &str) -> XaiProvider {
     enforce_https_host(BASE_URL, ALLOWED_HOST).expect("xai provider base URL");
+    enforce_https_host(CLI_BASE_URL, CLI_ALLOWED_HOST).expect("xai composer base URL");
     XaiProvider::new(store.clone(), CredentialKey::model(PROVIDER_ID, account))
 }
 
@@ -91,9 +102,7 @@ impl XaiProvider {
     }
 
     fn is_oauth_model(model: &str) -> bool {
-        OAUTH_CATALOG
-            .iter()
-            .any(|id| *id == model || model.starts_with(id))
+        OAUTH_CATALOG.contains(&model)
     }
 
     fn chat_provider(bearer: String) -> OpenAiCompatProvider {
@@ -121,6 +130,36 @@ impl XaiProvider {
         .with_context_windows(OAUTH_CONTEXT)
         .with_vision_filter(vision_model)
         .with_model_filter(oauth_chat_model)
+    }
+
+    fn composer_provider(bearer: String) -> OpenAiCompatProvider {
+        OpenAiCompatProvider::new(
+            ProviderId::from(PROVIDER_ID),
+            CLI_BASE_URL,
+            Some(bearer),
+            AuthMethod::ApiKeyOrOAuth,
+        )
+        .with_catalog(COMPOSER_CATALOG)
+        .with_images(false)
+        .with_vision_filter(no_vision)
+        .with_efforts(no_efforts)
+        .with_reasoning_effort(false)
+    }
+
+    async fn emit_composer_models(out: &mpsc::Sender<Model>) -> bool {
+        for id in COMPOSER_CATALOG {
+            if out
+                .send(Model {
+                    id: (*id).to_owned(),
+                    supports_images: false,
+                })
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -193,14 +232,14 @@ impl Provider for XaiProvider {
                 return Err("no credentials".to_owned());
             };
             match auth {
-                XaiAuth::ApiKey(bearer) => {
-                    let handle = XaiProvider::chat_provider(bearer).validate();
-                    handle.await.unwrap_or(Err("validation failed".to_owned()))
-                }
-                XaiAuth::OAuth(bearer) => {
-                    let handle = XaiProvider::responses_provider(bearer).validate();
-                    handle.await.unwrap_or(Err("validation failed".to_owned()))
-                }
+                XaiAuth::ApiKey(bearer) => XaiProvider::chat_provider(bearer)
+                    .validate()
+                    .await
+                    .expect("validate panicked"),
+                XaiAuth::OAuth(bearer) => XaiProvider::responses_provider(bearer)
+                    .validate()
+                    .await
+                    .expect("validate panicked"),
             }
         })
     }
@@ -235,7 +274,11 @@ impl Provider for XaiProvider {
                             .await;
                         return;
                     }
-                    XaiProvider::responses_provider(bearer).stream(req, events)
+                    if model.starts_with("grok-composer") {
+                        XaiProvider::composer_provider(bearer).stream(req, events)
+                    } else {
+                        XaiProvider::responses_provider(bearer).stream(req, events)
+                    }
                 }
             };
             let _ = handle.await;
@@ -262,11 +305,24 @@ impl Provider for XaiProvider {
                 }
                 return;
             };
-            let handle = match auth {
-                XaiAuth::ApiKey(bearer) => XaiProvider::chat_provider(bearer).discover(out),
-                XaiAuth::OAuth(bearer) => XaiProvider::responses_provider(bearer).discover(out),
-            };
-            let _ = handle.await;
+            match auth {
+                XaiAuth::ApiKey(bearer) => {
+                    let handle = XaiProvider::chat_provider(bearer).discover(out);
+                    let _ = handle.await;
+                }
+                XaiAuth::OAuth(bearer) => {
+                    let (bridge_tx, mut bridge_rx) = mpsc::channel(32);
+                    let responses = XaiProvider::responses_provider(bearer).discover(bridge_tx);
+                    while let Some(model) = bridge_rx.recv().await {
+                        if out.send(model).await.is_err() {
+                            let _ = responses.await;
+                            return;
+                        }
+                    }
+                    let _ = responses.await;
+                    let _ = XaiProvider::emit_composer_models(&out).await;
+                }
+            }
         })
     }
 
@@ -300,6 +356,9 @@ fn oauth_efforts(model: &str) -> Vec<Effort> {
 
 fn vision_model(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
+    if id.starts_with("grok-composer") {
+        return false;
+    }
     id.starts_with("grok-4") || id.contains("vision")
 }
 
@@ -326,8 +385,13 @@ mod tests {
         );
         assert!(!provider.authenticated());
         assert_eq!(provider.catalog(), CATALOG);
+        assert_eq!(
+            provider.context_window("grok-composer-2.5-fast"),
+            Some(200_000)
+        );
         assert_eq!(provider.context_window("grok-4.3"), Some(1_000_000));
         assert_eq!(provider.context_window("grok-4"), Some(256_000));
+        assert!(!provider.supports_images("grok-composer-2.5-fast"));
         assert_eq!(
             provider.efforts("grok-4.3"),
             vec![Effort::Low, Effort::Medium, Effort::High]
