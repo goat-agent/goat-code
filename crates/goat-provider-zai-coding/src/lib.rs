@@ -16,10 +16,11 @@ const ZAI_CODING_SETUP: &[&str] = &[
     "This is not OAuth and does not reuse the standard `zai` credential.",
 ];
 
-const CATALOG: &[&str] = &["glm-5.2", "glm-5-turbo", "glm-4.7"];
+const CATALOG: &[&str] = &["glm-5.2", "glm-5.1", "glm-5-turbo", "glm-4.7"];
 
 const CONTEXT: &[(&str, u32)] = &[
     ("glm-5.2", 1_000_000),
+    ("glm-5.1", 198_000),
     ("glm-5-turbo", 128_000),
     ("glm-4.7", 128_000),
 ];

@@ -346,6 +346,12 @@ impl ProviderMetadata {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelListSource {
+    Catalog,
+    Discover,
+}
+
 pub trait Provider: Send + Sync + 'static {
     fn id(&self) -> ProviderId;
     fn capabilities(&self) -> Capabilities;
@@ -357,6 +363,19 @@ pub trait Provider: Send + Sync + 'static {
     fn catalog(&self) -> &'static [&'static str] {
         &[]
     }
+
+    fn model_list_source(&self) -> ModelListSource {
+        if self.catalog().is_empty() {
+            ModelListSource::Discover
+        } else {
+            ModelListSource::Catalog
+        }
+    }
+
+    fn list_models(&self) -> Vec<String> {
+        self.catalog().iter().map(|id| (*id).to_owned()).collect()
+    }
+
     fn efforts(&self, _model: &str) -> Vec<Effort> {
         Vec::new()
     }

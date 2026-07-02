@@ -1,4 +1,3 @@
-use color_eyre::eyre::eyre;
 use goat_auth::{Credential, CredentialKey, CredentialKind, CredentialStore, SecretString};
 use goat_config::Config;
 use goat_tool_search::{
@@ -9,6 +8,7 @@ use goat_tool_search::{
 
 use crate::{
     cli::SearchCommand,
+    cli_ui,
     style::{ColorMode, Palette, print_row},
 };
 
@@ -51,11 +51,15 @@ fn login(
     key: Option<String>,
     make_default: bool,
 ) -> color_eyre::Result<()> {
-    let metadata =
-        search_provider(provider).ok_or_else(|| eyre!("unknown search provider: {provider}"))?;
+    let metadata = search_provider(provider).ok_or_else(|| {
+        cli_ui::report_hint(
+            format!("unknown search provider: {provider}"),
+            "run `goat search list` to see available providers",
+        )
+    })?;
     let account = account.unwrap_or(metadata.default_account);
-    let entry = build_search_account_config(provider, account, endpoint, engine)
-        .map_err(|err| eyre!(err))?;
+    let entry =
+        build_search_account_config(provider, account, endpoint, engine).map_err(cli_ui::report)?;
     store_search_key(provider, account, key, metadata.credential)?;
     let mut config = Config::load();
     let target = entry.target();
@@ -68,9 +72,10 @@ fn login(
         config.search.default_target = Some(target.clone());
     }
     config.save()?;
-    println!("connected search target {target}");
     if make_default {
-        println!("default search target set to {target}");
+        cli_ui::success(&format!("connected {target} (default)"));
+    } else {
+        cli_ui::success(&format!("connected {target}"));
     }
     Ok(())
 }
@@ -83,28 +88,38 @@ fn store_search_key(
 ) -> color_eyre::Result<()> {
     let SearchCredentialMetadata::EnvApiKey { env_var } = credential else {
         if key.is_some() {
-            return Err(eyre!(
-                "--key is not supported for search provider {provider}"
-            ));
+            return cli_ui::fail_hint(
+                format!("--key is not supported for search provider {provider}"),
+                "this provider does not use stored API keys",
+            );
         }
         return Ok(());
     };
     if key.is_none() && std::env::var(env_var).is_ok_and(|value| !value.is_empty()) {
         return Ok(());
     }
-    let secret = key.ok_or_else(|| eyre!("{provider} requires --key or {env_var}"))?;
-    let secret = secret.trim().to_owned();
+    let secret = if let Some(key) = key {
+        key
+    } else {
+        cli_ui::prompt_api_key(provider)?
+    };
     if secret.is_empty() {
-        return Err(eyre!("no API key provided"));
+        return cli_ui::fail("no API key provided");
     }
-    let path = goat_config::auth_path().ok_or_else(|| eyre!(goat_config::HOME_NOT_FOUND))?;
+    let path =
+        goat_config::auth_path().ok_or_else(|| cli_ui::report(goat_config::HOME_NOT_FOUND))?;
     let store = CredentialStore::new(path);
     store
         .store(
             &CredentialKey::search(provider, account),
             Credential::ApiKey(SecretString::from(secret)),
         )
-        .map_err(|err| eyre!(err.to_string()))
+        .map_err(|err| {
+            cli_ui::report_hint(
+                format!("could not update credential store: {err}"),
+                "check permissions on ~/.goat-code",
+            )
+        })
 }
 
 fn set_default(target: &str) -> color_eyre::Result<()> {
@@ -116,11 +131,14 @@ fn set_default(target: &str) -> color_eyre::Result<()> {
             .iter()
             .any(|account| account.target() == target)
     {
-        return Err(eyre!("unknown search target: {target}"));
+        return cli_ui::fail_hint(
+            format!("unknown search target: {target}"),
+            "run `goat search list` to see configured targets",
+        );
     }
     config.search.default_target = Some(target.to_owned());
     config.save()?;
-    println!("default search target set to {target}");
+    cli_ui::success(&format!("default search target set to {target}"));
     Ok(())
 }
 
@@ -129,6 +147,7 @@ fn list() {
     let default = default_target(&config);
     let credentials = search_credentials();
     let color = ColorMode::detect();
+    println!();
     println!(
         "  {} {} {} {}",
         color.cell("provider", Palette::Muted, PROVIDER_WIDTH),
@@ -179,9 +198,13 @@ fn info(provider: &str) -> color_eyre::Result<()> {
         .filter(|target| target.provider == provider || target.target == provider)
         .collect::<Vec<_>>();
     if matches.is_empty() {
-        return Err(eyre!("unknown search provider: {provider}"));
+        return cli_ui::fail_hint(
+            format!("unknown search provider: {provider}"),
+            "run `goat search list` to see available providers",
+        );
     }
     let color = ColorMode::detect();
+    println!();
     println!("{}", color.paint(provider, Palette::Provider));
     for target in matches {
         println!();
@@ -208,7 +231,10 @@ fn info(provider: &str) -> color_eyre::Result<()> {
 fn logout(provider: &str, account: &str) -> color_eyre::Result<()> {
     let target = format!("{provider}/{account}");
     if is_builtin_search_target(&target) {
-        return Err(eyre!("cannot remove built-in search target: {target}"));
+        return cli_ui::fail_hint(
+            format!("cannot remove built-in search target: {target}"),
+            "built-in targets are always available",
+        );
     }
     let mut config = Config::load();
     let before = config.search.accounts.len();
@@ -217,7 +243,10 @@ fn logout(provider: &str, account: &str) -> color_eyre::Result<()> {
         .accounts
         .retain(|account| account.target() != target);
     if before == config.search.accounts.len() {
-        return Err(eyre!("unknown search target: {target}"));
+        return cli_ui::fail_hint(
+            format!("unknown search target: {target}"),
+            "run `goat search list` to see configured targets",
+        );
     }
     if config.search.default_target.as_deref() == Some(&target) {
         config.search.default_target = Some(default_search_target().to_owned());
@@ -233,7 +262,7 @@ fn logout(provider: &str, account: &str) -> color_eyre::Result<()> {
         let store = CredentialStore::new(path);
         let _ = store.remove(&CredentialKey::search(provider, account));
     }
-    println!("disconnected search target {target}");
+    cli_ui::success(&format!("disconnected search target {target}"));
     Ok(())
 }
 

@@ -8,19 +8,23 @@ const ENV_VAR: &str = "MISTRAL_API_KEY";
 
 const CATALOG: &[&str] = &[
     "mistral-large-latest",
-    "mistral-medium-latest",
-    "mistral-small-latest",
-    "devstral-medium-latest",
+    "magistral-medium-2506",
+    "magistral-small-2506",
+    "devstral-2512",
+    "devstral-small-2505",
     "codestral-latest",
-    "ministral-8b-latest",
+    "mistral-small-latest",
+    "pixtral-large-latest",
 ];
 
 const CONTEXT_WINDOWS: &[(&str, u32)] = &[
     ("mistral-large", 131_072),
-    ("mistral-medium", 131_072),
+    ("magistral", 131_072),
     ("mistral-small", 131_072),
-    ("devstral-medium", 131_072),
+    ("devstral-2512", 262_144),
+    ("devstral-small", 131_072),
     ("codestral", 256_000),
+    ("pixtral", 131_072),
 ];
 
 fn is_vision_model(id: &str) -> bool {

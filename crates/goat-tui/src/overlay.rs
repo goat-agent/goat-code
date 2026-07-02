@@ -90,18 +90,34 @@ pub fn selection_row<'a>(
     } else {
         Span::raw("   ")
     };
-    let left_w: usize = left_spans.iter().map(|s| s.content.width()).sum();
-    let right_w = right_span.as_ref().map_or(0, |s| s.content.width());
     let caret_w = 3usize;
-    let pad =
-        inner_width.saturating_sub(caret_w + left_w + right_w + usize::from(right_span.is_some()));
+    let right_w = right_span.as_ref().map_or(0, |s| s.content.width());
+    let gap = usize::from(right_span.is_some());
+    let left_budget = inner_width.saturating_sub(caret_w + right_w + gap);
+    let mut left_w = 0usize;
+    let mut fitted: Vec<Span<'a>> = Vec::new();
+    for span in left_spans {
+        let content = span.content.as_ref();
+        let w = content.width();
+        if left_w + w <= left_budget {
+            left_w += w;
+            fitted.push(span);
+            continue;
+        }
+        let remaining = left_budget.saturating_sub(left_w);
+        if remaining > 0 {
+            let truncated = truncate_to_width(content, remaining);
+            left_w += truncated.width();
+            fitted.push(Span::styled(truncated, span.style));
+        }
+        break;
+    }
+    let pad = inner_width.saturating_sub(caret_w + left_w + right_w + gap);
     let mut spans = vec![caret];
-    spans.extend(left_spans);
+    spans.extend(fitted);
+    spans.push(Span::raw(" ".repeat(pad)));
     if let Some(right) = right_span {
-        spans.push(Span::raw(" ".repeat(pad)));
         spans.push(right);
-    } else {
-        spans.push(Span::raw(" ".repeat(pad)));
     }
     Line::from(spans)
 }
@@ -198,6 +214,7 @@ pub fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use ratatui::text::Span;
+    use unicode_width::UnicodeWidthStr;
 
     use super::selection_row;
     use crate::theme::Theme;
@@ -210,5 +227,19 @@ mod tests {
             line.spans.iter().all(|span| span.style.bg.is_none()),
             "selection must not paint a full-width background band"
         );
+    }
+
+    #[test]
+    fn selection_row_truncates_overflow() {
+        let theme = Theme::dark();
+        let line = selection_row(
+            theme,
+            true,
+            12,
+            vec![Span::raw("very long label")],
+            Some(Span::raw("right")),
+        );
+        let width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+        assert!(width <= 12);
     }
 }

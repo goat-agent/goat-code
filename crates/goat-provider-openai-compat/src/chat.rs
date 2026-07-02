@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use goat_provider::{
-    AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, Provider,
-    ProviderId, ProviderMetadata, Request, StreamError, StreamEvent, Usage,
+    AuthMethod, Capabilities, ContentBlock, Effort, Message, MessageRole, Model, ModelListSource,
+    Provider, ProviderId, ProviderMetadata, Request, StreamError, StreamEvent, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -38,6 +38,7 @@ struct ChatOptions {
     context_windows: &'static [(&'static str, u32)],
     validation: ChatValidation,
     discovery: ChatDiscovery,
+    model_list_source: Option<ModelListSource>,
     metadata: ProviderMetadata,
 }
 
@@ -56,6 +57,7 @@ impl Default for ChatOptions {
             context_windows: &[],
             validation: ChatValidation::ModelsEndpoint,
             discovery: ChatDiscovery::ModelsEndpoint,
+            model_list_source: None,
             metadata: ProviderMetadata::default(),
         }
     }
@@ -177,6 +179,12 @@ impl OpenAiCompatProvider {
     #[must_use]
     pub fn with_discovery(mut self, discovery: ChatDiscovery) -> Self {
         self.options.discovery = discovery;
+        self
+    }
+
+    #[must_use]
+    pub fn with_model_list_source(mut self, source: ModelListSource) -> Self {
+        self.options.model_list_source = Some(source);
         self
     }
 
@@ -558,6 +566,16 @@ impl Provider for OpenAiCompatProvider {
 
     fn catalog(&self) -> &'static [&'static str] {
         self.options.catalog
+    }
+
+    fn model_list_source(&self) -> ModelListSource {
+        self.options.model_list_source.unwrap_or({
+            if self.options.catalog.is_empty() {
+                ModelListSource::Discover
+            } else {
+                ModelListSource::Catalog
+            }
+        })
     }
 
     fn supports_images(&self, model: &str) -> bool {
