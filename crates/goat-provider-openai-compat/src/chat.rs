@@ -40,6 +40,7 @@ struct ChatOptions {
     discovery: ChatDiscovery,
     model_list_source: Option<ModelListSource>,
     metadata: ProviderMetadata,
+    extra_headers: &'static [(&'static str, &'static str)],
 }
 
 impl Default for ChatOptions {
@@ -59,6 +60,7 @@ impl Default for ChatOptions {
             discovery: ChatDiscovery::ModelsEndpoint,
             model_list_source: None,
             metadata: ProviderMetadata::default(),
+            extra_headers: &[],
         }
     }
 }
@@ -191,6 +193,12 @@ impl OpenAiCompatProvider {
     #[must_use]
     pub fn with_metadata(mut self, metadata: ProviderMetadata) -> Self {
         self.options.metadata = metadata;
+        self
+    }
+
+    #[must_use]
+    pub fn with_extra_headers(mut self, headers: &'static [(&'static str, &'static str)]) -> Self {
+        self.options.extra_headers = headers;
         self
     }
 }
@@ -610,6 +618,9 @@ impl Provider for OpenAiCompatProvider {
             if let Some(token) = &bearer {
                 builder = builder.bearer_auth(token);
             }
+            for (name, value) in options.extra_headers {
+                builder = builder.header(*name, *value);
+            }
             let resp = match builder.send().await {
                 Ok(resp) => resp,
                 Err(err) => {
@@ -874,5 +885,91 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn stream_sends_extra_headers() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            sync::mpsc,
+        };
+
+        const HEADERS: &[(&str, &str)] = &[
+            ("User-Agent", "xai-grok-cli"),
+            ("x-grok-client-version", "0.2.82"),
+            ("x-grok-client-identifier", "xai-grok-cli"),
+        ];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let saw_version = Arc::new(AtomicBool::new(false));
+        let saw_identifier = Arc::new(AtomicBool::new(false));
+        let saw_user_agent = Arc::new(AtomicBool::new(false));
+        let saw_version_server = saw_version.clone();
+        let saw_identifier_server = saw_identifier.clone();
+        let saw_user_agent_server = saw_user_agent.clone();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16_384];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            if request.contains("x-grok-client-version: 0.2.82") {
+                saw_version_server.store(true, Ordering::SeqCst);
+            }
+            if request.contains("x-grok-client-identifier: xai-grok-cli") {
+                saw_identifier_server.store(true, Ordering::SeqCst);
+            }
+            if request
+                .to_ascii_lowercase()
+                .contains("user-agent: xai-grok-cli")
+            {
+                saw_user_agent_server.store(true, Ordering::SeqCst);
+            }
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let provider = OpenAiCompatProvider::new(
+            "test".into(),
+            format!("http://{addr}/v1"),
+            None,
+            AuthMethod::None,
+        )
+        .with_extra_headers(HEADERS);
+        let (events, mut rx) = mpsc::channel(8);
+        let handle = provider.stream(
+            Request {
+                model: "grok-composer-2.5-fast".to_owned(),
+                messages: vec![Message::text(MessageRole::User, "hi")],
+                tools: Vec::new(),
+                effort: None,
+                tool_choice: ToolChoice::None,
+            },
+            events,
+        );
+        let _ = handle.await;
+        server.await.unwrap();
+        assert!(saw_version.load(Ordering::SeqCst));
+        assert!(saw_identifier.load(Ordering::SeqCst));
+        assert!(saw_user_agent.load(Ordering::SeqCst));
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::TextDelta { .. })
+        ));
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Completed)));
     }
 }
