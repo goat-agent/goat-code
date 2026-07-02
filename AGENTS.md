@@ -18,7 +18,7 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 
 ## Workspace
 
-37 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
+56 crates organized into six layers, with `goat-protocol` at the bottom of the dependency DAG:
 
 **Infrastructure**
 - `goat-protocol` — shared wire contract (`Op`, `Event`, `TaskId`); serde only; leaf.
@@ -37,9 +37,19 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-provider` — the `Provider` trait; leaf. Key types: `Provider`, `Request` (incl. `ToolChoice`), `StreamEvent`, `StreamError`, `Message`, `Capabilities`, `Model`, `ProviderId`, `ContentBlock`. Providers classify their own wire errors into `StreamError` structurally (`error.rs` per provider); the engine never inspects error strings.
 - `goat-provider-anthropic` — Anthropic Claude API provider; per-model context windows, prompt-caching `cache_control` breakpoints (tools + system + last two messages), `stop_reason` overflow detection.
 - `goat-provider-gemini` — Google Gemini provider; API key (Generative Language API) or OAuth (Code Assist free tier, gemini-cli compatible); four modules: `lib` (provider orchestration), `wire` (Gemini request/response format), `oauth` (Google OAuth PKCE flow), `codeassist` (Code Assist envelope + project onboarding).
-- `goat-provider-openai-compat` — OpenAI-family HTTP clients; three modules: `chat` (Chat Completions API, used by local providers), `responses` (Responses API, used by OpenAI and Codex), `common` (shared client/validate/discovery helpers).
+- `goat-provider-openai-compat` — OpenAI-family HTTP clients; modules: `chat` (Chat Completions API), `responses` (Responses API), `hosted` (API-key builder + HTTPS host pinning), `common`, `vision`.
 - `goat-provider-openai` — OpenAI provider (wraps `responses` module).
 - `goat-provider-openai-codex` — OpenAI Codex provider (wraps `responses` module).
+- `goat-provider-openrouter` — OpenRouter API-key provider; Chat Completions via `hosted::api_key`.
+- `goat-provider-groq` — Groq API-key provider.
+- `goat-provider-deepseek` — DeepSeek API-key provider.
+- `goat-provider-mistral` — Mistral API-key provider.
+- `goat-provider-zai` — Z.AI API-key provider; catalog-only validation/discovery.
+- `goat-provider-zai-coding` — Z.AI Coding Plan API-key provider (distinct credential from `zai`).
+- `goat-provider-kimi` — Moonshot Kimi API-key provider.
+- `goat-provider-kimi-code` — Kimi Code OAuth device-code provider; owns `oauth` module and `KimiCodeProvider`.
+- `goat-provider-qwen` — Qwen DashScope API-key provider; optional `--endpoint` for non-US workspaces.
+- `goat-provider-xai` — xAI Grok provider; API key (Chat Completions) or SuperGrok/X Premium+ OAuth (Responses API); owns `oauth` module.
 - `goat-provider-local` — table-driven local-inference provider (Ollama, LM Studio, llama.cpp); wraps `chat` module.
 - `goat-providers` — provider registry; wires all provider crates. `Registry::new(store)` for default account, `Registry::load(store, account)` for explicit. `Registry::login(provider, status)` dispatches OAuth login through the `Provider::login` trait method.
 
