@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 goat-provider = { workspace = true }
+goat-auth = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
