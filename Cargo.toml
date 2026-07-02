@@ -21,6 +21,10 @@ goat-auth = { path = "crates/goat-auth" }
 goat-store = { path = "crates/goat-store" }
 goat-provider-openai-compat = { path = "crates/goat-provider-openai-compat" }
 goat-provider-hosted = { path = "crates/goat-provider-hosted" }
+goat-provider-openrouter = { path = "crates/goat-provider-openrouter" }
+goat-provider-groq = { path = "crates/goat-provider-groq" }
+goat-provider-deepseek = { path = "crates/goat-provider-deepseek" }
+goat-provider-mistral = { path = "crates/goat-provider-mistral" }
 goat-provider-openai = { path = "crates/goat-provider-openai" }
 goat-provider-openai-codex = { path = "crates/goat-provider-openai-codex" }
 goat-provider-anthropic = { path = "crates/goat-provider-anthropic" }
