@@ -26,6 +26,16 @@ const SETUP: &[&str] = &[
 
 const COMPOSER_CATALOG: &[&str] = &["grok-composer-2.5-fast"];
 
+const GROK_CLI_CLIENT_VERSION: &str = "0.2.82";
+const GROK_CLI_CLIENT_IDENTIFIER: &str = "xai-grok-cli";
+const GROK_CLI_USER_AGENT: &str = "xai-grok-cli";
+
+const GROK_CLI_HEADERS: &[(&str, &str)] = &[
+    ("User-Agent", GROK_CLI_USER_AGENT),
+    ("x-grok-client-version", GROK_CLI_CLIENT_VERSION),
+    ("x-grok-client-identifier", GROK_CLI_CLIENT_IDENTIFIER),
+];
+
 const OAUTH_CATALOG: &[&str] = &[
     "grok-composer-2.5-fast",
     "grok-4.3",
@@ -91,11 +101,28 @@ impl XaiProvider {
 
     async fn resolve_auth(&self) -> Option<XaiAuth> {
         let cred = self.store.resolve(&self.key, Some("XAI_API_KEY"))?;
+        Self::auth_from_credential(&self.store, &self.key, cred).await
+    }
+
+    async fn resolve_auth_for_model(&self, model: &str) -> Option<XaiAuth> {
+        if Self::is_oauth_model(model)
+            && let Some(cred @ Credential::OAuth(_)) = self.store.get(&self.key)
+        {
+            return Self::auth_from_credential(&self.store, &self.key, cred).await;
+        }
+        self.resolve_auth().await
+    }
+
+    async fn auth_from_credential(
+        store: &CredentialStore,
+        key: &CredentialKey,
+        cred: Credential,
+    ) -> Option<XaiAuth> {
         match cred {
             Credential::ApiKey(secret) | Credential::ApiKeyWithEndpoint { secret, .. } => {
                 Some(XaiAuth::ApiKey(secret.expose().to_owned()))
             }
-            Credential::OAuth(_) => oauth::current_oauth_token(&self.store, &self.key)
+            Credential::OAuth(_) => oauth::current_oauth_token(store, key)
                 .await
                 .map(XaiAuth::OAuth),
         }
@@ -144,6 +171,7 @@ impl XaiProvider {
         .with_vision_filter(no_vision)
         .with_efforts(no_efforts)
         .with_reasoning_effort(false)
+        .with_extra_headers(GROK_CLI_HEADERS)
     }
 
     async fn emit_models(provider: &XaiProvider, out: &mpsc::Sender<Model>) -> bool {
@@ -260,7 +288,7 @@ impl Provider for XaiProvider {
         let model = req.model.clone();
         tokio::spawn(async move {
             let provider = XaiProvider { store, key };
-            let Some(auth) = provider.resolve_auth().await else {
+            let Some(auth) = provider.resolve_auth_for_model(&model).await else {
                 let _ = events
                     .send(StreamEvent::Failed {
                         error: StreamError::auth("no credentials"),
@@ -418,5 +446,78 @@ mod tests {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_model_prefers_stored_oauth_for_composer() {
+        use goat_auth::{Credential, CredentialKey, TokenSet};
+
+        let store = store("goat-provider-xai-oauth-pref.json");
+        store
+            .store(
+                &CredentialKey::model(PROVIDER_ID, "default"),
+                Credential::OAuth(TokenSet::from_parts(
+                    "oauth-access".to_owned(),
+                    None,
+                    Some(3600),
+                    None,
+                )),
+            )
+            .unwrap();
+        let provider = XaiProvider::new(store, CredentialKey::model(PROVIDER_ID, "default"));
+        let auth = provider
+            .resolve_auth_for_model("grok-composer-2.5-fast")
+            .await
+            .expect("oauth should win for composer");
+        assert!(matches!(auth, XaiAuth::OAuth(token) if token == "oauth-access"));
+    }
+
+    #[tokio::test]
+    #[ignore = "live network and OAuth credentials required"]
+    async fn composer_proxy_passes_grok_cli_version_gate() {
+        use goat_auth::CredentialKey;
+        use goat_provider::{Message, MessageRole, Request, StreamEvent, ToolChoice};
+
+        let auth_path = std::env::var("HOME")
+            .map(|home| std::path::PathBuf::from(home).join(".goat-code/auth.json"))
+            .expect("HOME");
+        if !auth_path.is_file() {
+            return;
+        }
+        let store = CredentialStore::new(auth_path);
+        let key = CredentialKey::model(PROVIDER_ID, "default");
+        let Some(Credential::OAuth(_)) = store.get(&key) else {
+            return;
+        };
+        let provider = build(&store, "default");
+        let (events, mut rx) = tokio::sync::mpsc::channel(8);
+        let handle = provider.stream(
+            Request {
+                model: "grok-composer-2.5-fast".to_owned(),
+                messages: vec![Message::text(MessageRole::User, "Reply with exactly: ok")],
+                tools: Vec::new(),
+                effort: None,
+                tool_choice: ToolChoice::None,
+            },
+            events,
+        );
+        while let Some(event) = rx.recv().await {
+            if let StreamEvent::Failed { error } = event {
+                let message = error.to_string();
+                assert!(
+                    !message.contains("426"),
+                    "composer proxy rejected client version: {message}"
+                );
+                assert!(
+                    !message.contains("outdated"),
+                    "composer proxy rejected client version: {message}"
+                );
+                panic!("composer request failed: {message}");
+            }
+            if matches!(event, StreamEvent::Completed) {
+                break;
+            }
+        }
+        let _ = handle.await;
     }
 }
