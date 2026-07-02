@@ -19,6 +19,8 @@ use tokio::sync::mpsc;
 
 use crate::Ctx;
 
+const DISCOVER_TIMEOUT_SECS: u64 = 15;
+
 pub(crate) async fn restore_target(
     store: &Store,
     credentials: &CredentialStore,
@@ -475,7 +477,7 @@ async fn discover_entries(provider: Arc<dyn Provider>, accounts: Vec<String>) ->
             discovered.push(info);
         }
     };
-    let _ = tokio::time::timeout(Duration::from_secs(3), collect).await;
+    let _ = tokio::time::timeout(Duration::from_secs(DISCOVER_TIMEOUT_SECS), collect).await;
     handle.abort();
     discovered
         .into_iter()
@@ -593,6 +595,19 @@ mod tests {
             ModelListSource::Catalog
         );
         assert!(!openai.catalog().is_empty());
+    }
+
+    #[test]
+    fn openrouter_uses_live_model_discovery() {
+        let store = store("goat-agent-accounts-openrouter.json");
+        let registry = Registry::new(&store);
+        let openrouter = registry
+            .get(&ProviderId::from("openrouter"))
+            .expect("openrouter provider");
+        assert_eq!(
+            model_list_source_check(openrouter.as_ref()),
+            ModelListSource::Discover
+        );
     }
 
     #[test]

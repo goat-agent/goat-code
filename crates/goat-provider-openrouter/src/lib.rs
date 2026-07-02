@@ -1,4 +1,5 @@
 use goat_auth::CredentialStore;
+use goat_provider::ModelListSource;
 use goat_provider_openai_compat::{
     OpenAiCompatProvider, api_key, known_openai_compatible_vision_model,
 };
@@ -50,4 +51,5 @@ pub fn build(store: &CredentialStore, account: &str) -> OpenAiCompatProvider {
         .with_model_filter(is_chat_model)
         .with_vision_filter(is_vision_model)
         .with_reasoning_effort(false)
+        .with_model_list_source(ModelListSource::Discover)
 }
