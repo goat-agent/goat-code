@@ -25,6 +25,10 @@ goat-provider-openrouter = { path = "crates/goat-provider-openrouter" }
 goat-provider-groq = { path = "crates/goat-provider-groq" }
 goat-provider-deepseek = { path = "crates/goat-provider-deepseek" }
 goat-provider-mistral = { path = "crates/goat-provider-mistral" }
+goat-provider-zai = { path = "crates/goat-provider-zai" }
+goat-provider-zai-coding = { path = "crates/goat-provider-zai-coding" }
+goat-provider-kimi = { path = "crates/goat-provider-kimi" }
+goat-provider-qwen = { path = "crates/goat-provider-qwen" }
 goat-provider-openai = { path = "crates/goat-provider-openai" }
 goat-provider-openai-codex = { path = "crates/goat-provider-openai-codex" }
 goat-provider-anthropic = { path = "crates/goat-provider-anthropic" }
