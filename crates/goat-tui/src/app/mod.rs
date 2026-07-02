@@ -88,6 +88,7 @@ pub struct App {
     pub(crate) composer: Composer,
     pub(crate) highlighter: SyntectHighlighter,
     pub(crate) cwd: String,
+    git_workspace: Option<goat_worktree::Workspace>,
     pub(crate) next_task: u64,
     pub(crate) window_count: usize,
     pub(crate) spinner: usize,
@@ -163,6 +164,9 @@ impl App {
             .ok()
             .map(|p| shorten_home(&p))
             .unwrap_or_default();
+        let git_workspace = std::env::current_dir()
+            .ok()
+            .and_then(|p| goat_worktree::workspace(&p).ok());
         let cfg = goat_config::Config::load();
         Self {
             theme,
@@ -170,6 +174,7 @@ impl App {
             composer: Composer::default(),
             highlighter: SyntectHighlighter::new(),
             cwd,
+            git_workspace,
             next_task: 1,
             window_count: 1,
             spinner: 0,
@@ -822,6 +827,9 @@ impl App {
     pub(crate) fn cwd(&self) -> &str {
         &self.cwd
     }
+    pub(crate) fn workspace_snapshot(&self) -> Option<&goat_worktree::Workspace> {
+        self.git_workspace.as_ref()
+    }
     pub(crate) fn quit_armed(&self) -> bool {
         self.quit_arm.is_some()
     }
@@ -1045,7 +1053,7 @@ fn slash_command_name(raw: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
-fn shorten_home(path: &Path) -> String {
+pub(crate) fn shorten_home(path: &Path) -> String {
     let display = path.display().to_string();
     if let Some(home) = std::env::var_os("HOME") {
         let home = home.to_string_lossy();
