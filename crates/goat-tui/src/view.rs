@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, Overlay},
-    layout::{LIST_MAX, PAD_X, SCROLL_GUTTER},
+    layout::{LIST_MAX, PAD_X, SCROLL_GUTTER, format_tokens},
     overlay, symbols,
     theme::Theme,
 };
@@ -318,9 +318,37 @@ fn model_label(app: &App) -> Option<String> {
     ))
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn format_ctx_status(used: u64, window: u32) -> (String, f32) {
+    let pct = if window == 0 {
+        0.0
+    } else {
+        (used as f64 / f64::from(window) * 100.0).min(100.0) as f32
+    };
+    let label = format!(
+        "ctx {}/{}",
+        format_tokens(used),
+        format_tokens(u64::from(window))
+    );
+    (label, pct)
+}
+
+fn format_rate_status(windows: &[(String, f32)]) -> Vec<(String, f32)> {
+    windows
+        .iter()
+        .map(|(label, pct)| (format!("{label} {pct:.0}%"), *pct))
+        .collect()
+}
+
 fn ctx_label(app: &App) -> Option<(String, f32)> {
     app.ctx_indicator()
-        .map(|(pct, _, _)| (format!("ctx {pct:.0}%"), pct))
+        .map(|(_, used, window)| format_ctx_status(used, window))
+}
+
+fn rate_labels(app: &App) -> Vec<(String, f32)> {
+    app.rate_limit_indicator()
+        .map(|windows| format_rate_status(&windows))
+        .unwrap_or_default()
 }
 
 pub(crate) fn window_label(window_count: usize) -> Option<String> {
@@ -336,15 +364,20 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 
     let model = model_label(app);
     let ctx = ctx_label(app);
+    let rates = rate_labels(app);
     let windows = window_label(app.window_count);
     let model_w = model.as_ref().map_or(0, |label| label.width());
     let ctx_w = ctx.as_ref().map_or(0, |(label, _)| label.width());
+    let rates_w = rates
+        .iter()
+        .map(|(label, _)| 2 + label.width())
+        .sum::<usize>();
     let windows_w = windows.as_ref().map_or(0, |label| label.width());
     let status_gap = (usize::from(model.is_some())
         + usize::from(ctx.is_some())
         + usize::from(windows.is_some()))
         * 2;
-    let status_w = model_w + ctx_w + windows_w + status_gap;
+    let status_w = model_w + ctx_w + rates_w + windows_w + status_gap;
     let cwd = fit_cwd(app.cwd(), inner_w.saturating_sub(status_w));
 
     let mut spans: Vec<Span> = vec![Span::styled(cwd.clone(), theme.muted())];
@@ -362,6 +395,10 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         spans.push(Span::styled(label, theme.key()));
     }
     if let Some((label, pct)) = ctx {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(label, theme.meter(pct)));
+    }
+    for (label, pct) in rates {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(label, theme.meter(pct)));
     }
@@ -413,7 +450,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 mod tests {
     use goat_protocol::{Effort, ModelTarget};
 
-    use super::model_status_label;
+    use super::{format_ctx_status, format_rate_status, model_status_label};
 
     fn target(effort: Option<Effort>) -> ModelTarget {
         ModelTarget {
@@ -458,5 +495,27 @@ mod tests {
     fn window_label_shown_for_multiple_windows() {
         assert_eq!(super::window_label(2), Some("\u{29c9} 2".to_owned()));
         assert_eq!(super::window_label(5), Some("\u{29c9} 5".to_owned()));
+    }
+
+    #[test]
+    fn format_ctx_status_uses_token_fraction() {
+        let (label, pct) = format_ctx_status(45_000, 128_000);
+        assert_eq!(label, "ctx 45k/128k");
+        assert!((pct - 35.15625).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn format_rate_status_maps_window_labels() {
+        let windows = vec![("5h".to_owned(), 42.0), ("weekly".to_owned(), 18.0)];
+        let labels = format_rate_status(&windows);
+        assert_eq!(
+            labels,
+            vec![("5h 42%".to_owned(), 42.0), ("weekly 18%".to_owned(), 18.0)]
+        );
+    }
+
+    #[test]
+    fn format_rate_status_empty() {
+        assert!(format_rate_status(&[]).is_empty());
     }
 }
