@@ -1024,6 +1024,19 @@ impl App {
         let pct = (used as f64 / f64::from(window) * 100.0).min(100.0) as f32;
         Some((pct, used, window))
     }
+
+    pub(crate) fn rate_limit_indicator(&self) -> Option<Vec<(String, f32)>> {
+        let model = self.model.as_ref()?;
+        let key = (model.provider.clone(), model.account.clone());
+        let (snapshot, _) = self.usage.rate_limits.get(&key)?;
+        (!snapshot.windows.is_empty()).then(|| {
+            snapshot
+                .windows
+                .iter()
+                .map(|window| (window.label.clone(), window.used_percent))
+                .collect()
+        })
+    }
 }
 
 fn slash_command_name(raw: &str) -> Option<&str> {
@@ -1182,7 +1195,10 @@ fn prepare_input_event(ev: CtEvent, tx: &tokio::sync::mpsc::Sender<AppEvent>) ->
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use goat_protocol::{AccountChoice, Event as EngineEvent, ModelEntry, ModelTarget, Op, TaskId};
+    use goat_protocol::{
+        AccountChoice, Event as EngineEvent, ModelEntry, ModelTarget, Op, RateLimitSnapshot,
+        RateWindow, TaskId, Usage,
+    };
 
     use super::{App, Overlay};
     use crate::theme::Theme;
@@ -2128,8 +2144,62 @@ mod tests {
     }
 
     #[test]
+    fn ctx_and_rate_limit_indicators_use_active_model() {
+        let mut app = App::new(Theme::dark());
+        app.model = Some(ModelTarget {
+            provider: "anthropic".to_owned(),
+            model: "sonnet".to_owned(),
+            account: "default".to_owned(),
+            effort: None,
+        });
+        app.on_engine(EngineEvent::Usage {
+            id: TaskId(1),
+            provider: "anthropic".to_owned(),
+            account: "default".to_owned(),
+            usage: Usage {
+                input_tokens: 40_000,
+                output_tokens: 5_000,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            context_window: Some(128_000),
+            compaction_threshold: None,
+        });
+        app.on_engine(EngineEvent::RateLimits {
+            provider: "anthropic".to_owned(),
+            account: "default".to_owned(),
+            snapshot: RateLimitSnapshot {
+                windows: vec![
+                    RateWindow {
+                        label: "5h".to_owned(),
+                        used_percent: 42.0,
+                        resets_at: None,
+                    },
+                    RateWindow {
+                        label: "weekly".to_owned(),
+                        used_percent: 18.0,
+                        resets_at: None,
+                    },
+                ],
+                representative: Some("5h".to_owned()),
+            },
+            cached_at: 0,
+        });
+
+        let (pct, used, window) = app.ctx_indicator().expect("ctx");
+        assert_eq!(used, 45_000);
+        assert_eq!(window, 128_000);
+        assert!((pct - 35.15625).abs() < f32::EPSILON);
+
+        let rates = app.rate_limit_indicator().expect("rates");
+        assert_eq!(
+            rates,
+            vec![("5h".to_owned(), 42.0), ("weekly".to_owned(), 18.0),]
+        );
+    }
+
+    #[test]
     fn usage_attributes_to_event_model_not_current() {
-        use goat_protocol::Usage;
         let mut app = App::new(Theme::dark());
         app.model = Some(ModelTarget {
             provider: "anthropic".to_owned(),
