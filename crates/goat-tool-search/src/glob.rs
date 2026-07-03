@@ -42,10 +42,11 @@ impl Tool for GlobTool {
             return goat_tool::display::generic(input);
         };
         let pattern = goat_tool::display::flatten(&args.pattern);
-        match args.path.filter(|p| !p.is_empty() && p != ".") {
-            Some(path) => goat_protocol::ToolDisplay::with_detail(pattern, path),
-            None => goat_protocol::ToolDisplay::primary(pattern),
-        }
+        let sig = match args.path.filter(|p| !p.is_empty() && p != ".") {
+            Some(path) => goat_tool::display::call_sig("Glob", &[pattern.as_str(), path.as_str()]),
+            None => goat_tool::display::call_sig("Glob", &[pattern.as_str()]),
+        };
+        goat_protocol::ToolDisplay::primary(sig)
     }
 
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
@@ -85,6 +86,7 @@ fn walk(
     let mut found = Vec::new();
     let mut builder = WalkBuilder::new(root);
     builder.require_git(false);
+    builder.hidden(false);
     let blocked_for_walk = blocked.to_vec();
     builder.filter_entry(move |entry| !blocked_path(&blocked_for_walk, entry.path()));
     for entry in builder.build() {
@@ -153,7 +155,7 @@ mod tests {
     fn display_omits_trivial_scope() {
         use goat_tool::Tool;
         let display = GlobTool.display_input(r#"{"pattern":"*.rs","path":"."}"#);
-        assert_eq!(display.primary, "*.rs");
+        assert_eq!(display.primary, "Glob(*.rs)");
         assert_eq!(display.detail, None);
     }
 
@@ -196,5 +198,36 @@ mod tests {
             result,
             Err(goat_tool::ToolError::PathBlocked { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn lists_dot_github_in_real_repo_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+        std::fs::write(dir.path().join(".github/workflows/ci.yml"), "").unwrap();
+        let ctx = ctx(dir.path());
+        for pat in ["**/.github/**", ".github/**/*", ".github/workflows/*.yml"] {
+            let out = GlobTool
+                .run(&format!(r#"{{"pattern":"{pat}"}}"#), &ctx)
+                .await
+                .unwrap_or_else(|e| panic!("{pat}: {e:?}"));
+            let text = out.as_text().unwrap();
+            assert!(
+                text.contains("ci.yml") || text.contains(".github"),
+                "{pat} got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn github_style_patterns_parse() {
+        use ignore::overrides::OverrideBuilder;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = root.canonicalize().unwrap();
+        for pat in ["**/.github/**", ".github/**/*", "**/*depend*"] {
+            let mut o = OverrideBuilder::new(&root);
+            o.add(pat).unwrap_or_else(|e| panic!("add {pat}: {e:?}"));
+            o.build().unwrap_or_else(|e| panic!("build {pat}: {e:?}"));
+        }
     }
 }

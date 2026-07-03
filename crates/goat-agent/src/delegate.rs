@@ -54,9 +54,13 @@ pub(crate) fn agent_call_display(input: &str) -> ToolDisplay {
     }
     match serde_json::from_str::<Input>(input) {
         Ok(args) => {
-            ToolDisplay::with_detail(args.agent_type, goat_tool::display::flatten(&args.prompt))
+            let prompt = goat_tool::display::flatten(&args.prompt);
+            ToolDisplay::primary(goat_tool::display::call_sig(
+                AGENT_TOOL_NAME,
+                &[args.agent_type.as_str(), prompt.as_str()],
+            ))
         }
-        Err(_) => goat_tool::display::generic(input),
+        Err(_) => goat_tool::display::generic_named(AGENT_TOOL_NAME, input),
     }
 }
 

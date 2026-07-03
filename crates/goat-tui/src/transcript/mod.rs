@@ -1,5 +1,9 @@
+mod call_sig;
+mod gutter;
 mod item;
 mod render;
+mod tool_gist;
+mod tool_line;
 
 use std::cell::RefCell;
 
@@ -13,13 +17,15 @@ use ratatui::{
 
 use crate::{highlight::Highlighter, markdown, symbols, theme::Theme};
 
+use gutter::hang;
 pub(crate) use item::{Item, ShellStatus, ToolStatus, UserMessage, Working};
-use render::{build_static_lines, hang, is_blank, queued_rows, stable_prefix_len, working_rows};
+use render::{build_static_lines, is_blank, queued_rows, stable_prefix_len, working_rows};
 
 pub(crate) struct RenderCtx<'a> {
     pub theme: Theme,
     pub scroll: usize,
     pub left_pad: u16,
+    pub cwd: &'a str,
     pub spinner: &'static str,
     pub working: Option<&'a Working>,
     pub queued: &'a [String],
@@ -235,17 +241,17 @@ impl Transcript {
         }
         if let Some(buffer) = self.streaming.take() {
             let text = if interrupted {
-                format!("{buffer} … interrupted")
+                format!("{buffer}\n\n(interrupted)")
             } else {
                 buffer
             };
             self.items.push(Item::Agent(text));
         } else if interrupted && !matches!(self.items.last(), Some(Item::Error(_))) {
-            self.items.push(Item::Notice("interrupted".into()));
+            self.items.push(Item::Interrupted);
         }
     }
 
-    fn ensure_cache(&self, theme: Theme, width: u16, hl: &dyn Highlighter) {
+    fn ensure_cache(&self, theme: Theme, width: u16, hl: &dyn Highlighter, cwd: &str) {
         let valid = self
             .cache
             .borrow()
@@ -260,7 +266,7 @@ impl Transcript {
             memo.entries.clear();
         }
         let (lines, spinner_lines, images) =
-            build_static_lines(&self.items, theme, width, hl, &mut memo.entries);
+            build_static_lines(&self.items, theme, width, hl, cwd, &mut memo.entries);
         *self.cache.borrow_mut() = Some(RenderCache {
             width,
             version: self.version,
@@ -351,10 +357,11 @@ impl Transcript {
         width: u16,
         theme: Theme,
         hl: &dyn Highlighter,
+        cwd: &str,
         working: Option<&Working>,
         queued: &[String],
     ) -> usize {
-        self.ensure_cache(theme, width, hl);
+        self.ensure_cache(theme, width, hl, cwd);
         let base = self.cache.borrow().as_ref().map_or(0, |c| c.lines.len());
         base + self
             .tail_rows(
@@ -371,7 +378,7 @@ impl Transcript {
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
         let body_width = area.width.saturating_sub(ctx.left_pad);
-        self.ensure_cache(ctx.theme, body_width, ctx.hl);
+        self.ensure_cache(ctx.theme, body_width, ctx.hl, ctx.cwd);
         let guard = self.cache.borrow();
         let Some(cache) = guard.as_ref() else {
             return;
@@ -482,7 +489,7 @@ mod tests {
     }
 
     fn height(t: &Transcript, width: u16) -> usize {
-        t.content_height(width, Theme::dark(), &PlainHighlighter, None, &[])
+        t.content_height(width, Theme::dark(), &PlainHighlighter, "/", None, &[])
     }
 
     #[test]
@@ -491,9 +498,9 @@ mod tests {
         let light = Theme::light();
         let items = vec![Item::Agent("plain body".to_owned())];
         let (dark_lines, _, _) =
-            build_static_lines(&items, dark, 80, &PlainHighlighter, &mut Vec::new());
+            build_static_lines(&items, dark, 80, &PlainHighlighter, "/", &mut Vec::new());
         let (light_lines, _, _) =
-            build_static_lines(&items, light, 80, &PlainHighlighter, &mut Vec::new());
+            build_static_lines(&items, light, 80, &PlainHighlighter, "/", &mut Vec::new());
         let body_fg = |lines: &[Line<'static>]| {
             lines
                 .iter()
@@ -517,21 +524,21 @@ mod tests {
             Item::Tool {
                 id: ToolCallId(1),
                 name: "Read".to_owned(),
-                display: goat_protocol::ToolDisplay::primary("a.txt"),
+                display: goat_protocol::ToolDisplay::primary("Read(a.txt)"),
                 status: ToolStatus::Running,
                 image: None,
             },
         ];
         let mut memo = Vec::new();
-        let _ = build_static_lines(&items, theme, 80, &PlainHighlighter, &mut memo);
+        let _ = build_static_lines(&items, theme, 80, &PlainHighlighter, "/", &mut memo);
         if let Item::Tool { status, .. } = &mut items[2] {
             *status = ToolStatus::Done(ok());
         }
         items.push(Item::Agent("second answer".to_owned()));
         let (memo_lines, _, _) =
-            build_static_lines(&items, theme, 80, &PlainHighlighter, &mut memo);
+            build_static_lines(&items, theme, 80, &PlainHighlighter, "/", &mut memo);
         let (fresh_lines, _, _) =
-            build_static_lines(&items, theme, 80, &PlainHighlighter, &mut Vec::new());
+            build_static_lines(&items, theme, 80, &PlainHighlighter, "/", &mut Vec::new());
         let render = |lines: &[Line<'static>]| {
             lines
                 .iter()
@@ -617,8 +624,8 @@ mod tests {
             panic!("expected failed tool");
         }
         assert!(
-            matches!(t.items.last(), Some(Item::Notice(_))),
-            "interrupt with no stream must append Notice"
+            matches!(t.items.last(), Some(Item::Interrupted)),
+            "interrupt with no stream must append Interrupted"
         );
     }
 
@@ -671,7 +678,14 @@ mod tests {
             thinking: false,
             tokens: None,
         };
-        let busy = t.content_height(80, Theme::dark(), &PlainHighlighter, Some(&working), &[]);
+        let busy = t.content_height(
+            80,
+            Theme::dark(),
+            &PlainHighlighter,
+            "/",
+            Some(&working),
+            &[],
+        );
         assert!(
             busy > idle,
             "content_height must be larger when busy (working line)"
@@ -683,8 +697,8 @@ mod tests {
         let mut t = Transcript::default();
         t.complete(true);
         assert!(
-            matches!(t.items.last(), Some(Item::Notice(_))),
-            "interrupting with no stream must push a Notice item"
+            matches!(t.items.last(), Some(Item::Interrupted)),
+            "interrupting with no stream must push Interrupted"
         );
     }
 
@@ -697,8 +711,8 @@ mod tests {
         assert!(matches!(&t.items[1], Item::Error(_)));
         t.complete(true);
         assert!(
-            !matches!(t.items.last(), Some(Item::Notice(_))),
-            "interrupted notice must be suppressed right after an error row"
+            !matches!(t.items.last(), Some(Item::Interrupted)),
+            "interrupted row must be suppressed right after an error row"
         );
     }
 
@@ -729,6 +743,7 @@ mod tests {
                         theme: Theme::dark(),
                         scroll: h - 2,
                         left_pad: 0,
+                        cwd: "/",
                         spinner: symbols::SPINNER[0],
                         working: None,
                         queued: &[],
@@ -755,6 +770,7 @@ mod tests {
                         theme: Theme::dark(),
                         scroll: 0,
                         left_pad: 0,
+                        cwd: "/",
                         spinner: symbols::SPINNER[3],
                         working: None,
                         queued: &[],
@@ -798,6 +814,7 @@ mod tests {
                         theme,
                         scroll: 0,
                         left_pad: 1,
+                        cwd: "/",
                         spinner: symbols::SPINNER[0],
                         working: None,
                         queued: &[],
@@ -838,6 +855,7 @@ mod tests {
                         theme,
                         scroll: 0,
                         left_pad: 1,
+                        cwd: "/",
                         spinner: symbols::SPINNER[0],
                         working: None,
                         queued: &[],
@@ -866,8 +884,8 @@ mod tests {
         let mut t = Transcript::default();
         commit(&mut t, "answer");
         let queued: Vec<String> = (0..5).map(|i| format!("queued {i}")).collect();
-        let with_queue = t.content_height(80, Theme::dark(), &PlainHighlighter, None, &queued);
-        let without = t.content_height(80, Theme::dark(), &PlainHighlighter, None, &[]);
+        let with_queue = t.content_height(80, Theme::dark(), &PlainHighlighter, "/", None, &queued);
+        let without = t.content_height(80, Theme::dark(), &PlainHighlighter, "/", None, &[]);
         assert_eq!(with_queue - without, 5, "3 rows + overflow row + spacer");
     }
 

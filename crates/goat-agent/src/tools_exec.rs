@@ -66,7 +66,7 @@ pub(crate) fn call_display(tools: &ToolRegistry, name: &str, input: &str) -> Too
         ASK_TOOL_NAME => ask_call_display(input),
         WEB_SEARCH_TOOL_NAME => web_search_display(input),
         _ => tools.get(name).map_or_else(
-            || goat_tool::display::generic(input),
+            || goat_tool::display::generic_named(name, input),
             |tool| tool.display_input(input),
         ),
     }

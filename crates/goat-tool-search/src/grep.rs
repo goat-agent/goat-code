@@ -50,19 +50,13 @@ impl Tool for GrepTool {
         let Ok(args) = serde_json::from_str::<Input>(input) else {
             return goat_tool::display::generic(input);
         };
-        let scope: Vec<String> = [
-            args.path.filter(|p| !p.is_empty() && p != "."),
-            args.glob.filter(|g| !g.is_empty() && g != "*"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
         let pattern = goat_tool::display::flatten(&args.pattern);
-        if scope.is_empty() {
-            goat_protocol::ToolDisplay::primary(pattern)
-        } else {
-            goat_protocol::ToolDisplay::with_detail(pattern, scope.join(" · "))
+        let mut params = vec![pattern];
+        if let Some(path) = args.path.filter(|p| !p.is_empty() && p != ".") {
+            params.push(path);
         }
+        let refs: Vec<&str> = params.iter().map(String::as_str).collect();
+        goat_protocol::ToolDisplay::primary(goat_tool::display::call_sig("Grep", &refs))
     }
 
     fn run<'a>(&'a self, input: &'a str, ctx: &'a ToolContext) -> ToolFuture<'a> {
@@ -116,6 +110,7 @@ fn search(
         .build()?;
     let mut builder = WalkBuilder::new(root);
     builder.require_git(false);
+    builder.hidden(false);
     let blocked_for_walk = blocked.to_vec();
     builder.filter_entry(move |entry| !blocked_path(&blocked_for_walk, entry.path()));
     let matcher = match glob {

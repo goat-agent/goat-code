@@ -347,11 +347,15 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let Overlay::Effort(picker) = &self.overlay
-                    && let EffortOutcome::Selected(effort) = picker.choose()
-                {
-                    self.overlay = Overlay::None;
-                    return self.apply_effort(effort);
+                if let Overlay::Effort(picker) = &self.overlay {
+                    if picker.is_empty() {
+                        self.overlay = Overlay::None;
+                        return Vec::new();
+                    }
+                    if let EffortOutcome::Selected(effort) = picker.choose() {
+                        self.overlay = Overlay::None;
+                        return self.apply_effort(effort);
+                    }
                 }
             }
             _ => {}

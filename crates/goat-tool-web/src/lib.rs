@@ -47,7 +47,10 @@ impl Tool for WebFetchTool {
 
     fn display_input(&self, input: &str) -> ToolDisplay {
         match serde_json::from_str::<Input>(input) {
-            Ok(args) => ToolDisplay::primary(display::flatten(&args.url)),
+            Ok(args) => ToolDisplay::primary(display::call_sig(
+                "WebFetch",
+                &[display::flatten(&args.url).as_str()],
+            )),
             Err(_) => display::generic(input),
         }
     }

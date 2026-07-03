@@ -243,6 +243,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
             theme,
             scroll: app.scroll(),
             left_pad: PAD_X,
+            cwd: app.cwd(),
             spinner: app.spinner_frame(),
             working: working.as_ref(),
             queued: &queued,
@@ -414,7 +415,7 @@ fn format_ctx_status(used: u64, window: u32) -> (String, f32) {
         (used as f64 / f64::from(window) * 100.0).min(100.0) as f32
     };
     let label = format!(
-        "ctx {}/{}",
+        "{}/{}",
         format_tokens(used),
         format_tokens(u64::from(window))
     );
@@ -617,7 +618,7 @@ mod tests {
     #[test]
     fn format_ctx_status_uses_token_fraction() {
         let (label, pct) = format_ctx_status(45_000, 128_000);
-        assert_eq!(label, "ctx 45k/128k");
+        assert_eq!(label, "45k/128k");
         assert!((pct - 35.15625).abs() < f32::EPSILON);
     }
 

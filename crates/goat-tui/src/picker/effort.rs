@@ -23,10 +23,16 @@ pub struct EffortPicker {
     options: Vec<Effort>,
     cursor: usize,
     scroll: usize,
+    empty_message: Option<String>,
 }
 
 impl EffortPicker {
     pub fn new(label: String, options: Vec<Effort>, current: Option<Effort>) -> Self {
+        let empty_message = if options.is_empty() {
+            Some("This model does not support reasoning effort.".to_owned())
+        } else {
+            None
+        };
         let cursor = current
             .and_then(|cur| options.iter().position(|opt| *opt == cur))
             .unwrap_or(0);
@@ -35,7 +41,12 @@ impl EffortPicker {
             options,
             cursor,
             scroll: 0,
+            empty_message,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.options.is_empty()
     }
 
     fn cap(&self) -> usize {
@@ -89,6 +100,18 @@ impl EffortPicker {
             ))),
             context_area,
         );
+
+        if let Some(msg) = &self.empty_message {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(format!(" {msg}"), theme.muted()))),
+                list_area,
+            );
+            frame.render_widget(
+                Paragraph::new(hint_line(&[(symbols::key::ESC, "close")], theme)),
+                hint_area,
+            );
+            return;
+        }
 
         let width = usize::from(list_area.width);
         let rows = usize::from(list_area.height).max(1);

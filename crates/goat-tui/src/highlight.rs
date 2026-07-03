@@ -57,7 +57,8 @@ impl SyntectHighlighter {
         {
             return built.clone();
         }
-        let built = palette_to_syntect_theme(&theme.code, theme.fg_color(), theme.code.bg);
+        let code = theme.code();
+        let built = palette_to_syntect_theme(&code, theme.fg_color(), code.bg);
         *guard = Some((id, built.clone()));
         built
     }

@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Color;
 
 use crate::layout::{METER_HIGH, METER_WARN};
 
@@ -18,38 +18,32 @@ pub struct CodePalette {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Theme {
-    id: u8,
-    bg: Color,
-    fg: Color,
-    dark: bool,
-    user: Color,
-    user_panel: Color,
-    agent: Color,
-    tool: Color,
-    error: Color,
-    muted: Color,
-    accent: Color,
-    success: Color,
-    border: Color,
-    border_dim: Color,
-    panel: Color,
-    shell: Color,
-    shell_dim: Color,
+pub struct Palette {
+    pub id: u8,
+    pub bg: Color,
+    pub fg: Color,
+    pub dark: bool,
+    pub user: Color,
+    pub user_panel: Color,
+    pub agent: Color,
+    pub tool: Color,
+    pub error: Color,
+    pub muted: Color,
+    pub accent: Color,
+    pub success: Color,
+    pub border: Color,
+    pub border_dim: Color,
+    pub panel: Color,
+    pub shell: Color,
+    pub shell_dim: Color,
     pub code: CodePalette,
 }
 
-impl Default for Theme {
-    fn default() -> Self {
-        Self::dark()
-    }
-}
-
-impl Theme {
+impl Palette {
     pub const fn dark() -> Self {
         Self {
             id: 1,
-            bg: Color::Reset,
+            bg: Color::Rgb(0, 0, 0),
             dark: true,
             fg: Color::Rgb(0xd7, 0xda, 0xe0),
             user: Color::Rgb(0x7d, 0x9b, 0xd4),
@@ -115,72 +109,108 @@ impl Theme {
             },
         }
     }
+}
 
-    pub fn base(self) -> Style {
-        Style::new().fg(self.fg).bg(self.bg)
+#[derive(Debug, Clone, Copy)]
+pub struct Theme {
+    palette: Palette,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::dark()
+    }
+}
+
+impl Theme {
+    pub const fn dark() -> Self {
+        Self {
+            palette: Palette::dark(),
+        }
     }
 
-    pub fn text(self) -> Style {
-        Style::new().fg(self.fg)
+    pub const fn light() -> Self {
+        Self {
+            palette: Palette::light(),
+        }
     }
 
-    pub fn muted(self) -> Style {
-        Style::new().fg(self.muted)
+    pub fn base(self) -> ratatui::style::Style {
+        let p = self.palette;
+        ratatui::style::Style::new().fg(p.fg).bg(p.bg)
     }
 
-    pub fn key(self) -> Style {
-        Style::new().fg(self.fg).add_modifier(Modifier::BOLD)
+    pub fn text(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.fg)
     }
 
-    pub fn accent(self) -> Style {
-        Style::new().fg(self.accent)
+    pub fn muted(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.muted)
     }
 
-    pub fn border(self) -> Style {
-        Style::new().fg(self.border)
+    pub fn key(self) -> ratatui::style::Style {
+        ratatui::style::Style::new()
+            .fg(self.palette.fg)
+            .add_modifier(ratatui::style::Modifier::BOLD)
     }
 
-    pub fn border_dim(self) -> Style {
-        Style::new().fg(self.border_dim)
+    pub fn accent(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.accent)
     }
 
-    pub fn shell(self) -> Style {
-        Style::new().fg(self.shell)
+    pub fn border(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.border)
     }
 
-    pub fn shell_dim(self) -> Style {
-        Style::new().fg(self.shell_dim)
+    pub fn border_dim(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.border_dim)
     }
 
-    pub fn role_user(self) -> Style {
-        Style::new().fg(self.user)
+    pub fn shell(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.shell)
     }
 
-    pub fn user_panel(self) -> Style {
-        Style::new().bg(self.user_panel)
+    pub fn shell_dim(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.shell_dim)
     }
 
-    pub fn role_agent(self) -> Style {
-        Style::new().fg(self.agent)
+    pub fn role_user(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.user)
     }
 
-    pub fn role_tool(self) -> Style {
-        Style::new().fg(self.tool)
+    pub fn user_panel(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().bg(self.palette.user_panel)
     }
 
-    pub fn error(self) -> Style {
-        Style::new().fg(self.error)
+    pub fn role_agent(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.agent)
     }
 
-    pub fn success(self) -> Style {
-        Style::new().fg(self.success)
+    pub fn role_tool(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.tool)
     }
 
-    pub fn error_body(self) -> Style {
-        Style::new().fg(self.error)
+    pub fn tool_fn(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.accent)
     }
 
-    pub fn meter(self, pct: f32) -> Style {
+    pub fn tool_arg_value(self) -> ratatui::style::Style {
+        self.muted()
+    }
+
+    pub fn error(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.error)
+    }
+
+    pub fn success(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.success)
+    }
+
+    pub fn error_body(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.error)
+    }
+
+    pub fn meter(self, pct: f32) -> ratatui::style::Style {
         if pct >= METER_HIGH {
             self.error()
         } else if pct >= METER_WARN {
@@ -190,35 +220,40 @@ impl Theme {
         }
     }
 
-    pub fn code_plain(self) -> Style {
-        Style::new().fg(self.fg)
+    pub fn code_plain(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.fg)
     }
 
-    pub fn inline_code(self) -> Style {
-        Style::new().fg(self.accent)
+    pub fn inline_code(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.accent)
     }
 
     pub fn fg_color(self) -> Color {
-        self.fg
+        self.palette.fg
     }
 
     pub fn accent_color(self) -> Color {
-        self.accent
+        self.palette.accent
     }
 
-    pub fn hint_key(self) -> Style {
-        Style::new().fg(self.fg)
+    pub fn hint_key(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().fg(self.palette.fg)
     }
 
-    pub fn panel(self) -> Style {
-        Style::new().fg(self.fg).bg(self.panel)
+    pub fn panel(self) -> ratatui::style::Style {
+        let p = self.palette;
+        ratatui::style::Style::new().fg(p.fg).bg(p.panel)
     }
 
     pub fn is_dark(self) -> bool {
-        self.dark
+        self.palette.dark
     }
 
     pub fn id(self) -> u8 {
-        self.id
+        self.palette.id
+    }
+
+    pub fn code(self) -> CodePalette {
+        self.palette.code
     }
 }

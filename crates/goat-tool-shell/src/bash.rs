@@ -71,7 +71,10 @@ impl Tool for BashTool {
 
     fn display_input(&self, input: &str) -> ToolDisplay {
         match serde_json::from_str::<Input>(input) {
-            Ok(args) => ToolDisplay::primary(display::flatten(&args.command)),
+            Ok(args) => ToolDisplay::primary(display::call_sig(
+                "Bash",
+                &[display::flatten(&args.command).as_str()],
+            )),
             Err(_) => display::generic(input),
         }
     }
