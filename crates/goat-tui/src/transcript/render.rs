@@ -1,4 +1,3 @@
-use goat_protocol::ToolOutcome;
 use ratatui::{
     style::Style,
     text::{Line, Span},
@@ -12,6 +11,8 @@ use crate::{
 
 use super::ImagePlacement;
 use super::item::{Item, ShellStatus, ToolStatus, Working};
+use super::tool_gist::ToolLineCtx;
+use super::tool_line::{ToolRowInput, tool_marker, tool_row};
 
 pub(super) fn is_blank(line: &Line<'_>) -> bool {
     line.spans.iter().all(|s| s.content.is_empty())
@@ -38,65 +39,7 @@ pub(super) fn stable_prefix_len(buffer: &str) -> usize {
     split.min(buffer.len())
 }
 
-fn leading_indent(line: &Line<'static>) -> Vec<Span<'static>> {
-    let mut prefix: Vec<Span<'static>> = Vec::new();
-    let gutter_ch = symbols::ui::QUOTE_GUTTER.chars().next().unwrap_or('▎');
-    for span in &line.spans {
-        let content = span.content.as_ref();
-        let is_blank = !content.is_empty() && content.chars().all(|c| c == ' ');
-        let is_gutter = content.starts_with(gutter_ch);
-        if is_blank {
-            prefix.push(Span::styled(content.to_owned(), span.style));
-        } else if is_gutter {
-            prefix.push(span.clone());
-            break;
-        } else {
-            break;
-        }
-    }
-    prefix
-}
-
-pub(super) fn hang(
-    content: &[Line<'static>],
-    marker: Span<'static>,
-    width: u16,
-) -> Vec<Line<'static>> {
-    let inner = width.saturating_sub(2);
-    let mut first = Some(marker);
-    if content.is_empty() {
-        return vec![Line::from(vec![first.take().unwrap_or_default()])];
-    }
-    let mut out: Vec<Line<'static>> = Vec::new();
-    for line in content {
-        if line.spans.len() == 1 && line.spans[0].content.as_ref() == symbols::ui::HRULE {
-            let style = line.spans[0].style;
-            let prefix = first.take().unwrap_or_else(|| Span::raw("  "));
-            let prefix_w = UnicodeWidthStr::width(prefix.content.as_ref());
-            let rule_w = usize::from(width).saturating_sub(prefix_w).max(1);
-            out.push(Line::from(vec![
-                prefix,
-                Span::styled("─".repeat(rule_w), style),
-            ]));
-            continue;
-        }
-        let indent = leading_indent(line);
-        let mut wrapped = wrap::wrap_line(line, inner).into_iter();
-        if let Some(mut first_row) = wrapped.next() {
-            let prefix = first.take().unwrap_or_else(|| Span::raw("  "));
-            first_row.spans.insert(0, prefix);
-            out.push(first_row);
-        }
-        for mut row in wrapped {
-            for (i, span) in indent.iter().enumerate() {
-                row.spans.insert(i, span.clone());
-            }
-            row.spans.insert(0, Span::raw("  "));
-            out.push(row);
-        }
-    }
-    out
-}
+pub(super) use super::gutter::hang;
 
 pub(super) fn plain_lines(text: &str, theme: Theme) -> Vec<Line<'static>> {
     text.split('\n')
@@ -206,6 +149,7 @@ pub(super) fn build_static_lines(
     theme: Theme,
     width: u16,
     hl: &dyn Highlighter,
+    cwd: &str,
     memo: &mut Vec<ItemMemo>,
 ) -> (Vec<Line<'static>>, Vec<usize>, Vec<ImagePlacement>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -238,7 +182,7 @@ pub(super) fn build_static_lines(
         let rows = match memo.get(i) {
             Some(cached) if cached.sig == sig => cached.rows.clone(),
             _ => {
-                let rows = item_rows(item, theme, width, hl);
+                let rows = item_rows(item, theme, width, hl, cwd);
                 let entry = ItemMemo {
                     sig,
                     rows: rows.clone(),
@@ -306,9 +250,8 @@ pub(super) fn item_signature(item: &Item) -> u64 {
             3u8.hash(&mut hasher);
             text.hash(&mut hasher);
         }
-        Item::Notice(text) => {
-            4u8.hash(&mut hasher);
-            text.hash(&mut hasher);
+        Item::Interrupted => {
+            7u8.hash(&mut hasher);
         }
         Item::Compaction {
             tokens_before,
@@ -327,13 +270,11 @@ pub(super) fn item_signature(item: &Item) -> u64 {
             6u8.hash(&mut hasher);
             name.hash(&mut hasher);
             display.primary.hash(&mut hasher);
-            display.detail.hash(&mut hasher);
             match status {
                 ToolStatus::Running => 0u8.hash(&mut hasher),
                 ToolStatus::Done(outcome) => {
                     1u8.hash(&mut hasher);
                     outcome.ok.hash(&mut hasher);
-                    outcome.summary.hash(&mut hasher);
                 }
             }
         }
@@ -346,6 +287,7 @@ pub(super) fn item_rows(
     theme: Theme,
     width: u16,
     hl: &dyn Highlighter,
+    cwd: &str,
 ) -> Vec<Line<'static>> {
     match item {
         Item::User(message) => {
@@ -364,13 +306,19 @@ pub(super) fn item_rows(
             user_panel_rows(rows, theme, width)
         }
         Item::Agent(text) => {
-            let rendered = markdown::render(text, theme, hl);
-            let end = rendered
-                .iter()
-                .rposition(|l| !is_blank(l))
-                .map_or(0, |i| i + 1);
+            let interrupted_tail = text.contains("(interrupted)");
+            let rendered = if interrupted_tail {
+                plain_lines_styled(text, theme.error_body())
+            } else {
+                let rendered = markdown::render(text, theme, hl);
+                let end = rendered
+                    .iter()
+                    .rposition(|l| !is_blank(l))
+                    .map_or(0, |i| i + 1);
+                rendered[..end].to_vec()
+            };
             hang(
-                &rendered[..end],
+                &rendered,
                 Span::styled(symbols::marker::AGENT, theme.role_agent()),
                 width,
             )
@@ -383,11 +331,17 @@ pub(super) fn item_rows(
             Span::styled(symbols::marker::ERROR, theme.error()),
             width,
         ),
-        Item::Notice(text) => hang(
-            &plain_lines(text, theme),
-            Span::styled(symbols::marker::NOTICE, theme.muted()),
-            width,
-        ),
+        Item::Interrupted => {
+            let body = "Turn interrupted.";
+            let inner = width.saturating_sub(2);
+            let line = Line::from(Span::styled(body.to_owned(), theme.error_body()));
+            let wrapped = wrap::wrap_line(&line, inner);
+            hang(
+                &wrapped,
+                Span::styled(symbols::marker::ERROR, theme.error()),
+                width,
+            )
+        }
         Item::Compaction {
             tokens_before,
             tokens_after,
@@ -415,57 +369,21 @@ pub(super) fn item_rows(
             status,
             ..
         } => {
-            let (marker, marker_style): (&str, _) = match status {
-                ToolStatus::Running => (symbols::SPINNER[0], theme.accent()),
-                ToolStatus::Done(ToolOutcome { ok: true, .. }) => {
-                    (symbols::ui::CHECK, theme.success())
-                }
-                ToolStatus::Done(ToolOutcome { ok: false, .. }) => {
-                    (symbols::ui::CROSS, theme.error())
-                }
-            };
-
-            let verb = name.to_lowercase();
-            let verb_w = verb.width();
-            let avail = usize::from(width)
-                .saturating_sub(2)
-                .saturating_sub(verb_w)
-                .saturating_sub(2);
-
-            let primary = truncate_to_width(&display.primary, avail);
-            let detail_avail = avail.saturating_sub(primary.width()).saturating_sub(2);
-            let detail = display
-                .detail
-                .as_deref()
-                .filter(|_| detail_avail > 1)
-                .map(|d| truncate_to_width(d, detail_avail));
-
-            let mut spans = vec![
-                Span::styled(marker, marker_style),
-                Span::raw(" "),
-                Span::styled(verb, theme.role_tool()),
-                Span::raw("  "),
-                Span::styled(primary, theme.base()),
-            ];
-            if let Some(d) = detail {
-                spans.push(Span::raw("  "));
-                spans.push(Span::styled(d, theme.muted()));
-            }
-
-            let mut result = vec![Line::from(spans)];
-            if let ToolStatus::Done(ToolOutcome {
-                summary: Some(summary),
-                ..
-            }) = status
-            {
-                result.extend(result_rows(summary, theme, width));
-            }
-            result
+            let (marker, marker_style) = tool_marker(status, theme);
+            let failed = matches!(status, ToolStatus::Done(o) if !o.ok);
+            tool_row(&ToolRowInput {
+                name,
+                display_primary: &display.primary,
+                marker,
+                marker_style,
+                theme,
+                width,
+                line_ctx: ToolLineCtx { cwd, width, failed },
+            })
         }
     }
 }
 
-const RESULT_BLOCK_CAP: usize = 6;
 pub(super) const SHELL_BLOCK_CAP: usize = 20;
 const SHELL_EXIT_PREFIX: &str = "exit code: ";
 const SHELL_NO_OUTPUT: &str = "(no output)";
@@ -595,39 +513,5 @@ pub(super) fn shell_rows(
         }
     }
     out.extend(rows);
-    out
-}
-
-pub(super) fn result_rows(summary: &str, theme: Theme, width: u16) -> Vec<Line<'static>> {
-    let src: Vec<&str> = summary.lines().collect();
-    let inner = width.saturating_sub(2);
-    let mut out: Vec<Line<'static>> = Vec::new();
-    for line in src.iter().take(RESULT_BLOCK_CAP) {
-        let style = if line.starts_with("+ ") {
-            theme.role_agent()
-        } else if line.starts_with("- ") {
-            theme.error()
-        } else {
-            theme.muted()
-        };
-        let content = Line::from(Span::styled(line.replace('\t', "  "), style));
-        for mut row in wrap::wrap_line(&content, inner) {
-            row.spans.insert(0, Span::raw("  "));
-            out.push(row);
-        }
-    }
-    if src.len() > RESULT_BLOCK_CAP {
-        out.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!(
-                    "{} {} more",
-                    symbols::ui::ELLIPSIS,
-                    src.len() - RESULT_BLOCK_CAP
-                ),
-                theme.muted(),
-            ),
-        ]));
-    }
     out
 }

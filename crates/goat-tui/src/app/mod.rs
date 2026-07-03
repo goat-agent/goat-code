@@ -17,7 +17,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
     ask::AskPicker,
-    command::CommandMenu,
+    command::{CommandMenu, CommandMenuContext},
     composer::Composer,
     config::{Config, ConfigOutcome},
     files::FileMenu,
@@ -359,18 +359,10 @@ impl App {
             CommandEffect::SelectModelNamed(query) => self.select_model_named(&query),
             CommandEffect::OpenEffortPicker => {
                 let efforts = self.current_efforts();
-                if efforts.is_empty() {
-                    self.push_toast(
-                        NotifyKind::Info,
-                        "current model has no reasoning effort options".to_owned(),
-                    );
-                    return Vec::new();
-                }
-                let label = self
-                    .model
-                    .as_ref()
-                    .map(|m| format!("{}/{}", m.provider, m.model))
-                    .unwrap_or_default();
+                let label = self.model.as_ref().map_or_else(
+                    || "no model selected".to_owned(),
+                    |m| format!("{}/{}", m.provider, m.model),
+                );
                 let current = self.model.as_ref().and_then(|m| m.effort);
                 self.overlay = Overlay::Effort(EffortPicker::new(label, efforts, current));
                 Vec::new()
@@ -745,13 +737,18 @@ impl App {
         }
         let text = self.composer.text();
         let trimmed = text.trim_start();
+        let efforts = self.current_efforts();
+        let cmd_ctx = CommandMenuContext {
+            effort_choices: self.model.as_ref().map(|_| efforts.as_slice()),
+        };
         if trimmed.starts_with('/')
             && slash_command_name(trimmed).is_none_or(|name| !name.contains('/'))
         {
             match &mut self.overlay {
-                Overlay::Commands(menu) => menu.update(&self.commands, trimmed),
+                Overlay::Commands(menu) => menu.update(&self.commands, trimmed, &cmd_ctx),
                 _ => {
-                    self.overlay = Overlay::Commands(CommandMenu::new(&self.commands, trimmed));
+                    self.overlay =
+                        Overlay::Commands(CommandMenu::new(&self.commands, trimmed, &cmd_ctx));
                 }
             }
         } else if matches!(self.overlay, Overlay::Commands(_)) {
@@ -866,14 +863,36 @@ impl App {
         if self.turn.active_shell {
             return None;
         }
-        self.is_busy().then(|| crate::transcript::Working {
+        if !self.is_busy() {
+            return None;
+        }
+        let label = self
+            .retry_status()
+            .or_else(|| self.compacting_status())
+            .or_else(|| self.agent_status());
+        if label.is_none() && self.transcript_has_running_activity() {
+            return None;
+        }
+        Some(crate::transcript::Working {
             elapsed: self.elapsed_secs(),
-            label: self
-                .retry_status()
-                .or_else(|| self.compacting_status())
-                .or_else(|| self.agent_status()),
+            label,
             thinking: self.turn.thinking,
             tokens: (self.usage.turn_tokens > 0).then_some(self.usage.turn_tokens),
+        })
+    }
+
+    fn transcript_has_running_activity(&self) -> bool {
+        self.transcript.items.iter().any(|item| {
+            matches!(
+                item,
+                crate::transcript::Item::Tool {
+                    status: crate::transcript::ToolStatus::Running,
+                    ..
+                } | crate::transcript::Item::Shell {
+                    status: crate::transcript::ShellStatus::Running,
+                    ..
+                }
+            )
         })
     }
 
@@ -912,6 +931,7 @@ impl App {
             width,
             self.theme,
             &self.highlighter,
+            &self.cwd,
             self.working_state().as_ref(),
             &self.queued_labels(),
         )
@@ -1881,13 +1901,15 @@ mod tests {
     }
 
     #[test]
-    fn effort_without_model_shows_toast() {
+    fn effort_without_model_opens_empty_picker() {
         let mut app = App::new(Theme::dark());
         let ops = app.dispatch_slash_command("/effort");
         assert!(ops.is_empty());
-        assert!(!matches!(app.overlay, Overlay::Effort(_)));
-        assert!(app.transcript.items.is_empty());
-        assert_eq!(app.toasts.len(), 1);
+        match &app.overlay {
+            Overlay::Effort(p) => assert!(p.is_empty()),
+            _ => panic!("expected effort overlay"),
+        }
+        assert!(app.toasts.is_empty());
     }
 
     #[test]

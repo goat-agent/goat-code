@@ -42,7 +42,7 @@ pub(crate) enum Item {
         status: ShellStatus,
     },
     Error(String),
-    Notice(String),
+    Interrupted,
     Compaction {
         tokens_before: u32,
         tokens_after: u32,
