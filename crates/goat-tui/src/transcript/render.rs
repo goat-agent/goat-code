@@ -53,6 +53,38 @@ fn plain_lines_styled(text: &str, style: ratatui::style::Style) -> Vec<Line<'sta
         .collect()
 }
 
+const INTERRUPT_AGENT_SUFFIX: &str = "\n\n(interrupted)";
+
+fn agent_lines_with_optional_interrupt_suffix(
+    text: &str,
+    theme: Theme,
+    hl: &dyn Highlighter,
+) -> Vec<Line<'static>> {
+    if let Some(body) = text.strip_suffix(INTERRUPT_AGENT_SUFFIX) {
+        let mut lines = if body.is_empty() {
+            Vec::new()
+        } else {
+            let rendered = markdown::render(body, theme, hl);
+            let end = rendered
+                .iter()
+                .rposition(|l| !is_blank(l))
+                .map_or(0, |i| i + 1);
+            rendered[..end].to_vec()
+        };
+        lines.push(Line::from(Span::styled(
+            "(interrupted)".to_owned(),
+            theme.error_body(),
+        )));
+        return lines;
+    }
+    let rendered = markdown::render(text, theme, hl);
+    let end = rendered
+        .iter()
+        .rposition(|l| !is_blank(l))
+        .map_or(0, |i| i + 1);
+    rendered[..end].to_vec()
+}
+
 fn line_width(line: &Line<'static>) -> usize {
     line.spans
         .iter()
@@ -306,17 +338,7 @@ pub(super) fn item_rows(
             user_panel_rows(rows, theme, width)
         }
         Item::Agent(text) => {
-            let interrupted_tail = text.contains("(interrupted)");
-            let rendered = if interrupted_tail {
-                plain_lines_styled(text, theme.error_body())
-            } else {
-                let rendered = markdown::render(text, theme, hl);
-                let end = rendered
-                    .iter()
-                    .rposition(|l| !is_blank(l))
-                    .map_or(0, |i| i + 1);
-                rendered[..end].to_vec()
-            };
+            let rendered = agent_lines_with_optional_interrupt_suffix(text, theme, hl);
             hang(
                 &rendered,
                 Span::styled(symbols::marker::AGENT, theme.role_agent()),
@@ -332,9 +354,11 @@ pub(super) fn item_rows(
             width,
         ),
         Item::Interrupted => {
-            let body = "Turn interrupted.";
             let inner = width.saturating_sub(2);
-            let line = Line::from(Span::styled(body.to_owned(), theme.error_body()));
+            let line = Line::from(vec![
+                Span::styled("Turn ", theme.base()),
+                Span::styled("interrupted.", theme.error_body()),
+            ]);
             let wrapped = wrap::wrap_line(&line, inner);
             hang(
                 &wrapped,
