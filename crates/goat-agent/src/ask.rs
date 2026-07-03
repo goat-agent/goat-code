@@ -54,16 +54,20 @@ pub(crate) fn ask_call_display(input: &str) -> ToolDisplay {
         questions: Vec<AskQuestion>,
     }
     let Ok(args) = serde_json::from_str::<Input>(input) else {
-        return goat_tool::display::generic(input);
+        return goat_tool::display::generic_named(ASK_TOOL_NAME, input);
     };
     let Some(first) = args.questions.first() else {
-        return goat_tool::display::generic(input);
+        return goat_tool::display::generic_named(ASK_TOOL_NAME, input);
     };
-    let primary = goat_tool::display::flatten(&first.question);
+    let q = goat_tool::display::flatten(&first.question);
     if args.questions.len() > 1 {
-        ToolDisplay::with_detail(primary, format!("+{} more", args.questions.len() - 1))
+        let more = format!("+{} more", args.questions.len() - 1);
+        ToolDisplay::primary(goat_tool::display::call_sig(
+            ASK_TOOL_NAME,
+            &[q.as_str(), more.as_str()],
+        ))
     } else {
-        ToolDisplay::primary(primary)
+        ToolDisplay::primary(goat_tool::display::call_sig(ASK_TOOL_NAME, &[q.as_str()]))
     }
 }
 

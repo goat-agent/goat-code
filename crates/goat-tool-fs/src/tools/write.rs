@@ -34,7 +34,10 @@ impl Tool for WriteTool {
 
     fn display_input(&self, input: &str) -> ToolDisplay {
         match serde_json::from_str::<Input>(input) {
-            Ok(args) => ToolDisplay::primary(display::flatten(&args.path)),
+            Ok(args) => ToolDisplay::primary(display::call_sig(
+                "Write",
+                &[display::flatten(&args.path).as_str()],
+            )),
             Err(_) => display::generic(input),
         }
     }

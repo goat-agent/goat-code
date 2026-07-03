@@ -36,7 +36,10 @@ impl Tool for ReadTool {
 
     fn display_input(&self, input: &str) -> ToolDisplay {
         match serde_json::from_str::<Input>(input) {
-            Ok(args) => ToolDisplay::primary(display::flatten(&args.path)),
+            Ok(args) => ToolDisplay::primary(display::call_sig(
+                "Read",
+                &[display::flatten(&args.path).as_str()],
+            )),
             Err(_) => display::generic(input),
         }
     }
@@ -118,9 +121,9 @@ mod tests {
     }
 
     #[test]
-    fn display_shows_path_without_range() {
+    fn display_shows_call_signature() {
         let display = ReadTool.display_input(r#"{"path":"a.txt","offset":120,"limit":50}"#);
-        assert_eq!(display.primary, "a.txt");
+        assert_eq!(display.primary, "Read(a.txt)");
         assert_eq!(display.detail, None);
     }
 

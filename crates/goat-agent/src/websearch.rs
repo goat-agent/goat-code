@@ -24,8 +24,11 @@ pub(crate) fn web_search_display(input: &str) -> ToolDisplay {
         query: String,
     }
     match serde_json::from_str::<Input>(input) {
-        Ok(args) => ToolDisplay::primary(goat_tool::display::flatten(&args.query)),
-        Err(_) => goat_tool::display::generic(input),
+        Ok(args) => ToolDisplay::primary(goat_tool::display::call_sig(
+            WEB_SEARCH_TOOL_NAME,
+            &[args.query.as_str()],
+        )),
+        Err(_) => goat_tool::display::generic_named(WEB_SEARCH_TOOL_NAME, input),
     }
 }
 
