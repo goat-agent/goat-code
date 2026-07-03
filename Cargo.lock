@@ -1962,7 +1962,7 @@ dependencies = [
 
 [[package]]
 name = "goat-agent"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "futures",
  "goat-auth",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "goat-auth"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "base64",
  "percent-encoding",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "goat-client"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "futures",
  "goat-protocol",
@@ -2018,7 +2018,7 @@ dependencies = [
 
 [[package]]
 name = "goat-code"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "clap",
  "color-eyre",
@@ -2054,39 +2054,39 @@ dependencies = [
 
 [[package]]
 name = "goat-command"
-version = "0.1.18"
+version = "0.1.19"
 
 [[package]]
 name = "goat-command-app"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-command",
 ]
 
 [[package]]
 name = "goat-command-conversation"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-command",
 ]
 
 [[package]]
 name = "goat-command-help"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-command",
 ]
 
 [[package]]
 name = "goat-command-settings"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-command",
 ]
 
 [[package]]
 name = "goat-commands"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-command",
  "goat-command-app",
@@ -2098,7 +2098,7 @@ dependencies = [
 
 [[package]]
 name = "goat-config"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "serde",
  "serde_json",
@@ -2107,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "goat-core"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-protocol",
  "tokio",
@@ -2116,7 +2116,7 @@ dependencies = [
 
 [[package]]
 name = "goat-daemon"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "futures",
  "goat-agent",
@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "goat-mcp"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-protocol",
  "goat-tool",
@@ -2159,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "goat-protocol"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "schemars",
  "serde",
@@ -2168,7 +2168,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-protocol",
@@ -2180,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-anthropic"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "eventsource-stream",
  "futures",
@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-deepseek"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-gemini"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "eventsource-stream",
  "futures",
@@ -2223,7 +2223,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-groq"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2232,7 +2232,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-kimi"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2241,7 +2241,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-kimi-code"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-local"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-provider",
  "goat-provider-openai-compat",
@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-mistral"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2271,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-openai"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-openai-codex"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "base64",
  "goat-auth",
@@ -2297,7 +2297,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-openai-compat"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "eventsource-stream",
  "futures",
@@ -2311,7 +2311,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-openrouter"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2320,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-qwen"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2330,7 +2330,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-xai"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2344,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-zai"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "goat-provider-zai-coding"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2362,7 +2362,7 @@ dependencies = [
 
 [[package]]
 name = "goat-providers"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "goat-remote"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "base64",
  "futures",
@@ -2411,14 +2411,14 @@ dependencies = [
 
 [[package]]
 name = "goat-sandbox"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "goat-search-provider"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "reqwest 0.12.28",
@@ -2427,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "goat-search-provider-brave"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-search-provider",
@@ -2437,7 +2437,7 @@ dependencies = [
 
 [[package]]
 name = "goat-search-provider-duckduckgo"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "chromiumoxide",
  "futures",
@@ -2450,7 +2450,7 @@ dependencies = [
 
 [[package]]
 name = "goat-search-provider-searxng"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-search-provider",
@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "goat-search-provider-tavily"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-search-provider",
@@ -2470,7 +2470,7 @@ dependencies = [
 
 [[package]]
 name = "goat-search-providers"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-auth",
  "goat-config",
@@ -2483,7 +2483,7 @@ dependencies = [
 
 [[package]]
 name = "goat-skill"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-config",
  "goat-protocol",
@@ -2495,7 +2495,7 @@ dependencies = [
 
 [[package]]
 name = "goat-store"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "goat-tool"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-protocol",
  "regex",
@@ -2517,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "goat-tool-browser"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "base64",
  "chromiumoxide",
@@ -2535,7 +2535,7 @@ dependencies = [
 
 [[package]]
 name = "goat-tool-computer"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "base64",
  "enigo",
@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "goat-tool-fs"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-protocol",
  "goat-tool",
@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "goat-tool-search"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-config",
  "goat-protocol",
@@ -2579,7 +2579,7 @@ dependencies = [
 
 [[package]]
 name = "goat-tool-shell"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-protocol",
  "goat-sandbox",
@@ -2593,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "goat-tool-skill"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-config",
  "goat-protocol",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "goat-tool-web"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "futures",
  "goat-protocol",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "goat-tools"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "goat-tool",
  "goat-tool-fs",
@@ -2633,7 +2633,7 @@ dependencies = [
 
 [[package]]
 name = "goat-tui"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "arboard",
  "base64",
@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "goat-update"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "clap",
  "color-eyre",
@@ -2667,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "goat-wire"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "bytes",
  "futures",
@@ -2682,7 +2682,7 @@ dependencies = [
 
 [[package]]
 name = "goat-worktree"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "ignore",
  "serde",
