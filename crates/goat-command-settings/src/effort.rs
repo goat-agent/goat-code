@@ -1,6 +1,5 @@
 use goat_command::{
-    ChoiceSpec, Command, CommandEffect, CommandInvocation, CommandShape, ParameterSpec,
-    ParameterValue,
+    Command, CommandEffect, CommandInvocation, CommandShape, ParameterSpec, ParameterValue,
 };
 
 pub struct Effort;
@@ -19,20 +18,12 @@ impl Command for Effort {
             name: "level".to_owned(),
             description: "reasoning effort level".to_owned(),
             required: false,
-            value: ParameterValue::Choice(
-                ["off", "low", "medium", "high", "xhigh", "max"]
-                    .into_iter()
-                    .map(|value| ChoiceSpec {
-                        value: value.to_owned(),
-                        description: None,
-                    })
-                    .collect(),
-            ),
+            value: ParameterValue::Word,
         }])
     }
 
     fn run(&self, invocation: CommandInvocation) -> CommandEffect {
-        if let Some(level) = invocation.choice("level") {
+        if let Some(level) = invocation.text("level") {
             CommandEffect::SelectEffort(level.to_ascii_lowercase())
         } else {
             CommandEffect::OpenEffortPicker

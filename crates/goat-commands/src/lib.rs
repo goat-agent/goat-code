@@ -350,7 +350,7 @@ mod tests {
         let CommandShape::Parameters(parameters) = effort.shape else {
             panic!("expected parameters");
         };
-        assert!(matches!(parameters[0].value, ParameterValue::Choice(_)));
+        assert!(matches!(parameters[0].value, ParameterValue::Word));
     }
 
     #[test]
