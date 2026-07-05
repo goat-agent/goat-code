@@ -29,6 +29,10 @@ pub(crate) enum ShellStatus {
 pub(crate) enum Item {
     User(UserMessage),
     Agent(String),
+    Thinking {
+        text: String,
+        collapsed: bool,
+    },
     Tool {
         id: ToolCallId,
         name: String,
@@ -41,7 +45,10 @@ pub(crate) enum Item {
         command: String,
         status: ShellStatus,
     },
-    Error(String),
+    Error {
+        message: String,
+        hint: Option<String>,
+    },
     Interrupted,
     Compaction {
         tokens_before: u32,

@@ -271,12 +271,13 @@ pub(crate) async fn finalize_turn(ctx: &Ctx<'_>, id: TaskId, outcome: &TurnEnd, 
                 })
                 .await;
         }
-        TurnEnd::Failed(message) => {
+        TurnEnd::Failed(message, hint) => {
             let _ = ctx
                 .events
                 .send(Event::Error {
                     id: Some(id),
                     message: message.clone(),
+                    hint: hint.clone(),
                 })
                 .await;
             if let Some(turn) = ids.turn_db_id

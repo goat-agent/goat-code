@@ -19,6 +19,8 @@ pub mod ui {
     pub const SEPARATOR: &str = " · ";
     pub const ELLIPSIS: &str = "…";
     pub const QUOTE_GUTTER: &str = "▎ ";
+    pub const CHEVRON_RIGHT: &str = "▸";
+    pub const CHEVRON_DOWN: &str = "▾";
     pub const RULE: &str = "──────────";
     pub const HRULE: &str = "\u{1}hrule\u{1}";
     pub const MORE_ABOVE: &str = "↑";

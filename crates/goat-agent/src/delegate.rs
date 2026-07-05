@@ -167,7 +167,7 @@ pub(crate) async fn run_delegation(
     let result = match outcome {
         LoopOutcome::Completed => Ok(final_text(conversation.messages())),
         LoopOutcome::Cancelled => Ok("(agent interrupted)".to_owned()),
-        LoopOutcome::Failed(message) => Err(message),
+        LoopOutcome::Failed(message, _) => Err(message),
     };
     let _ = ctx
         .events

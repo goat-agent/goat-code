@@ -282,6 +282,7 @@ fn emit_decode_error(message: &str) {
     let event = Event::Error {
         id: None,
         message: format!("headless decode error: {message}"),
+        hint: None,
     };
     if let Ok(line) = serde_json::to_string(&event) {
         emit_line(&line);

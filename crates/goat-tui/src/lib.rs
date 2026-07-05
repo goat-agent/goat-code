@@ -14,6 +14,7 @@ mod notification;
 mod overlay;
 mod picker;
 mod screenshot;
+mod select;
 pub mod symbols;
 mod theme;
 mod toast;

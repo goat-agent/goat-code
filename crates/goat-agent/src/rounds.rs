@@ -56,7 +56,7 @@ pub(crate) enum RoundOutcome {
 pub(crate) enum LoopOutcome {
     Completed,
     Cancelled,
-    Failed(String),
+    Failed(String, Option<String>),
 }
 
 async fn drain_steering(ctx: &Ctx<'_>, run: &Run<'_>, conversation: &mut Conversation) {
@@ -403,7 +403,7 @@ pub(crate) async fn core_loop(
 ) -> LoopOutcome {
     let mut tool_ctx = match ToolContext::new(env.cwd) {
         Ok(tool_ctx) => tool_ctx,
-        Err(err) => return LoopOutcome::Failed(err.to_string()),
+        Err(err) => return LoopOutcome::Failed(err.to_string(), None),
     };
     tool_ctx.exec_policy = env.exec_policy.clone();
     let mut rounds = 0usize;
@@ -444,12 +444,18 @@ pub(crate) async fn core_loop(
                         return LoopOutcome::Cancelled;
                     }
                     Err(crate::compaction::CompactionError::Failed(message)) => {
-                        return LoopOutcome::Failed(message);
+                        return LoopOutcome::Failed(
+                            message,
+                            Some("/clear to reset the conversation".to_owned()),
+                        );
                     }
                 }
             }
             RoundEnd::Failed(error) => {
-                return LoopOutcome::Failed(crate::retry::failure_message(error, env.target));
+                return LoopOutcome::Failed(
+                    crate::retry::failure_message(error, env.target),
+                    crate::retry::error_hint(error),
+                );
             }
             RoundEnd::Completed => {
                 compacted_for_overflow = false;

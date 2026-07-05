@@ -58,6 +58,9 @@ impl App {
                         TranscriptEntry::Assistant { text } => {
                             self.transcript.commit_text(&text);
                         }
+                        TranscriptEntry::Thinking { text } => {
+                            self.transcript.push_thinking(text);
+                        }
                         TranscriptEntry::Tool { call, outcome } => {
                             let id = call.id;
                             self.transcript.push_tool(call);
@@ -91,8 +94,13 @@ impl App {
                 }
                 self.model = Some(target);
             }
-            EngineEvent::ThinkingDelta { .. } => {
+            EngineEvent::ThinkingDelta { id, chunk } => {
                 self.turn.thinking = true;
+                if let Some(i) = self.agent_index(id) {
+                    self.agent_runs[i].transcript.push_thinking_delta(&chunk);
+                } else {
+                    self.transcript.push_thinking_delta(&chunk);
+                }
             }
             EngineEvent::LoginProviders { .. } | EngineEvent::ThreadBound { .. } => {}
             EngineEvent::CompactionStarted { id } => {
@@ -288,14 +296,15 @@ impl App {
                 if !self.focused {
                     self.queue_notification(crate::notification::Notification::Completion);
                 }
+                self.transcript.flush_thinking();
                 self.transcript.complete(interrupted);
                 self.reset_active_state();
                 if interrupted {
                     self.restore_queued_to_composer();
                 }
             }
-            EngineEvent::Error { message, .. } => {
-                self.transcript.push_error(message);
+            EngineEvent::Error { message, hint, .. } => {
+                self.transcript.push_error(message, hint);
                 self.reset_active_state();
                 self.restore_queued_to_composer();
             }

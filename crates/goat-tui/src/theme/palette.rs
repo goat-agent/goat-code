@@ -36,6 +36,7 @@ pub struct Palette {
     pub panel: Color,
     pub shell: Color,
     pub shell_dim: Color,
+    pub selection: Color,
     pub code: CodePalette,
 }
 
@@ -59,6 +60,7 @@ impl Palette {
             panel: Color::Rgb(0x1b, 0x1b, 0x1e),
             shell: Color::Rgb(0xdb, 0x4b, 0x4b),
             shell_dim: Color::Rgb(0x54, 0x29, 0x2e),
+            selection: Color::Rgb(0x2d, 0x3c, 0x52),
             code: CodePalette {
                 bg: Color::Reset,
                 keyword: Color::Rgb(0x56, 0x9c, 0xd6),
@@ -80,32 +82,33 @@ impl Palette {
             id: 2,
             bg: Color::Rgb(0xfa, 0xfa, 0xfa),
             dark: false,
-            fg: Color::Rgb(0x1c, 0x1e, 0x22),
-            user: Color::Rgb(0x2e, 0x5c, 0xc9),
-            user_panel: Color::Rgb(0xf1, 0xf1, 0xf1),
-            agent: Color::Rgb(0x2f, 0x7d, 0x32),
-            tool: Color::Rgb(0xb5, 0x6a, 0x00),
-            error: Color::Rgb(0xc6, 0x28, 0x28),
-            muted: Color::Rgb(0x8a, 0x8f, 0x98),
-            accent: Color::Rgb(0x6a, 0x3d, 0xc9),
-            success: Color::Rgb(0x2f, 0x7d, 0x32),
-            border: Color::Rgb(0xd9, 0xdc, 0xe1),
-            border_dim: Color::Rgb(0xe6, 0xe8, 0xec),
-            panel: Color::Rgb(0xee, 0xee, 0xf0),
-            shell: Color::Rgb(0xb0, 0x35, 0x54),
-            shell_dim: Color::Rgb(0xe6, 0xc2, 0xcb),
+            fg: Color::Rgb(0x12, 0x14, 0x18),
+            user: Color::Rgb(0x1a, 0x56, 0xd6),
+            user_panel: Color::Rgb(0xec, 0xed, 0xf0),
+            agent: Color::Rgb(0x1b, 0x6e, 0x3c),
+            tool: Color::Rgb(0x9a, 0x5a, 0x00),
+            error: Color::Rgb(0xb4, 0x1c, 0x1c),
+            muted: Color::Rgb(0x5c, 0x63, 0x6e),
+            accent: Color::Rgb(0x5b, 0x21, 0xb6),
+            success: Color::Rgb(0x1b, 0x6e, 0x3c),
+            border: Color::Rgb(0xc8, 0xcc, 0xd4),
+            border_dim: Color::Rgb(0xdd, 0xe0, 0xe6),
+            panel: Color::Rgb(0xf0, 0xf1, 0xf4),
+            shell: Color::Rgb(0xa3, 0x15, 0x45),
+            shell_dim: Color::Rgb(0xf0, 0xd4, 0xdc),
+            selection: Color::Rgb(0xc7, 0xdd, 0xf5),
             code: CodePalette {
                 bg: Color::Reset,
-                keyword: Color::Rgb(0x00, 0x00, 0xff),
-                string: Color::Rgb(0xa3, 0x15, 0x15),
-                comment: Color::Rgb(0x00, 0x80, 0x00),
-                number: Color::Rgb(0x09, 0x88, 0x58),
-                type_: Color::Rgb(0x26, 0x7f, 0x99),
-                function: Color::Rgb(0x79, 0x5e, 0x26),
-                variable: Color::Rgb(0x00, 0x16, 0x80),
-                operator: Color::Rgb(0x3b, 0x3b, 0x3b),
-                macro_: Color::Rgb(0xaf, 0x00, 0xdb),
-                property: Color::Rgb(0x00, 0x16, 0x80),
+                keyword: Color::Rgb(0x00, 0x3d, 0xb8),
+                string: Color::Rgb(0x8b, 0x12, 0x12),
+                comment: Color::Rgb(0x0d, 0x6b, 0x0d),
+                number: Color::Rgb(0x0a, 0x6b, 0x47),
+                type_: Color::Rgb(0x1a, 0x6b, 0x85),
+                function: Color::Rgb(0x5c, 0x4a, 0x1a),
+                variable: Color::Rgb(0x00, 0x1a, 0x72),
+                operator: Color::Rgb(0x2a, 0x2a, 0x2a),
+                macro_: Color::Rgb(0x8b, 0x00, 0x9e),
+                property: Color::Rgb(0x00, 0x1a, 0x72),
             },
         }
     }
@@ -156,6 +159,10 @@ impl Theme {
 
     pub fn accent(self) -> ratatui::style::Style {
         ratatui::style::Style::new().fg(self.palette.accent)
+    }
+
+    pub fn selection(self) -> ratatui::style::Style {
+        ratatui::style::Style::new().bg(self.palette.selection)
     }
 
     pub fn border(self) -> ratatui::style::Style {

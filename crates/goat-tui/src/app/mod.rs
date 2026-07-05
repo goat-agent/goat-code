@@ -61,6 +61,7 @@ pub(crate) enum Overlay {
     Ask(AskPicker, ToolCallId),
     Usage,
     Help,
+    ImageZoom(Box<goat_protocol::ToolImageData>),
 }
 
 const TICK: Duration = Duration::from_millis(120);
@@ -107,6 +108,11 @@ pub struct App {
     pub(crate) scroll: usize,
     pub(crate) follow: bool,
     pub(crate) viewport_rows: u16,
+    pub(crate) selection: Option<crate::select::Selection>,
+    pub(crate) selection_version: u64,
+    pub(crate) transcript_area: ratatui::layout::Rect,
+    pub(crate) pending_copy: Option<String>,
+    pub(crate) last_click: Option<(std::time::Instant, usize, u16)>,
     pub(crate) models: Vec<ModelEntry>,
     pub(crate) model: Option<ModelTarget>,
     pub(crate) overlay: Overlay,
@@ -189,6 +195,11 @@ impl App {
             scroll: 0,
             follow: true,
             viewport_rows: 0,
+            selection: None,
+            selection_version: 0,
+            transcript_area: ratatui::layout::Rect::default(),
+            pending_copy: None,
+            last_click: None,
             models: Vec::new(),
             model: None,
             overlay: Overlay::None,
@@ -284,20 +295,7 @@ impl App {
                 Vec::new()
             }
             AppEvent::Input(CtEvent::Mouse(mouse)) => {
-                if self.wheel_scroll_allowed() {
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            self.scroll = self.scroll.saturating_sub(3);
-                            self.follow = false;
-                            self.dirty = true;
-                        }
-                        MouseEventKind::ScrollDown => {
-                            self.scroll = self.scroll.saturating_add(3);
-                            self.dirty = true;
-                        }
-                        _ => {}
-                    }
-                }
+                self.on_mouse(mouse);
                 Vec::new()
             }
             AppEvent::Input(CtEvent::FocusGained) => {
@@ -790,6 +788,152 @@ impl App {
         )
     }
 
+    pub(crate) fn selection_allowed(&self) -> bool {
+        matches!(self.overlay, Overlay::None | Overlay::Agents(_))
+    }
+
+    fn screen_to_cache(&self, col: u16, row: u16, clamp: bool) -> Option<(usize, u16)> {
+        let area = self.transcript_area;
+        let static_len = self.active_transcript().static_len();
+        if area.height == 0 || static_len == 0 {
+            return None;
+        }
+        let bottom = (self.scroll + usize::from(area.height))
+            .min(static_len)
+            .saturating_sub(1);
+        let line = if row < area.y {
+            if !clamp {
+                return None;
+            }
+            self.scroll
+        } else {
+            let candidate = self.scroll + usize::from(row - area.y);
+            if candidate > bottom {
+                if !clamp {
+                    return None;
+                }
+                bottom
+            } else {
+                candidate
+            }
+        };
+        let left = area.x.saturating_add(crate::layout::PAD_X);
+        let content_col = if col < left {
+            if !clamp && col < area.x {
+                return None;
+            }
+            0
+        } else {
+            col - left
+        };
+        Some((line, content_col))
+    }
+
+    fn valid_selection(&self) -> Option<crate::select::Selection> {
+        self.selection
+            .filter(|_| self.active_transcript().version() == self.selection_version)
+    }
+
+    fn copy_selection(&mut self) {
+        let Some(sel) = self.valid_selection() else {
+            return;
+        };
+        let text = self
+            .active_transcript()
+            .selected_text(sel.anchor, sel.focus);
+        if text.is_empty() {
+            return;
+        }
+        self.pending_copy = Some(text);
+        self.toasts.push(crate::toast::Toast::new(
+            goat_protocol::NotifyKind::Info,
+            "copied".to_owned(),
+        ));
+        self.dirty = true;
+    }
+
+    pub(crate) fn take_pending_copy(&mut self) -> Option<String> {
+        self.pending_copy.take()
+    }
+
+    fn on_left_down(&mut self, col: u16, row: u16) {
+        let Some(pos) = self.screen_to_cache(col, row, false) else {
+            self.selection = None;
+            self.last_click = None;
+            self.dirty = true;
+            return;
+        };
+        self.selection_version = self.active_transcript().version();
+        let now = std::time::Instant::now();
+        let double = self.last_click.is_some_and(|(t, l, c)| {
+            l == pos.0
+                && c.abs_diff(pos.1) <= 1
+                && now.duration_since(t) < std::time::Duration::from_millis(400)
+        });
+        if double && let Some((lo, hi)) = self.active_transcript().word_bounds_at(pos.0, pos.1) {
+            self.selection = Some(crate::select::Selection {
+                anchor: (pos.0, lo),
+                focus: (pos.0, hi),
+                dragging: false,
+            });
+            self.last_click = None;
+            self.dirty = true;
+            return;
+        }
+        self.selection = Some(crate::select::Selection::new(pos));
+        self.last_click = Some((now, pos.0, pos.1));
+        self.dirty = true;
+    }
+
+    fn on_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::MouseButton;
+        match mouse.kind {
+            MouseEventKind::ScrollUp if self.wheel_scroll_allowed() => {
+                self.scroll = self.scroll.saturating_sub(3);
+                self.follow = false;
+                self.dirty = true;
+            }
+            MouseEventKind::ScrollDown if self.wheel_scroll_allowed() => {
+                self.scroll = self.scroll.saturating_add(3);
+                self.dirty = true;
+            }
+            MouseEventKind::Down(MouseButton::Left)
+                if matches!(self.overlay, Overlay::ImageZoom(_)) =>
+            {
+                self.overlay = Overlay::None;
+                self.dirty = true;
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.selection_allowed() => {
+                self.on_left_down(mouse.column, mouse.row);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(pos) = self.screen_to_cache(mouse.column, mouse.row, true)
+                    && let Some(sel) = self.selection.as_mut()
+                    && sel.dragging
+                {
+                    sel.focus = pos;
+                    self.dirty = true;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(sel) = self.selection {
+                    if sel.is_empty() {
+                        self.selection = None;
+                        if self.selection_allowed()
+                            && let Some(img) = self.active_transcript().image_at(sel.anchor.0)
+                        {
+                            self.overlay = Overlay::ImageZoom(Box::new(img));
+                        }
+                    } else if let Some(active) = self.selection.as_mut() {
+                        active.dragging = false;
+                    }
+                    self.dirty = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
@@ -1187,6 +1331,16 @@ async fn event_loop(
 
         if let Some(notification) = app.take_notification() {
             crate::notification::spawn(notification);
+        }
+        if let Some(text) = app.take_pending_copy() {
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                        let _ = clipboard.set_text(text);
+                    }
+                })
+                .await;
+            });
         }
         if app.take_dirty() {
             terminal.draw(|frame| view::render(frame, &mut app))?;
@@ -2168,6 +2322,7 @@ mod tests {
         app.on_engine(EngineEvent::Error {
             id: Some(TaskId(1)),
             message: "boom".to_owned(),
+            hint: None,
         });
         assert!(app.compacting_status().is_none());
         assert!(!app.is_busy());
