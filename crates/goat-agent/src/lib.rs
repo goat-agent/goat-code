@@ -1172,10 +1172,14 @@ mod tests {
 
         let mut saw_retry = false;
         let mut error_message = String::new();
+        let mut error_hint = String::new();
         while let Some(event) = events.recv().await {
             match event {
                 Event::Retrying { .. } => saw_retry = true,
-                Event::Error { message, .. } => error_message = message,
+                Event::Error { message, hint, .. } => {
+                    error_message = message;
+                    error_hint = hint.unwrap_or_default();
+                }
                 Event::TaskDone { interrupted, .. } => {
                     assert!(interrupted);
                     break;
@@ -1185,10 +1189,11 @@ mod tests {
         }
         assert!(!saw_retry, "auth failures must not retry");
         assert!(
-            error_message.contains("/config to re-login"),
+            error_message.contains("authentication failed"),
             "{error_message}"
         );
-        assert!(error_message.contains("progress saved"), "{error_message}");
+        assert!(error_hint.contains("/config to re-login"), "{error_hint}");
+        assert!(error_hint.contains("progress saved"), "{error_hint}");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 

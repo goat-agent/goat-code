@@ -265,9 +265,12 @@ pub(crate) async fn handle_resume(
                         });
                     }
                 }
-                ContentBlock::Image { .. }
-                | ContentBlock::Thinking { .. }
-                | ContentBlock::RedactedThinking { .. } => {}
+                ContentBlock::Thinking { text, .. } => {
+                    if matches!(role, MessageRole::Assistant) {
+                        entries.push(TranscriptEntry::Thinking { text: text.clone() });
+                    }
+                }
+                ContentBlock::Image { .. } | ContentBlock::RedactedThinking { .. } => {}
             }
         }
         parsed.push((stored.id, role, content));

@@ -382,7 +382,11 @@ fn frame_to_event(frame: ServerFrame) -> Option<Event> {
                 })
                 .collect(),
         }),
-        ServerFrame::Error { message } => Some(Event::Error { id: None, message }),
+        ServerFrame::Error { message } => Some(Event::Error {
+            id: None,
+            message,
+            hint: None,
+        }),
         _ => None,
     }
 }

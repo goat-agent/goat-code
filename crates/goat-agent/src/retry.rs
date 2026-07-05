@@ -40,10 +40,26 @@ pub(crate) fn reason_label(error: &StreamError) -> &'static str {
 pub(crate) fn failure_message(error: &StreamError, target: &goat_protocol::ModelTarget) -> String {
     match error {
         StreamError::Auth { message } => format!(
-            "authentication failed ({}/{}): {message} · /config to re-login · progress saved — send a message to continue",
+            "authentication failed ({}/{}): {message}",
             target.provider, target.account,
         ),
         other => other.to_string(),
+    }
+}
+
+pub(crate) fn error_hint(error: &StreamError) -> Option<String> {
+    match error {
+        StreamError::Auth { .. } => {
+            Some("/config to re-login — progress saved, send a message to continue".to_owned())
+        }
+        StreamError::ContextOverflow { .. } => {
+            Some("/compact to free context, then resend".to_owned())
+        }
+        StreamError::RateLimited { .. } | StreamError::Overloaded { .. } => {
+            Some("wait a moment and resend, or /model to switch".to_owned())
+        }
+        StreamError::Transport { .. } => Some("check your connection and resend".to_owned()),
+        StreamError::InvalidRequest { .. } | StreamError::Other { .. } => None,
     }
 }
 
@@ -189,7 +205,21 @@ mod tests {
         };
         let message = super::failure_message(&StreamError::auth("expired"), &target);
         assert!(message.contains("anthropic/work"));
-        assert!(message.contains("/config to re-login"));
-        assert!(message.contains("progress saved"));
+        let hint = super::error_hint(&StreamError::auth("expired")).unwrap();
+        assert!(hint.contains("/config to re-login"));
+        assert!(hint.contains("progress saved"));
+    }
+
+    #[test]
+    fn error_hint_covers_retryable_and_overflow() {
+        assert!(super::error_hint(&StreamError::rate_limited("x", None)).is_some());
+        assert!(super::error_hint(&StreamError::transport("x")).is_some());
+        assert!(
+            super::error_hint(&StreamError::ContextOverflow {
+                message: "x".into()
+            })
+            .is_some()
+        );
+        assert!(super::error_hint(&StreamError::other("x")).is_none());
     }
 }

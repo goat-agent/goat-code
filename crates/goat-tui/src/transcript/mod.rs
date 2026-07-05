@@ -57,6 +57,7 @@ struct StreamCache {
 pub struct Transcript {
     pub(crate) items: Vec<Item>,
     streaming: Option<String>,
+    thinking_buffer: Option<String>,
     version: u64,
     cache: RefCell<Option<RenderCache>>,
     stream_cache: RefCell<Option<StreamCache>>,
@@ -127,19 +128,113 @@ impl Transcript {
         }));
     }
 
+    pub fn push_thinking_delta(&mut self, chunk: &str) {
+        self.thinking_buffer
+            .get_or_insert_with(String::new)
+            .push_str(chunk);
+    }
+
+    pub fn flush_thinking(&mut self) {
+        let Some(buffer) = self.thinking_buffer.take() else {
+            return;
+        };
+        if buffer.trim().is_empty() {
+            return;
+        }
+        self.bump_version();
+        self.items.push(Item::Thinking {
+            text: buffer,
+            collapsed: true,
+        });
+    }
+
+    pub fn push_thinking(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.bump_version();
+        self.items.push(Item::Thinking {
+            text,
+            collapsed: true,
+        });
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn static_len(&self) -> usize {
+        self.cache.borrow().as_ref().map_or(0, |c| c.lines.len())
+    }
+
+    pub fn selected_text(&self, anchor: (usize, u16), focus: (usize, u16)) -> String {
+        let guard = self.cache.borrow();
+        guard.as_ref().map_or(String::new(), |cache| {
+            crate::select::extract(&cache.lines, anchor, focus)
+        })
+    }
+
+    pub fn word_bounds_at(&self, line: usize, col: u16) -> Option<(u16, u16)> {
+        let guard = self.cache.borrow();
+        let cache = guard.as_ref()?;
+        crate::select::word_bounds(cache.lines.get(line)?, col)
+    }
+
+    pub fn image_at(&self, line: usize) -> Option<goat_protocol::ToolImageData> {
+        let guard = self.cache.borrow();
+        let cache = guard.as_ref()?;
+        let placement = cache
+            .images
+            .iter()
+            .find(|p| line >= p.start && line < p.start + usize::from(p.rows))?;
+        match self.items.get(placement.item)? {
+            Item::Tool {
+                image: Some(img), ..
+            } => Some(img.source()),
+            _ => None,
+        }
+    }
+
+    pub fn toggle_thinking(&mut self) -> bool {
+        let mut any = false;
+        let mut expand = false;
+        for item in &self.items {
+            if let Item::Thinking { collapsed, .. } = item {
+                any = true;
+                if *collapsed {
+                    expand = true;
+                    break;
+                }
+            }
+        }
+        if !any {
+            return false;
+        }
+        for item in &mut self.items {
+            if let Item::Thinking { collapsed, .. } = item {
+                *collapsed = !expand;
+            }
+        }
+        self.bump_version();
+        true
+    }
+
     pub fn push_delta(&mut self, chunk: &str) {
+        self.flush_thinking();
         self.streaming
             .get_or_insert_with(String::new)
             .push_str(chunk);
     }
 
     pub fn commit_text(&mut self, text: &str) {
+        self.flush_thinking();
         self.bump_version();
         self.streaming = None;
         self.items.push(Item::Agent(text.to_owned()));
     }
 
     pub fn push_tool(&mut self, call: ToolCall) {
+        self.flush_thinking();
         self.bump_version();
         self.items.push(Item::Tool {
             id: call.id,
@@ -197,13 +292,16 @@ impl Transcript {
         }
     }
 
-    pub fn push_error(&mut self, text: impl Into<String>) {
+    pub fn push_error(&mut self, text: impl Into<String>, hint: Option<String>) {
         self.bump_version();
         if let Some(buffer) = self.streaming.take() {
             let text = format!("{buffer} {} stopped", symbols::ui::ELLIPSIS);
             self.items.push(Item::Agent(text));
         }
-        self.items.push(Item::Error(text.into()));
+        self.items.push(Item::Error {
+            message: text.into(),
+            hint,
+        });
     }
 
     pub fn discard_stream(&mut self) {
@@ -246,7 +344,7 @@ impl Transcript {
                 buffer
             };
             self.items.push(Item::Agent(text));
-        } else if interrupted && !matches!(self.items.last(), Some(Item::Error(_))) {
+        } else if interrupted && !matches!(self.items.last(), Some(Item::Error { .. })) {
             self.items.push(Item::Interrupted);
         }
     }
@@ -703,12 +801,55 @@ mod tests {
     }
 
     #[test]
+    fn thinking_buffer_flushes_before_text_and_toggles() {
+        let mut t = Transcript::default();
+        t.push_thinking_delta("weighing options");
+        assert!(t.items.is_empty(), "thinking stays buffered until flushed");
+        t.push_delta("answer");
+        assert!(
+            matches!(
+                t.items.first(),
+                Some(Item::Thinking {
+                    collapsed: true,
+                    ..
+                })
+            ),
+            "first content delta flushes thinking as a collapsed item"
+        );
+        assert!(t.toggle_thinking(), "toggle reports thinking present");
+        assert!(matches!(
+            t.items.first(),
+            Some(Item::Thinking {
+                collapsed: false,
+                ..
+            })
+        ));
+        assert!(t.toggle_thinking());
+        assert!(matches!(
+            t.items.first(),
+            Some(Item::Thinking {
+                collapsed: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn blank_thinking_is_dropped() {
+        let mut t = Transcript::default();
+        t.push_thinking_delta("   ");
+        t.flush_thinking();
+        assert!(t.items.is_empty());
+        assert!(!t.toggle_thinking(), "no thinking means toggle is a no-op");
+    }
+
+    #[test]
     fn error_commits_partial_stream_before_error_row() {
         let mut t = Transcript::default();
         t.push_delta("partial answer");
-        t.push_error("boom");
+        t.push_error("boom", None);
         assert!(matches!(&t.items[0], Item::Agent(_)));
-        assert!(matches!(&t.items[1], Item::Error(_)));
+        assert!(matches!(&t.items[1], Item::Error { .. }));
         t.complete(true);
         assert!(
             !matches!(t.items.last(), Some(Item::Interrupted)),

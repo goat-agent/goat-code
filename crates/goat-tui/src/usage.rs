@@ -330,7 +330,7 @@ impl<'a> UsageView<'a> {
 
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!(" no accounts {} /config to add", symbols::ui::MIDDOT),
+                format!(" no accounts {} /config to add", symbols::key::ARROW_RIGHT),
                 theme.muted(),
             )));
         }

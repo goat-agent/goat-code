@@ -37,6 +37,10 @@ impl TranscriptImage {
         self.cells.map_or(0, |(_, h)| h)
     }
 
+    pub(crate) fn source(&self) -> ToolImageData {
+        self.source.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn fixed(rows: u16) -> Self {
         Self {
@@ -67,6 +71,25 @@ impl TranscriptImage {
             frame.render_widget(Image::new(protocol).allow_clipping(true), area);
         }
     }
+}
+
+pub(crate) fn render_zoom(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    picker: &Picker,
+    source: &ToolImageData,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let Some(img) = decode(source) else {
+        return;
+    };
+    let size = Size::new(area.width, area.height);
+    let Ok(protocol) = picker.new_protocol(img, size, Resize::Fit(None)) else {
+        return;
+    };
+    frame.render_widget(Image::new(&protocol).allow_clipping(true), area);
 }
 
 fn decode(source: &ToolImageData) -> Option<image::DynamicImage> {

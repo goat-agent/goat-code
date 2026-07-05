@@ -268,6 +268,9 @@ pub enum TranscriptEntry {
     Assistant {
         text: String,
     },
+    Thinking {
+        text: String,
+    },
     Tool {
         call: ToolCall,
         outcome: ToolOutcome,

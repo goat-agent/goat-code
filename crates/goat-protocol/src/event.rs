@@ -91,6 +91,8 @@ pub enum Event {
     Error {
         id: Option<TaskId>,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
     Notify {
         kind: NotifyKind,

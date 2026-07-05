@@ -12,6 +12,14 @@ use crate::{
 impl App {
     pub(crate) fn on_key(&mut self, key: KeyEvent) -> Vec<Op> {
         tracing::trace!(code = ?key.code, modifiers = ?key.modifiers, "key");
+        if key
+            .modifiers
+            .intersects(KeyModifiers::SUPER | KeyModifiers::META)
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+        {
+            self.copy_selection();
+            return Vec::new();
+        }
         match &self.overlay {
             Overlay::Model(_) => return self.on_picker_key(key),
             Overlay::Effort(_) => return self.on_effort_picker_key(key),
@@ -30,6 +38,11 @@ impl App {
                 }
             }
             Overlay::Usage | Overlay::Help => return self.on_usage_key(key),
+            Overlay::ImageZoom(_) => {
+                self.overlay = Overlay::None;
+                self.dirty = true;
+                return Vec::new();
+            }
             Overlay::None => {}
         }
         if let Some(ch) = keymap::ctrl_key(&key) {
@@ -49,6 +62,9 @@ impl App {
                     self.composer.delete_word_before();
                     self.update_command_menu();
                     self.dirty = true;
+                }
+                't' => {
+                    self.dirty |= self.transcript.toggle_thinking();
                 }
                 _ => {}
             }
@@ -251,6 +267,9 @@ impl App {
             }
             KeyCode::Esc => {
                 self.dirty = true;
+                if self.selection.take().is_some() {
+                    return Vec::new();
+                }
                 if let Some(id) = self.turn.active {
                     self.clear_arm = None;
                     return vec![Op::Interrupt { id }];
@@ -262,7 +281,7 @@ impl App {
                     return Vec::new();
                 }
                 if self.clear_arm.take().is_some() {
-                    self.composer.clear();
+                    self.composer.discard();
                 } else {
                     self.clear_arm = Some(CLEAR_ARM_TICKS);
                 }

@@ -77,16 +77,22 @@ async fn run_shell_command(tools: &ToolRegistry, command: &str, cwd: &std::path:
 pub(crate) enum TurnEnd {
     Done,
     Interrupted,
-    Failed(String),
+    Failed(String, Option<String>),
     Shutdown,
 }
 
-pub(crate) async fn emit_task_error(ctx: &Ctx<'_>, id: TaskId, message: String) {
+pub(crate) async fn emit_task_error(
+    ctx: &Ctx<'_>,
+    id: TaskId,
+    message: String,
+    hint: Option<String>,
+) {
     let _ = ctx
         .events
         .send(Event::Error {
             id: Some(id),
             message,
+            hint,
         })
         .await;
     let _ = ctx
@@ -489,7 +495,13 @@ pub(crate) async fn handle_compact(
                 .await;
         }
         Err(crate::compaction::CompactionError::Failed(message)) => {
-            emit_task_error(ctx, id, format!("compaction failed: {message}")).await;
+            emit_task_error(
+                ctx,
+                id,
+                format!("compaction failed: {message}"),
+                Some("/clear to reset the conversation".to_owned()),
+            )
+            .await;
         }
     }
     if shutdown {
@@ -525,7 +537,8 @@ async fn run_one_turn(
         emit_task_error(
             ctx,
             id,
-            "no model selected · /config to connect a provider".to_owned(),
+            "no model selected".to_owned(),
+            Some("/config to connect a provider".to_owned()),
         )
         .await;
         return (TurnFlow::Idle, Vec::new());
@@ -536,7 +549,13 @@ async fn run_one_turn(
         &goat_provider::ProviderId::from(resolved.provider.as_str()),
     );
     let Some(provider) = resolved_provider else {
-        emit_task_error(ctx, id, format!("unknown provider: {}", resolved.provider)).await;
+        emit_task_error(
+            ctx,
+            id,
+            format!("unknown provider: {}", resolved.provider),
+            Some("/config to select a provider".to_owned()),
+        )
+        .await;
         return (TurnFlow::Idle, Vec::new());
     };
 
@@ -660,7 +679,7 @@ async fn run_one_turn(
 
     let turn_end = match outcome {
         LoopOutcome::Completed => TurnEnd::Done,
-        LoopOutcome::Failed(message) => TurnEnd::Failed(message),
+        LoopOutcome::Failed(message, hint) => TurnEnd::Failed(message, hint),
         LoopOutcome::Cancelled => {
             if shutdown {
                 TurnEnd::Shutdown

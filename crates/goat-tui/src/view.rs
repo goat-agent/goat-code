@@ -27,6 +27,31 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let composer_h = app.composer_height(area.width);
 
+    if let Overlay::ImageZoom(source) = app.overlay() {
+        let [body, hint] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        let img_area = body.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+        if let Some(picker) = app.picker.as_ref() {
+            crate::screenshot::render_zoom(frame, img_area, picker, source);
+        } else {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    " image preview unavailable in this terminal ",
+                    theme.muted(),
+                ))),
+                img_area,
+            );
+        }
+        frame.render_widget(
+            Paragraph::new(overlay::hint_line(&[(symbols::key::ESC, "close")], theme)),
+            hint,
+        );
+        return;
+    }
+
     if let Overlay::Ask(picker, _) = app.overlay() {
         let panel_h = picker
             .desired_height()
@@ -225,6 +250,51 @@ fn footer_visible(app: &App) -> bool {
     app.quit_armed() || app.is_busy() || app.clear_armed()
 }
 
+fn render_selection(frame: &mut Frame, app: &mut App, theme: Theme) {
+    let Some(sel) = app.selection else {
+        return;
+    };
+    if app.active_transcript().version() != app.selection_version {
+        app.selection = None;
+        return;
+    }
+    if sel.is_empty() {
+        return;
+    }
+    let area = app.transcript_area;
+    let scroll = app.scroll;
+    let (start, end) = sel.bounds();
+    let left = area.x.saturating_add(PAD_X);
+    let right = area.x.saturating_add(area.width);
+    let buf = frame.buffer_mut();
+    for line in start.0..=end.0 {
+        if line < scroll {
+            continue;
+        }
+        let rel = line - scroll;
+        if rel >= usize::from(area.height) {
+            break;
+        }
+        let y = area
+            .y
+            .saturating_add(u16::try_from(rel).unwrap_or(u16::MAX));
+        let col_lo = if line == start.0 { start.1 } else { 0 };
+        let col_hi = if line == end.0 {
+            end.1
+        } else {
+            area.width.saturating_sub(PAD_X)
+        };
+        let mut x = left.saturating_add(col_lo);
+        let x_end = left.saturating_add(col_hi).min(right);
+        while x < x_end {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_style(theme.selection());
+            }
+            x = x.saturating_add(1);
+        }
+    }
+}
+
 fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     let content = Rect {
         x: area.x,
@@ -234,6 +304,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
     };
     let body_width = content.width.saturating_sub(PAD_X);
     app.clamp_scroll(content.height, body_width);
+    app.transcript_area = content;
     let working = app.working_state();
     let queued = app.queued_labels();
     app.transcript().render(
@@ -251,6 +322,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
             picker: app.picker.as_ref(),
         },
     );
+    render_selection(frame, app, theme);
     if app.follow() {
         return;
     }
@@ -276,6 +348,23 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
         bar,
         &mut state,
     );
+    let below = content_len.saturating_sub(app.scroll() + usize::from(content.height));
+    if below > 0 {
+        let label = format!(" {} {below} below ", symbols::ui::MORE_BELOW);
+        let width = u16::try_from(label.chars().count()).unwrap_or(0);
+        let hint = Rect {
+            x: content
+                .x
+                .saturating_add(content.width.saturating_sub(width)),
+            y: content.y.saturating_add(content.height.saturating_sub(1)),
+            width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(label, theme.accent()))),
+            hint,
+        );
+    }
 }
 
 fn fit_cwd(cwd: &str, max: usize) -> String {
@@ -518,12 +607,12 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         spans.push(Span::styled(symbols::key::ESC, theme.hint_key()));
         spans.push(Span::styled(" interrupt", theme.muted()));
         if !app.queued.is_empty() {
-            spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
+            spans.push(Span::raw("  "));
             spans.push(Span::styled(symbols::key::BACKSPACE, theme.hint_key()));
             spans.push(Span::styled(" edit queued", theme.muted()));
         }
         if !app.agent_runs().is_empty() {
-            spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
+            spans.push(Span::raw("  "));
             spans.push(Span::styled(symbols::key::ARROW_DOWN, theme.hint_key()));
             spans.push(Span::styled(" agents", theme.muted()));
         }

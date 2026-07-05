@@ -70,7 +70,7 @@ pub fn hint_line<'a>(pairs: &[(&'a str, &'a str)], theme: Theme) -> Line<'a> {
     let mut spans: Vec<Span<'a>> = vec![Span::raw(" ")];
     for (i, (glyph, label)) in pairs.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
+            spans.push(Span::raw("  "));
         }
         spans.push(Span::styled(*glyph, theme.hint_key()));
         spans.push(Span::styled(format!(" {label}"), theme.muted()));

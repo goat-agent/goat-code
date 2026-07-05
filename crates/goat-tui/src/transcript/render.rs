@@ -265,6 +265,11 @@ pub(super) fn item_signature(item: &Item) -> u64 {
             1u8.hash(&mut hasher);
             text.hash(&mut hasher);
         }
+        Item::Thinking { text, collapsed } => {
+            8u8.hash(&mut hasher);
+            text.hash(&mut hasher);
+            collapsed.hash(&mut hasher);
+        }
         Item::Shell {
             command, status, ..
         } => {
@@ -278,9 +283,10 @@ pub(super) fn item_signature(item: &Item) -> u64 {
                 }
             }
         }
-        Item::Error(text) => {
+        Item::Error { message, hint } => {
             3u8.hash(&mut hasher);
-            text.hash(&mut hasher);
+            message.hash(&mut hasher);
+            hint.hash(&mut hasher);
         }
         Item::Interrupted => {
             7u8.hash(&mut hasher);
@@ -307,6 +313,7 @@ pub(super) fn item_signature(item: &Item) -> u64 {
                 ToolStatus::Done(outcome) => {
                     1u8.hash(&mut hasher);
                     outcome.ok.hash(&mut hasher);
+                    outcome.summary.hash(&mut hasher);
                 }
             }
         }
@@ -345,14 +352,11 @@ pub(super) fn item_rows(
                 width,
             )
         }
+        Item::Thinking { text, collapsed } => thinking_rows(text, *collapsed, theme, width),
         Item::Shell {
             command, status, ..
         } => shell_rows(command, status, theme, width),
-        Item::Error(text) => hang(
-            &plain_lines_styled(text, theme.error_body()),
-            Span::styled(symbols::marker::ERROR, theme.error()),
-            width,
-        ),
+        Item::Error { message, hint } => error_rows(message, hint.as_deref(), theme, width),
         Item::Interrupted => {
             let inner = width.saturating_sub(2);
             let line = Line::from(vec![
@@ -395,7 +399,7 @@ pub(super) fn item_rows(
         } => {
             let (marker, marker_style) = tool_marker(status, theme);
             let failed = matches!(status, ToolStatus::Done(o) if !o.ok);
-            tool_row(&ToolRowInput {
+            let mut rows = tool_row(&ToolRowInput {
                 name,
                 display_primary: &display.primary,
                 marker,
@@ -403,7 +407,15 @@ pub(super) fn item_rows(
                 theme,
                 width,
                 line_ctx: ToolLineCtx { cwd, width, failed },
-            })
+            });
+            if let ToolStatus::Done(outcome) = status
+                && outcome.ok
+                && let Some(summary) = outcome.summary.as_deref()
+                && is_diff_summary(summary)
+            {
+                rows.extend(diff_body_rows(summary, theme, width));
+            }
+            rows
         }
     }
 }
@@ -472,8 +484,114 @@ pub(super) fn shell_line_style(line: &str, theme: Theme) -> Style {
     } else if line.starts_with("- ") {
         theme.error()
     } else {
+        theme.text()
+    }
+}
+
+pub(super) fn is_diff_summary(summary: &str) -> bool {
+    summary
+        .lines()
+        .any(|line| line.starts_with("+ ") || line.starts_with("- "))
+}
+
+pub(super) fn diff_body_rows(summary: &str, theme: Theme, width: u16) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(2);
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    for line in summary.split('\n') {
+        let content = Line::from(Span::styled(line.to_owned(), diff_line_style(line, theme)));
+        for mut row in wrap::wrap_line(&content, inner) {
+            row.spans.insert(0, Span::raw("  "));
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+fn diff_line_style(line: &str, theme: Theme) -> Style {
+    if line.starts_with("+ ") {
+        theme.role_agent()
+    } else if line.starts_with("- ") {
+        theme.error()
+    } else {
         theme.muted()
     }
+}
+
+fn error_rows(text: &str, hint: Option<&str>, theme: Theme, width: u16) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(2);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for line in plain_lines_styled(text, theme.error_body()) {
+        for mut row in wrap::wrap_line(&line, inner) {
+            let gutter = if out.is_empty() {
+                symbols::marker::ERROR
+            } else {
+                symbols::ui::QUOTE_GUTTER
+            };
+            row.spans.insert(0, Span::styled(gutter, theme.error()));
+            out.push(row);
+        }
+    }
+    if out.is_empty() {
+        out.push(Line::from(Span::styled(
+            symbols::marker::ERROR,
+            theme.error(),
+        )));
+    }
+    if let Some(hint) = hint {
+        let line = Line::from(hint_spans(hint, theme));
+        for mut row in wrap::wrap_line(&line, inner) {
+            row.spans
+                .insert(0, Span::styled(symbols::ui::QUOTE_GUTTER, theme.error()));
+            out.push(row);
+        }
+    }
+    out
+}
+
+fn thinking_rows(text: &str, collapsed: bool, theme: Theme, width: u16) -> Vec<Line<'static>> {
+    let marker = if collapsed {
+        symbols::ui::CHEVRON_RIGHT
+    } else {
+        symbols::ui::CHEVRON_DOWN
+    };
+    let header = Line::from(vec![
+        Span::styled(format!("{marker} "), theme.muted()),
+        Span::styled("Thought", theme.muted()),
+    ]);
+    if collapsed {
+        return vec![header];
+    }
+    let inner = width.saturating_sub(2);
+    let mut out = vec![header];
+    let body = text.trim_end();
+    for line in body.split('\n') {
+        let content = Line::from(Span::styled(line.to_owned(), theme.muted()));
+        for mut row in wrap::wrap_line(&content, inner) {
+            row.spans
+                .insert(0, Span::styled(symbols::ui::QUOTE_GUTTER, theme.muted()));
+            out.push(row);
+        }
+    }
+    out
+}
+
+fn hint_spans(hint: &str, theme: Theme) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(
+        format!("{} ", symbols::key::ARROW_RIGHT),
+        theme.muted(),
+    )];
+    for (i, word) in hint.split(' ').enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", theme.muted()));
+        }
+        let style = if word.starts_with('/') {
+            theme.accent()
+        } else {
+            theme.muted()
+        };
+        spans.push(Span::styled(word.to_owned(), style));
+    }
+    spans
 }
 
 pub(super) fn shell_rows(
@@ -538,4 +656,86 @@ pub(super) fn shell_rows(
     }
     out.extend(rows);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{diff_body_rows, is_diff_summary};
+    use crate::theme::Theme;
+
+    #[test]
+    fn is_diff_summary_detects_change_lines() {
+        assert!(is_diff_summary("- old\n+ new"));
+        assert!(is_diff_summary("3 replacements\n- a\n+ b"));
+        assert!(!is_diff_summary("1 line"));
+        assert!(!is_diff_summary("wrote out.txt"));
+    }
+
+    #[test]
+    fn diff_body_rows_color_change_lines() {
+        let theme = Theme::dark();
+        let rows = diff_body_rows("- world\n+ there", theme, 40);
+        assert_eq!(rows.len(), 2);
+        let removed = &rows[0];
+        let added = &rows[1];
+        assert!(removed.spans.iter().any(|s| s.content.contains("- world")));
+        assert!(added.spans.iter().any(|s| s.content.contains("+ there")));
+        let removed_style = removed.spans.last().unwrap().style;
+        let added_style = added.spans.last().unwrap().style;
+        assert_eq!(removed_style.fg, theme.error().fg);
+        assert_eq!(added_style.fg, theme.role_agent().fg);
+    }
+
+    #[test]
+    fn diff_body_rows_indent_two_columns() {
+        let rows = diff_body_rows("- x", Theme::dark(), 40);
+        assert_eq!(rows[0].spans[0].content.as_ref(), "  ");
+    }
+
+    #[test]
+    fn error_rows_rail_on_continuation() {
+        use super::{error_rows, symbols};
+        let rows = error_rows("line one\nline two\nline three", None, Theme::dark(), 60);
+        assert_eq!(rows[0].spans[0].content.as_ref(), symbols::marker::ERROR);
+        assert_eq!(rows[1].spans[0].content.as_ref(), symbols::ui::QUOTE_GUTTER);
+        assert_eq!(rows[2].spans[0].content.as_ref(), symbols::ui::QUOTE_GUTTER);
+    }
+
+    #[test]
+    fn thinking_rows_collapsed_is_single_line() {
+        use super::{symbols, thinking_rows};
+        let rows = thinking_rows("some reasoning\nmore", true, Theme::dark(), 60);
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].spans[0]
+                .content
+                .contains(symbols::ui::CHEVRON_RIGHT)
+        );
+        assert!(rows[0].spans.iter().any(|s| s.content.contains("Thought")));
+    }
+
+    #[test]
+    fn thinking_rows_expanded_shows_body_with_gutter() {
+        use super::{symbols, thinking_rows};
+        let rows = thinking_rows("line a\nline b", false, Theme::dark(), 60);
+        assert!(rows[0].spans[0].content.contains(symbols::ui::CHEVRON_DOWN));
+        assert!(rows.len() >= 3);
+        assert_eq!(rows[1].spans[0].content.as_ref(), symbols::ui::QUOTE_GUTTER);
+    }
+
+    #[test]
+    fn error_rows_render_action_hint_with_command_accent() {
+        use super::{error_rows, symbols};
+        let theme = Theme::dark();
+        let rows = error_rows("auth failed", Some("/config to re-login"), theme, 60);
+        let action = rows.last().unwrap();
+        assert_eq!(action.spans[0].content.as_ref(), symbols::ui::QUOTE_GUTTER);
+        assert!(action.spans.iter().any(|s| s.content.contains('→')));
+        let command = action
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "/config")
+            .expect("slash command span present");
+        assert_eq!(command.style.fg, theme.accent().fg);
+    }
 }
