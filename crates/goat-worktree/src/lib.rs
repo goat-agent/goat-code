@@ -605,6 +605,18 @@ mod tests {
     }
 
     #[test]
+    fn head_branch_tracks_checkout() {
+        let Some(dir) = git_repo() else {
+            return;
+        };
+        let repo = dir.path().join("repo");
+        let ws = workspace(&repo).unwrap();
+        assert_eq!(ws.head_branch().as_deref(), Some("main"));
+        run(&repo, &["checkout", "-b", "feature-x"]);
+        assert_eq!(ws.head_branch().as_deref(), Some("feature-x"));
+    }
+
+    #[test]
     fn workspace_managed_from_worktree_path() {
         let Some(dir) = git_repo_with_origin() else {
             return;

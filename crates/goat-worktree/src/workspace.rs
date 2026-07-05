@@ -45,6 +45,24 @@ pub fn workspace(cwd: &Path) -> Result<Workspace, WorktreeError> {
     })
 }
 
+impl Workspace {
+    pub fn head_branch(&self) -> Option<String> {
+        let head = self.repo_root.join(".git").join("HEAD");
+        parse_head(&std::fs::read_to_string(head).ok()?)
+    }
+}
+
+fn parse_head(content: &str) -> Option<String> {
+    let content = content.trim();
+    if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
+        return Some(branch.to_owned());
+    }
+    if !content.is_empty() && content.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Some(content.chars().take(7).collect());
+    }
+    None
+}
+
 fn owner_root(current_root: &Path, worktrees: &[crate::git::GitWorktree]) -> PathBuf {
     for worktree in worktrees {
         let bucket = worktree.path.join(GOAT_DIR).join(WORKTREES_DIR);
@@ -93,5 +111,22 @@ mod tests {
         let worktrees = parse_worktrees(input);
         let plan = PathBuf::from("/repo/.goat/worktrees/plan");
         assert_eq!(owner_root(&plan, &worktrees), PathBuf::from("/repo"));
+    }
+
+    #[test]
+    fn parse_head_symbolic_and_detached() {
+        assert_eq!(
+            parse_head("ref: refs/heads/main\n").as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            parse_head("ref: refs/heads/feature/foo\n").as_deref(),
+            Some("feature/foo")
+        );
+        assert_eq!(
+            parse_head("5894a7d0deadbeef1234\n").as_deref(),
+            Some("5894a7d")
+        );
+        assert_eq!(parse_head("\n"), None);
     }
 }

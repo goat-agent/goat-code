@@ -66,6 +66,7 @@ pub(crate) enum Overlay {
 const TICK: Duration = Duration::from_millis(120);
 const QUIT_ARM_TICKS: u16 = 25;
 const CLEAR_ARM_TICKS: u16 = 25;
+const BRANCH_POLL_TICKS: u16 = 8;
 
 pub(crate) enum AppEvent {
     Input(CtEvent),
@@ -94,6 +95,7 @@ pub struct App {
     pub(crate) spinner: usize,
     pub(crate) quit_arm: Option<u16>,
     pub(crate) clear_arm: Option<u16>,
+    branch_poll: u16,
     pub(crate) queued: Vec<(
         TaskId,
         String,
@@ -180,6 +182,7 @@ impl App {
             spinner: 0,
             quit_arm: None,
             clear_arm: None,
+            branch_poll: BRANCH_POLL_TICKS,
             queued: Vec::new(),
             should_quit: false,
             dirty: true,
@@ -231,6 +234,11 @@ impl App {
                 }
                 if crate::toast::tick(&mut self.toasts) {
                     self.dirty = true;
+                }
+                self.branch_poll = self.branch_poll.saturating_sub(1);
+                if self.branch_poll == 0 {
+                    self.branch_poll = BRANCH_POLL_TICKS;
+                    self.refresh_git_branch();
                 }
                 Vec::new()
             }
@@ -826,6 +834,21 @@ impl App {
     }
     pub(crate) fn workspace_snapshot(&self) -> Option<&goat_worktree::Workspace> {
         self.git_workspace.as_ref()
+    }
+    fn refresh_git_branch(&mut self) {
+        let Some(ws) = self.git_workspace.as_ref() else {
+            return;
+        };
+        let Some(branch) = ws.head_branch() else {
+            return;
+        };
+        if branch == ws.git_branch {
+            return;
+        }
+        if let Some(ws) = self.git_workspace.as_mut() {
+            ws.git_branch = branch;
+        }
+        self.dirty = true;
     }
     pub(crate) fn quit_armed(&self) -> bool {
         self.quit_arm.is_some()
