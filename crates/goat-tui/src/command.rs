@@ -2,7 +2,6 @@ use goat_commands::{
     BranchSpec, ChoiceSpec, CommandRegistry, CommandShape, CommandSpec, ParameterSpec,
     ParameterValue,
 };
-use goat_protocol::Effort;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -51,6 +50,7 @@ pub struct Completion {
     start: usize,
     end: usize,
     replacement: String,
+    submit: bool,
 }
 
 #[derive(Clone)]
@@ -67,9 +67,31 @@ enum Mode {
     Context(Vec<Row>),
 }
 
+#[derive(Clone)]
+pub struct RuntimeChoice {
+    pub value: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+pub struct RuntimeChoiceGroup<'a> {
+    pub command: &'a str,
+    pub parameter: &'a str,
+    pub options: &'a [RuntimeChoice],
+    pub empty_hint: &'a str,
+}
+
 #[derive(Clone, Copy)]
 pub struct CommandMenuContext<'a> {
-    pub effort_choices: Option<&'a [Effort]>,
+    pub choices: &'a [RuntimeChoiceGroup<'a>],
+}
+
+impl CommandMenuContext<'_> {
+    fn lookup(&self, command: &str, parameter: &str) -> Option<&RuntimeChoiceGroup<'_>> {
+        self.choices
+            .iter()
+            .find(|group| group.command == command && group.parameter == parameter)
+    }
 }
 
 pub struct CommandMenu {
@@ -124,6 +146,7 @@ impl CommandMenu {
                         start: parts.command_start.saturating_sub(1),
                         end: parts.command_end,
                         replacement: format!("/{} ", spec.name),
+                        submit: false,
                     }),
                     label: format!("/{}", spec.name),
                     aliases: spec.aliases,
@@ -167,6 +190,11 @@ impl CommandMenu {
         matches!(self.mode, Mode::Commands(_))
             .then(|| self.selected_completion())
             .flatten()
+    }
+
+    pub fn selected_submit_completion(&self) -> Option<Completion> {
+        self.selected_completion()
+            .filter(|completion| completion.submit)
     }
 
     pub fn desired_height(&self) -> u16 {
@@ -283,13 +311,10 @@ fn context_rows(
     parts: &SlashParts<'_>,
     ctx: CommandMenuContext<'_>,
 ) -> Vec<Row> {
-    if spec.name == "effort" {
-        return effort_context_rows(parts, ctx.effort_choices);
-    }
     match &spec.shape {
         CommandShape::Empty => vec![hint(spec.usage())],
         CommandShape::Parameters(parameters) => {
-            parameter_rows(parameters, parts.args, parts.args_start)
+            parameter_rows(&spec.name, parameters, parts.args, parts.args_start, ctx)
         }
         CommandShape::Branches(branches) => {
             let first = first_token(parts.args);
@@ -300,7 +325,13 @@ fn context_rows(
                     let rest_start = token_end + parts.args[token_end..].len()
                         - parts.args[token_end..].trim_start().len();
                     let rest = &parts.args[rest_start..];
-                    return parameter_rows(&branch.parameters, rest, parts.args_start + rest_start);
+                    return parameter_rows(
+                        &spec.name,
+                        &branch.parameters,
+                        rest,
+                        parts.args_start + rest_start,
+                        ctx,
+                    );
                 }
                 branch_rows(branches, token, absolute_start, absolute_end)
             } else {
@@ -310,10 +341,20 @@ fn context_rows(
     }
 }
 
-fn parameter_rows(parameters: &[ParameterSpec], args: &str, absolute_start: usize) -> Vec<Row> {
+fn parameter_rows(
+    command: &str,
+    parameters: &[ParameterSpec],
+    args: &str,
+    absolute_start: usize,
+    ctx: CommandMenuContext<'_>,
+) -> Vec<Row> {
     let tokens = token_spans(args);
     let mut index = 0usize;
     for parameter in parameters {
+        if let Some(group) = ctx.lookup(command, &parameter.name) {
+            let (query, start, end) = token_slot(args, absolute_start, tokens.get(index).copied());
+            return runtime_choice_rows(group, query, start, end);
+        }
         match &parameter.value {
             ParameterValue::TextTail => {
                 return vec![hint(parameter_label(parameter))];
@@ -325,74 +366,71 @@ fn parameter_rows(parameters: &[ParameterSpec], args: &str, absolute_start: usiz
                 index += 1;
             }
             ParameterValue::Choice(choices) => {
-                if let Some((start, end)) = tokens.get(index).copied() {
-                    let query = &args[start..end];
-                    return choice_rows(
-                        choices,
-                        query,
-                        absolute_start + start,
-                        absolute_start + end,
-                    );
-                }
-                return choice_rows(
-                    choices,
-                    "",
-                    absolute_start + args.len(),
-                    absolute_start + args.len(),
-                );
+                let (query, start, end) =
+                    token_slot(args, absolute_start, tokens.get(index).copied());
+                return choice_rows(choices, query, start, end);
             }
         }
     }
     vec![hint("Enter to run")]
 }
 
-fn effort_context_rows(parts: &SlashParts<'_>, choices: Option<&[Effort]>) -> Vec<Row> {
-    let Some(supported) = choices else {
-        return vec![hint("select a model first")];
-    };
-    if supported.is_empty() {
-        return vec![hint("this model does not support reasoning effort")];
+fn token_slot(
+    args: &str,
+    absolute_start: usize,
+    token: Option<(usize, usize)>,
+) -> (&str, usize, usize) {
+    match token {
+        Some((start, end)) => (
+            &args[start..end],
+            absolute_start + start,
+            absolute_start + end,
+        ),
+        None => ("", absolute_start + args.len(), absolute_start + args.len()),
     }
-    let specs: Vec<ChoiceSpec> = supported
-        .iter()
-        .map(|e| ChoiceSpec {
-            value: e.as_str().to_owned(),
-            description: None,
-        })
-        .collect();
-    let tokens = token_spans(parts.args);
-    let (query, start, end) = if let Some((s, e)) = tokens.first().copied() {
-        (
-            &parts.args[s..e],
-            parts.args_start + s,
-            parts.args_start + e,
-        )
-    } else {
-        (
-            "",
-            parts.args_start + parts.args.len(),
-            parts.args_start + parts.args.len(),
-        )
-    };
-    let rows = choice_rows(&specs, query, start, end);
-    if rows.is_empty() && !query.is_empty() {
-        vec![hint(format!(
-            "no matching effort (supported: {})",
-            effort_list(supported)
-        ))]
-    } else if rows.is_empty() {
-        choice_rows(&specs, "", start, end)
+}
+
+fn runtime_choice_rows(
+    group: &RuntimeChoiceGroup<'_>,
+    query: &str,
+    start: usize,
+    end: usize,
+) -> Vec<Row> {
+    if group.options.is_empty() {
+        return vec![hint(group.empty_hint.to_owned())];
+    }
+    let rows = matching_runtime_rows(group.options, query, start, end);
+    if rows.is_empty() {
+        matching_runtime_rows(group.options, "", start, end)
     } else {
         rows
     }
 }
 
-fn effort_list(efforts: &[Effort]) -> String {
-    efforts
+fn matching_runtime_rows(
+    options: &[RuntimeChoice],
+    query: &str,
+    start: usize,
+    end: usize,
+) -> Vec<Row> {
+    options
         .iter()
-        .map(|e| e.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+        .filter_map(|option| {
+            let positions = subsequence_match(query, &option.label)?;
+            Some(Row {
+                label: option.label.clone(),
+                aliases: Vec::new(),
+                description: option.description.clone().unwrap_or_default(),
+                positions,
+                completion: Some(Completion {
+                    start,
+                    end,
+                    replacement: option.value.clone(),
+                    submit: true,
+                }),
+            })
+        })
+        .collect()
 }
 
 fn branch_rows(branches: &[BranchSpec], query: &str, start: usize, end: usize) -> Vec<Row> {
@@ -409,6 +447,7 @@ fn branch_rows(branches: &[BranchSpec], query: &str, start: usize, end: usize) -
                     start,
                     end,
                     replacement: format!("{} ", branch.name),
+                    submit: false,
                 }),
             })
         })
@@ -429,6 +468,7 @@ fn choice_rows(choices: &[ChoiceSpec], query: &str, start: usize, end: usize) ->
                     start,
                     end,
                     replacement: choice.value.clone(),
+                    submit: true,
                 }),
             })
         })
@@ -492,15 +532,12 @@ fn token_spans(args: &str) -> Vec<(usize, usize)> {
 mod tests {
     use unicode_width::UnicodeWidthStr;
 
-    use super::{CommandMenu, CommandMenuContext};
+    use super::{CommandMenu, CommandMenuContext, RuntimeChoice, RuntimeChoiceGroup};
     use crate::overlay::truncate_to_width;
     use goat_commands::CommandRegistry;
-    use goat_protocol::Effort;
 
     fn empty_ctx() -> CommandMenuContext<'static> {
-        CommandMenuContext {
-            effort_choices: None,
-        }
+        CommandMenuContext { choices: &[] }
     }
 
     #[test]
@@ -514,21 +551,30 @@ mod tests {
     #[test]
     fn choice_completion_replaces_argument_token() {
         let registry = CommandRegistry::builtin();
-        let supported = [
-            Effort::Low,
-            Effort::Medium,
-            Effort::High,
-            Effort::Xhigh,
-            Effort::Max,
+        let options = [
+            RuntimeChoice {
+                value: "low".to_owned(),
+                label: "low".to_owned(),
+                description: None,
+            },
+            RuntimeChoice {
+                value: "high".to_owned(),
+                label: "high".to_owned(),
+                description: None,
+            },
         ];
+        let group = RuntimeChoiceGroup {
+            command: "effort",
+            parameter: "level",
+            options: &options,
+            empty_hint: "this model does not support reasoning effort",
+        };
         let menu = CommandMenu::new(
             &registry,
             "/effort h",
-            &CommandMenuContext {
-                effort_choices: Some(&supported),
-            },
+            &CommandMenuContext { choices: &[group] },
         );
-        let completion = menu.selected_completion().unwrap();
+        let completion = menu.selected_submit_completion().unwrap();
         assert_eq!(completion.apply("/effort h"), "/effort high");
     }
 

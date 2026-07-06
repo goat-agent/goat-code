@@ -18,6 +18,7 @@ impl App {
         }
         match &self.overlay {
             Overlay::Model(_) => return self.on_picker_key(key),
+            Overlay::Account(_) => return self.on_account_menu_key(key),
             Overlay::Effort(_) => return self.on_effort_picker_key(key),
             Overlay::Thread(_) => return self.on_thread_picker_key(key),
             Overlay::Config(_) => return self.on_config_key(key),
@@ -97,6 +98,13 @@ impl App {
                     self.update_command_menu();
                     return Some(Vec::new());
                 }
+                if let Overlay::Commands(menu) = &self.overlay
+                    && let Some(completion) = menu.selected_submit_completion()
+                {
+                    let text = self.composer.text();
+                    let completed = completion.apply(&text);
+                    self.composer.set_plain_text(&completed);
+                }
                 self.overlay = Overlay::None;
                 self.dirty = true;
                 Some(self.submit())
@@ -119,6 +127,39 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    pub(crate) fn on_account_menu_key(&mut self, key: KeyEvent) -> Vec<Op> {
+        self.dirty = true;
+        if let Some(ch) = keymap::ctrl_key(&key) {
+            if ch == 'c' {
+                self.overlay = Overlay::None;
+            }
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Up => {
+                if let Overlay::Account(menu) = &mut self.overlay {
+                    menu.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Overlay::Account(menu) = &mut self.overlay {
+                    menu.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                if let Overlay::Account(menu) = &self.overlay
+                    && let Some(target) = menu.selected()
+                {
+                    self.overlay = Overlay::None;
+                    return vec![Op::SelectModel { target }];
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     pub(crate) fn on_file_menu_key(&mut self, key: KeyEvent) -> Option<Vec<Op>> {

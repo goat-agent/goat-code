@@ -14,8 +14,9 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
+    account::AccountMenu,
     ask::AskPicker,
-    command::{CommandMenu, CommandMenuContext},
+    command::{CommandMenu, CommandMenuContext, RuntimeChoice, RuntimeChoiceGroup},
     composer::Composer,
     config::{Config, ConfigOutcome},
     files::FileMenu,
@@ -51,6 +52,7 @@ pub(crate) enum MainView {
 pub(crate) enum Overlay {
     None,
     Model(Picker),
+    Account(AccountMenu),
     Effort(EffortPicker),
     Thread(ThreadPicker),
     Config(Config),
@@ -696,6 +698,42 @@ impl App {
             .unwrap_or_default()
     }
 
+    fn effort_choice_options(&self) -> Vec<RuntimeChoice> {
+        self.current_efforts()
+            .into_iter()
+            .map(|effort| {
+                let value = effort.as_str().to_owned();
+                RuntimeChoice {
+                    label: value.clone(),
+                    value,
+                    description: None,
+                }
+            })
+            .collect()
+    }
+
+    fn model_choice_options(&self) -> Vec<RuntimeChoice> {
+        self.models
+            .iter()
+            .map(|entry| {
+                let name = format!("{}/{}", entry.provider, entry.model);
+                let description = entry.context_window.map(|window| {
+                    let k = window / 1000;
+                    if k > 0 {
+                        format!("{k}k")
+                    } else {
+                        format!("{window}")
+                    }
+                });
+                RuntimeChoice {
+                    label: name.clone(),
+                    value: name,
+                    description,
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn apply_effort(&mut self, effort: Effort) -> Vec<Op> {
         let Some(current) = &self.model else {
             self.push_toast(NotifyKind::Error, "select a model first".to_owned());
@@ -716,12 +754,19 @@ impl App {
                     || format!("{}/{}", entry.provider, entry.model).to_lowercase() == needle
             })
             .collect();
-        if let [entry] = exact.as_slice()
-            && let [account] = entry.accounts.as_slice()
-        {
-            return vec![Op::SelectModel {
-                target: account.target.clone(),
-            }];
+        if let [entry] = exact.as_slice() {
+            match entry.accounts.as_slice() {
+                [account] => {
+                    return vec![Op::SelectModel {
+                        target: account.target.clone(),
+                    }];
+                }
+                [] => {}
+                accounts => {
+                    self.overlay = Overlay::Account(AccountMenu::new(accounts.to_vec()));
+                    return Vec::new();
+                }
+            }
         }
         let mut picker = Picker::new(
             self.models.clone(),
@@ -756,10 +801,27 @@ impl App {
         }
         let text = self.composer.text();
         let trimmed = text.trim_start();
-        let efforts = self.current_efforts();
-        let cmd_ctx = CommandMenuContext {
-            effort_choices: self.model.as_ref().map(|_| efforts.as_slice()),
-        };
+        let effort_options = self.effort_choice_options();
+        let model_options = self.model_choice_options();
+        let groups = [
+            RuntimeChoiceGroup {
+                command: "effort",
+                parameter: "level",
+                options: &effort_options,
+                empty_hint: if self.model.is_some() {
+                    "this model does not support reasoning effort"
+                } else {
+                    "select a model first"
+                },
+            },
+            RuntimeChoiceGroup {
+                command: "model",
+                parameter: "name",
+                options: &model_options,
+                empty_hint: "no models yet — run /config to connect a provider",
+            },
+        ];
+        let cmd_ctx = CommandMenuContext { choices: &groups };
         if trimmed.starts_with('/')
             && slash_command_name(trimmed).is_none_or(|name| !name.contains('/'))
         {
@@ -808,7 +870,7 @@ impl App {
     pub(crate) fn overlay_captures_text(&self) -> bool {
         matches!(
             self.overlay,
-            Overlay::Model(_) | Overlay::Config(_) | Overlay::Ask(_, _)
+            Overlay::Model(_) | Overlay::Account(_) | Overlay::Config(_) | Overlay::Ask(_, _)
         )
     }
 
@@ -2240,6 +2302,113 @@ mod tests {
         let ops = app.dispatch_slash_command("/model claude");
         assert!(matches!(ops.as_slice(), [Op::SelectModel { target }] if target.model == "claude"));
         assert!(!matches!(app.overlay, Overlay::Model(_)));
+    }
+
+    #[test]
+    fn effort_menu_typed_choice_runs_without_modal() {
+        use goat_protocol::Effort;
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ModelListChanged {
+            entries: vec![entry_with_efforts(
+                "openai",
+                "gpt",
+                vec![Effort::Low, Effort::Medium, Effort::High],
+            )],
+        });
+        select_model(&mut app, "openai", "gpt");
+        for ch in "/effort h".chars() {
+            app.on_key(press(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(ops.as_slice(), [Op::SelectModel { target }] if target.effort == Some(Effort::High)),
+            "expected direct SelectModel, got {ops:?}"
+        );
+        assert!(!matches!(app.overlay, Overlay::Effort(_)));
+    }
+
+    #[test]
+    fn model_menu_typed_choice_selects_without_modal() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ModelListChanged {
+            entries: vec![
+                single_entry("openai", "gpt"),
+                single_entry("anthropic", "claude"),
+            ],
+        });
+        for ch in "/model claude".chars() {
+            app.on_key(press(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(ops.as_slice(), [Op::SelectModel { target }] if target.provider == "anthropic" && target.model == "claude"),
+            "expected direct SelectModel, got {ops:?}"
+        );
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn model_menu_multi_account_opens_light_account_panel() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ModelListChanged {
+            entries: vec![multi_account_entry("openai", "gpt", &["work", "personal"])],
+        });
+        for ch in "/model openai/gpt".chars() {
+            app.on_key(press(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(ops.is_empty(), "account choice defers selection");
+        assert!(
+            matches!(app.overlay, Overlay::Account(_)),
+            "expected light account panel, not a heavy picker"
+        );
+        app.on_key(press(KeyCode::Down, KeyModifiers::NONE));
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(ops.as_slice(), [Op::SelectModel { target }] if target.account == "personal"),
+            "expected the second account, got {ops:?}"
+        );
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    fn multi_account_entry(provider: &str, model: &str, accounts: &[&str]) -> ModelEntry {
+        ModelEntry {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            accounts: accounts
+                .iter()
+                .map(|id| AccountChoice {
+                    id: (*id).to_owned(),
+                    display: (*id).to_owned(),
+                    target: ModelTarget {
+                        provider: provider.to_owned(),
+                        model: model.to_owned(),
+                        account: (*id).to_owned(),
+                        effort: None,
+                    },
+                })
+                .collect(),
+            context_window: None,
+            supports_images: true,
+            efforts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn model_menu_slashed_model_id_selects_without_modal() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ModelListChanged {
+            entries: vec![single_entry("openrouter", "anthropic/claude")],
+        });
+        for ch in "/model openrouter/anthropic/claude".chars() {
+            app.on_key(press(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let ops = app.on_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(ops.as_slice(), [Op::SelectModel { target }] if target.model == "anthropic/claude"),
+            "expected direct SelectModel, got {ops:?}"
+        );
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[test]

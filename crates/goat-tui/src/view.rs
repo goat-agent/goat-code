@@ -92,6 +92,7 @@ fn render_ask(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
 enum Panel {
     None,
     Commands,
+    Account,
     Files,
     Agents(usize),
 }
@@ -101,6 +102,7 @@ const HEADER_H: u16 = 2;
 fn active_panel(app: &App) -> Panel {
     match app.overlay() {
         Overlay::Commands(_) => Panel::Commands,
+        Overlay::Account(_) => Panel::Account,
         Overlay::Files(_) => Panel::Files,
         Overlay::Agents(cursor) => Panel::Agents(*cursor),
         _ => Panel::None,
@@ -116,6 +118,10 @@ fn panel_desired_height(app: &App, panel: &Panel) -> u16 {
         Panel::None => 0,
         Panel::Commands => match app.overlay() {
             Overlay::Commands(menu) => menu.desired_height(),
+            _ => 0,
+        },
+        Panel::Account => match app.overlay() {
+            Overlay::Account(menu) => menu.desired_height(),
             _ => 0,
         },
         Panel::Files => match app.overlay() {
@@ -195,6 +201,20 @@ fn render_hint(frame: &mut Frame, area: Rect, app: &App, theme: Theme, panel: &P
             }),
         ),
         Panel::Agents(_) => render_agent_footer(frame, area, theme),
+        Panel::Account => frame.render_widget(
+            Paragraph::new(overlay::hint_line(
+                &[
+                    (symbols::key::ARROWS_UPDOWN, "navigate"),
+                    (symbols::key::ENTER, "select"),
+                    (symbols::key::ESC, "cancel"),
+                ],
+                theme,
+            )),
+            area.inner(Margin {
+                horizontal: PAD_X,
+                vertical: 0,
+            }),
+        ),
         Panel::None | Panel::Files => {
             if footer_visible(app) {
                 render_footer(frame, area, app, theme);
@@ -244,6 +264,11 @@ fn render_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, panel: &
         Panel::None => {}
         Panel::Commands => {
             if let Overlay::Commands(menu) = app.overlay() {
+                menu.render(frame, area, theme);
+            }
+        }
+        Panel::Account => {
+            if let Overlay::Account(menu) = app.overlay() {
                 menu.render(frame, area, theme);
             }
         }
@@ -619,11 +644,29 @@ pub(crate) fn model_status_label(
     label
 }
 
-fn model_label(app: &App) -> Option<String> {
+fn model_status_spans(
+    model: &goat_protocol::ModelTarget,
+    multiple_accounts: bool,
+    theme: Theme,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(format!("{}/", model.provider), theme.muted())];
+    if multiple_accounts {
+        spans.push(Span::styled(format!("{}:", model.account), theme.accent()));
+    }
+    spans.push(Span::styled(model.model.clone(), theme.key()));
+    if let Some(effort) = model.effort {
+        spans.push(Span::styled(":", theme.muted()));
+        spans.push(Span::styled(effort.as_str().to_owned(), theme.accent()));
+    }
+    spans
+}
+
+fn model_label(app: &App, theme: Theme) -> Option<(String, Vec<Span<'static>>)> {
     let model = app.current_model()?;
-    Some(model_status_label(
-        model,
-        app.provider_has_multiple_accounts(&model.provider),
+    let multiple = app.provider_has_multiple_accounts(&model.provider);
+    Some((
+        model_status_label(model, multiple),
+        model_status_spans(model, multiple, theme),
     ))
 }
 
@@ -671,11 +714,11 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     });
     let inner_w = usize::from(row.width);
 
-    let model = model_label(app);
+    let model = model_label(app, theme);
     let ctx = ctx_label(app);
     let rates = rate_labels(app);
     let windows = window_label(app.window_count);
-    let model_w = model.as_ref().map_or(0, |label| label.width());
+    let model_w = model.as_ref().map_or(0, |(label, _)| label.width());
     let ctx_w = ctx.as_ref().map_or(0, |(label, _)| label.width());
     let rates_w = rates
         .iter()
@@ -703,9 +746,9 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(label, theme.muted()));
     }
-    if let Some(label) = model {
+    if let Some((_, model_spans)) = model {
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(label, theme.key()));
+        spans.extend(model_spans);
     }
     if let Some((label, pct)) = ctx {
         spans.push(Span::raw("  "));
@@ -797,6 +840,27 @@ mod tests {
             model_status_label(&target(None), true),
             "anthropic:work/claude-sonnet-4"
         );
+    }
+
+    #[test]
+    fn model_status_spans_width_matches_label() {
+        use super::model_status_spans;
+        use crate::theme::Theme;
+        use unicode_width::UnicodeWidthStr;
+
+        for multiple in [false, true] {
+            for effort in [None, Some(Effort::High)] {
+                let model = target(effort);
+                let label = model_status_label(&model, multiple);
+                let spans = model_status_spans(&model, multiple, Theme::dark());
+                let spans_w: usize = spans.iter().map(|span| span.content.width()).sum();
+                assert_eq!(
+                    spans_w,
+                    label.width(),
+                    "multiple={multiple} effort={effort:?}"
+                );
+            }
+        }
     }
 
     #[test]
