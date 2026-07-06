@@ -29,6 +29,7 @@ pub(crate) struct SessionInner {
     pub(crate) awaits_restore: bool,
     pub(crate) ready: Arc<tokio::sync::Notify>,
     pub(crate) resurrected: std::collections::HashSet<u64>,
+    pub(crate) pending_attaches: usize,
 }
 
 #[derive(Clone)]
@@ -118,11 +119,7 @@ impl SessionInner {
         self.log.push_back((seq, event));
         self.subscribers
             .retain(|sub| sub.sender.try_send(frame.clone()).is_ok());
-        body.map(|(thread_id, body)| PersistEvent {
-            thread_id,
-            body,
-            prompt,
-        })
+        thread_id.map(|thread_id| PersistEvent { thread_id, prompt })
     }
 
     pub(crate) fn presence(&self) -> Vec<ClientId> {
@@ -131,6 +128,7 @@ impl SessionInner {
 
     pub(crate) fn evictable(&self) -> bool {
         self.subscribers.is_empty()
+            && self.pending_attaches == 0
             && self.open_asks == 0
             && matches!(self.state, SessionLiveState::Idle {})
     }

@@ -205,6 +205,7 @@ impl Manager {
             awaits_restore: thread_id.is_some(),
             ready,
             resurrected: std::collections::HashSet::new(),
+            pending_attaches: 0,
         }));
 
         let id = {
@@ -242,7 +243,11 @@ impl Manager {
     ) -> Result<(), String> {
         let live = {
             let table = self.inner.sessions.lock().await;
-            table.get(&session).cloned()
+            let live = table.get(&session).cloned();
+            if let Some(live) = &live {
+                live.inner.lock().await.pending_attaches += 1;
+            }
+            live
         };
         let live = live.ok_or("unknown session")?;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -314,6 +319,7 @@ impl Manager {
             }
             let (bridge_tx, bridge_rx) = mpsc::channel(SUBSCRIBER_QUEUE);
             crate::session::subscriber_upsert(&mut inner.subscribers, client, bridge_tx);
+            inner.pending_attaches = inner.pending_attaches.saturating_sub(1);
             let clients = inner.presence();
             broadcast_presence(&mut inner, clients);
             (backlog, bridge_rx)
@@ -657,6 +663,9 @@ fn spawn_pump(
                     manager.register_thread(persist.thread_id, session).await;
                     resurrect_open_prompts(&inner, &store, persist.thread_id).await;
                 }
+            }
+            if inner.lock().await.evictable() {
+                manager.evict_if_idle(session).await;
             }
         }
         {
