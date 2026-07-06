@@ -1,6 +1,7 @@
 pub mod context;
 pub mod display;
 pub mod error;
+pub mod gist;
 pub mod path;
 pub mod policy;
 pub mod spec;
