@@ -201,7 +201,8 @@ pub fn build_body(
         })
         .collect();
     let has_tools = !tools.is_empty();
-    let reasoning = effort.map(|effort| json!({ "effort": effort_wire(effort) }));
+    let reasoning =
+        effort.map(|effort| json!({ "effort": effort_wire(effort), "summary": "auto" }));
     let include = if reasoning.is_some() {
         vec!["reasoning.encrypted_content"]
     } else {
@@ -285,6 +286,16 @@ async fn stream_responses(response: reqwest::Response, events: &mpsc::Sender<Str
                 "response.output_text.delta" => {
                     if let Some(text) = parse_output_delta(&event.data)
                         && events.send(StreamEvent::TextDelta { text }).await.is_err()
+                    {
+                        return;
+                    }
+                }
+                "response.reasoning_summary_text.delta" => {
+                    if let Some(text) = parse_output_delta(&event.data)
+                        && events
+                            .send(StreamEvent::ThinkingDelta { text })
+                            .await
+                            .is_err()
                     {
                         return;
                     }
@@ -953,6 +964,7 @@ mod tests {
             goat_provider::ToolChoice::Auto,
         );
         assert_eq!(high["reasoning"]["effort"], "high");
+        assert_eq!(high["reasoning"]["summary"], "auto");
         let off = build_body(
             "gpt-5.5",
             &messages,

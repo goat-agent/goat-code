@@ -416,6 +416,10 @@ struct ChatChoice {
 struct ChatDelta {
     content: Option<String>,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
     tool_calls: Vec<ToolCallChunk>,
 }
 
@@ -494,6 +498,16 @@ async fn stream_chat(response: reqwest::Response, events: &mpsc::Sender<StreamEv
                 let Some(choice) = chunk.choices.into_iter().next() else {
                     continue;
                 };
+                let reasoning = choice.delta.reasoning_content.or(choice.delta.reasoning);
+                if let Some(text) = reasoning
+                    && !text.is_empty()
+                    && events
+                        .send(StreamEvent::ThinkingDelta { text })
+                        .await
+                        .is_err()
+                {
+                    return;
+                }
                 if let Some(text) = choice.delta.content
                     && events.send(StreamEvent::TextDelta { text }).await.is_err()
                 {
@@ -591,7 +605,11 @@ impl Provider for OpenAiCompatProvider {
     }
 
     fn efforts(&self, model: &str) -> Vec<Effort> {
-        (self.options.effort_options)(model)
+        if self.options.reasoning_effort {
+            (self.options.effort_options)(model)
+        } else {
+            Vec::new()
+        }
     }
 
     fn context_window(&self, model: &str) -> Option<u32> {
@@ -696,6 +714,22 @@ mod tests {
     fn chunk_tool_calls(data: &str) -> Vec<super::ToolCallChunk> {
         let chunk: ChatChunk = serde_json::from_str(data).unwrap();
         chunk.choices.into_iter().next().unwrap().delta.tool_calls
+    }
+
+    #[test]
+    fn reasoning_delta_fields_are_parsed() {
+        let deepseek: ChatChunk =
+            serde_json::from_str(r#"{"choices":[{"delta":{"reasoning_content":"hmm"}}]}"#).unwrap();
+        assert_eq!(
+            deepseek.choices[0].delta.reasoning_content.as_deref(),
+            Some("hmm")
+        );
+        let openrouter: ChatChunk =
+            serde_json::from_str(r#"{"choices":[{"delta":{"reasoning":"think"}}]}"#).unwrap();
+        assert_eq!(
+            openrouter.choices[0].delta.reasoning.as_deref(),
+            Some("think")
+        );
     }
 
     fn request() -> Request {
