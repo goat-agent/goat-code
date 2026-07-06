@@ -230,7 +230,7 @@ fn build_output(
     }
     if denied {
         out.push_str(
-            "\n[note] this command ran under a read-only sandbox; writes outside scratch space are blocked while planning",
+            "\n[note] this command ran under a read-only sandbox; the permission errors above may be from writes blocked outside the scratch space",
         );
     }
     let output = ToolOutput::text(out);
