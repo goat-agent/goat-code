@@ -6,25 +6,48 @@ use ratatui::{
     widgets::{Block, BorderType, Padding, Paragraph},
 };
 use unicode_normalization::UnicodeNormalization;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{symbols, theme::Theme, wrap};
 
 const BORDER_COLS: u16 = 4;
 const PLACEHOLDER: &str = "Ask anything…";
 const SHELL_PLACEHOLDER: &str = "Run a shell command…";
+const PASTE_LINE_THRESHOLD: usize = 5;
+const PASTE_CHAR_THRESHOLD: usize = 500;
+
+#[derive(Clone)]
+enum Cell {
+    Char(char),
+    Image(InputAttachment),
+    Paste(String),
+}
+
+impl Cell {
+    fn is_word(&self) -> bool {
+        matches!(self, Cell::Char(c) if word_boundary(*c))
+    }
+
+    fn is_token(&self) -> bool {
+        matches!(self, Cell::Image(_) | Cell::Paste(_))
+    }
+}
+
+pub(crate) enum CursorToken<'a> {
+    Image(&'a InputAttachment),
+    Paste(&'a str),
+}
 
 #[derive(Clone)]
 enum HistEntry {
-    Text(String),
+    Text(Vec<Vec<Cell>>),
     Shell(String),
 }
 
 pub struct Composer {
-    lines: Vec<Vec<char>>,
+    lines: Vec<Vec<Cell>>,
     row: usize,
     col: usize,
-    attachments: Vec<InputAttachment>,
     shell: bool,
     history: Vec<HistEntry>,
     hist_cursor: Option<usize>,
@@ -37,7 +60,6 @@ impl Default for Composer {
             lines: vec![Vec::new()],
             row: 0,
             col: 0,
-            attachments: Vec::new(),
             shell: false,
             history: Vec::new(),
             hist_cursor: None,
@@ -60,27 +82,64 @@ fn prompt_cols() -> u16 {
     .unwrap_or(u16::MAX)
 }
 
+fn paste_label(text: &str) -> String {
+    let lines = text.lines().count();
+    if lines <= 1 {
+        format!("[Pasted: {} chars]", text.chars().count())
+    } else {
+        format!("[Pasted: {lines} lines]")
+    }
+}
+
+fn should_tokenize_paste(text: &str) -> bool {
+    text.lines().count() >= PASTE_LINE_THRESHOLD || text.chars().count() >= PASTE_CHAR_THRESHOLD
+}
+
+fn cell_label(cell: &Cell, image_ordinal: usize) -> String {
+    match cell {
+        Cell::Char(c) => c.to_string(),
+        Cell::Image(_) => format!("[Image #{image_ordinal}]"),
+        Cell::Paste(text) => paste_label(text),
+    }
+}
+
+fn line_widths(line: &[Cell], image_base: usize) -> (Vec<usize>, usize) {
+    let mut widths = Vec::with_capacity(line.len());
+    let mut ordinal = image_base;
+    for cell in line {
+        if matches!(cell, Cell::Image(_)) {
+            ordinal += 1;
+        }
+        widths.push(cell_label(cell, ordinal).width());
+    }
+    (widths, ordinal)
+}
+
 impl Composer {
     pub fn is_empty(&self) -> bool {
-        self.lines.iter().all(Vec::is_empty) && self.attachments.is_empty()
-    }
-
-    pub fn text_empty(&self) -> bool {
         self.lines.iter().all(Vec::is_empty)
     }
 
     pub fn push_attachment(&mut self, attachment: InputAttachment) {
-        self.attachments.push(attachment);
-        self.hist_cursor = None;
+        self.insert_cell(Cell::Image(attachment));
     }
 
     pub fn push_attachments(&mut self, attachments: Vec<InputAttachment>) {
-        self.attachments.extend(attachments);
-        self.hist_cursor = None;
+        for attachment in attachments {
+            self.insert_cell(Cell::Image(attachment));
+        }
     }
 
     pub fn take_attachments(&mut self) -> Vec<InputAttachment> {
-        std::mem::take(&mut self.attachments)
+        let mut out = Vec::new();
+        for line in &self.lines {
+            for cell in line {
+                if let Cell::Image(att) = cell {
+                    out.push(att.clone());
+                }
+            }
+        }
+        out
     }
 
     pub fn shell(&self) -> bool {
@@ -97,12 +156,13 @@ impl Composer {
 
     pub fn desired_height(&self, width: u16) -> u16 {
         let wrap_width = width.saturating_sub(prompt_cols() + BORDER_COLS).max(1);
-        let total: usize = self
-            .lines
-            .iter()
-            .map(|line| wrap::wrap_chars(line, wrap_width).len())
-            .sum::<usize>()
-            + self.attachments.len();
+        let mut total = 0usize;
+        let mut image_base = 0usize;
+        for line in &self.lines {
+            let (widths, next) = line_widths(line, image_base);
+            image_base = next;
+            total += wrap::wrap_widths(&widths, wrap_width).len();
+        }
         u16::try_from(total)
             .unwrap_or(u16::MAX)
             .saturating_add(2)
@@ -117,10 +177,14 @@ impl Composer {
         self.row + 1 == self.lines.len()
     }
 
-    pub fn insert_char(&mut self, c: char) {
-        self.lines[self.row].insert(self.col, c);
+    fn insert_cell(&mut self, cell: Cell) {
+        self.lines[self.row].insert(self.col, cell);
         self.col += 1;
         self.hist_cursor = None;
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        self.insert_cell(Cell::Char(c));
     }
 
     pub fn insert_str(&mut self, text: &str) {
@@ -130,6 +194,15 @@ impl Composer {
                 '\r' => {}
                 _ => self.insert_char(c),
             }
+        }
+    }
+
+    pub fn insert_paste(&mut self, text: &str) {
+        let normalized: String = text.nfc().collect::<String>().replace('\r', "");
+        if !self.shell && should_tokenize_paste(&normalized) {
+            self.insert_cell(Cell::Paste(normalized));
+        } else {
+            self.insert_str(&normalized);
         }
     }
 
@@ -165,11 +238,11 @@ impl Composer {
     }
 
     pub fn delete_word_before(&mut self) {
-        while self.col > 0 && !word_boundary(self.lines[self.row][self.col - 1]) {
+        while self.col > 0 && !self.lines[self.row][self.col - 1].is_word() {
             self.lines[self.row].remove(self.col - 1);
             self.col -= 1;
         }
-        while self.col > 0 && word_boundary(self.lines[self.row][self.col - 1]) {
+        while self.col > 0 && self.lines[self.row][self.col - 1].is_word() {
             self.lines[self.row].remove(self.col - 1);
             self.col -= 1;
         }
@@ -242,28 +315,26 @@ impl Composer {
     }
 
     pub fn move_word_left(&mut self) -> bool {
-        let start_col = self.col;
-        let start_row = self.row;
-        while self.col > 0 && !word_boundary(self.lines[self.row][self.col - 1]) {
+        let start = (self.row, self.col);
+        while self.col > 0 && !self.lines[self.row][self.col - 1].is_word() {
             self.col -= 1;
         }
-        while self.col > 0 && word_boundary(self.lines[self.row][self.col - 1]) {
+        while self.col > 0 && self.lines[self.row][self.col - 1].is_word() {
             self.col -= 1;
         }
-        self.col != start_col || self.row != start_row
+        (self.row, self.col) != start
     }
 
     pub fn move_word_right(&mut self) -> bool {
-        let start_col = self.col;
-        let start_row = self.row;
+        let start = (self.row, self.col);
         let len = self.lines[self.row].len();
-        while self.col < len && !word_boundary(self.lines[self.row][self.col]) {
+        while self.col < len && !self.lines[self.row][self.col].is_word() {
             self.col += 1;
         }
-        while self.col < len && word_boundary(self.lines[self.row][self.col]) {
+        while self.col < len && self.lines[self.row][self.col].is_word() {
             self.col += 1;
         }
-        self.col != start_col || self.row != start_row
+        (self.row, self.col) != start
     }
 
     pub fn clear(&mut self) {
@@ -281,14 +352,22 @@ impl Composer {
         let line = &self.lines[self.row];
         let mut start = self.col;
         while start > 0 {
-            let c = line[start - 1];
-            if c == '@' {
-                let before_ok = start == 1 || line[start - 2].is_whitespace();
+            let cell = &line[start - 1];
+            let Cell::Char(c) = cell else {
+                return None;
+            };
+            if *c == '@' {
+                let before_ok =
+                    start == 1 || matches!(&line[start - 2], Cell::Char(w) if w.is_whitespace());
                 if before_ok {
-                    let token: String = line[start..self.col].iter().collect();
-                    if token.chars().all(|c| !c.is_whitespace()) {
-                        return Some(token);
-                    }
+                    let token: Option<String> = line[start..self.col]
+                        .iter()
+                        .map(|cell| match cell {
+                            Cell::Char(c) if !c.is_whitespace() => Some(*c),
+                            _ => None,
+                        })
+                        .collect();
+                    return token;
                 }
                 return None;
             }
@@ -303,14 +382,14 @@ impl Composer {
     pub fn replace_at_query(&mut self, replacement: &str) {
         let line = &self.lines[self.row];
         let mut at = self.col;
-        while at > 0 && line[at - 1] != '@' {
+        while at > 0 && !matches!(&line[at - 1], Cell::Char('@')) {
             at -= 1;
         }
         if at == 0 {
             return;
         }
         let start = at - 1;
-        let inserted: Vec<char> = format!("@{replacement} ").chars().collect();
+        let inserted: Vec<Cell> = format!("@{replacement} ").chars().map(Cell::Char).collect();
         let new_len = inserted.len();
         self.lines[self.row].splice(start..self.col, inserted);
         self.col = start + new_len;
@@ -319,7 +398,7 @@ impl Composer {
 
     pub fn take(&mut self) -> String {
         let text = self.text();
-        if !text.trim().is_empty() {
+        if !text.trim().is_empty() || self.lines.iter().flatten().any(Cell::is_token) {
             self.history.push(self.snapshot());
         }
         let history = std::mem::take(&mut self.history);
@@ -334,15 +413,15 @@ impl Composer {
         if self.shell {
             HistEntry::Shell(self.text())
         } else {
-            HistEntry::Text(self.text())
+            HistEntry::Text(self.lines.clone())
         }
     }
 
     fn apply(&mut self, entry: &HistEntry) {
         match entry {
-            HistEntry::Text(text) => {
+            HistEntry::Text(lines) => {
                 self.shell = false;
-                self.set_text(text);
+                self.set_cells(lines.clone());
             }
             HistEntry::Shell(text) => {
                 self.shell = true;
@@ -353,6 +432,10 @@ impl Composer {
 
     pub fn discard(&mut self) {
         self.take();
+    }
+
+    pub fn history_position(&self) -> Option<(usize, usize)> {
+        self.hist_cursor.map(|idx| (idx + 1, self.history.len()))
     }
 
     pub fn history_prev(&mut self) {
@@ -384,7 +467,7 @@ impl Composer {
                 let draft = self
                     .draft
                     .take()
-                    .unwrap_or_else(|| HistEntry::Text(String::new()));
+                    .unwrap_or_else(|| HistEntry::Text(vec![Vec::new()]));
                 self.apply(&draft);
             }
             None => {}
@@ -394,7 +477,17 @@ impl Composer {
     pub(crate) fn text(&self) -> String {
         self.lines
             .iter()
-            .map(|line| line.iter().collect::<String>())
+            .map(|line| {
+                let mut out = String::new();
+                for cell in line {
+                    match cell {
+                        Cell::Char(c) => out.push(*c),
+                        Cell::Paste(text) => out.push_str(text),
+                        Cell::Image(_) => {}
+                    }
+                }
+                out
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -405,33 +498,67 @@ impl Composer {
     }
 
     fn set_text(&mut self, text: &str) {
-        self.lines = if text.is_empty() {
+        let lines = if text.is_empty() {
             vec![Vec::new()]
         } else {
             text.split('\n')
-                .map(|line| line.chars().collect())
+                .map(|line| line.chars().map(Cell::Char).collect())
                 .collect()
+        };
+        self.set_cells(lines);
+    }
+
+    fn set_cells(&mut self, lines: Vec<Vec<Cell>>) {
+        self.lines = if lines.is_empty() {
+            vec![Vec::new()]
+        } else {
+            lines
         };
         self.row = self.lines.len() - 1;
         self.col = self.lines[self.row].len();
     }
 
+    pub(crate) fn cursor_token(&self) -> Option<CursorToken<'_>> {
+        let line = self.lines.get(self.row)?;
+        let idx = if line.get(self.col).is_some_and(Cell::is_token) {
+            self.col
+        } else if self.col > 0 && line.get(self.col - 1).is_some_and(Cell::is_token) {
+            self.col - 1
+        } else {
+            return None;
+        };
+        match &line[idx] {
+            Cell::Image(att) => Some(CursorToken::Image(att)),
+            Cell::Paste(text) => Some(CursorToken::Paste(text)),
+            Cell::Char(_) => None,
+        }
+    }
+
     fn visual_cursor(&self, wrap_width: u16) -> (usize, u16) {
         let mut row = 0usize;
+        let mut image_base = 0usize;
         for line in &self.lines[..self.row] {
-            row += wrap::wrap_chars(line, wrap_width).len();
+            let (widths, next) = line_widths(line, image_base);
+            image_base = next;
+            row += wrap::wrap_widths(&widths, wrap_width).len();
         }
-        let ranges = wrap::wrap_chars(&self.lines[self.row], wrap_width);
+        let (widths, _) = line_widths(&self.lines[self.row], image_base);
+        let ranges = wrap::wrap_widths(&widths, wrap_width);
         let idx = ranges
             .iter()
             .position(|r| self.col < r.end)
             .unwrap_or(ranges.len() - 1);
         let range = ranges[idx].clone();
-        let col: usize = self.lines[self.row][range.start..self.col.max(range.start)]
-            .iter()
-            .filter_map(|c| c.width())
-            .sum();
+        let col: usize = widths[range.start..self.col.max(range.start)].iter().sum();
         (row + idx, u16::try_from(col).unwrap_or(u16::MAX))
+    }
+
+    fn styled_cell(cell: &Cell, ordinal: usize, theme: Theme) -> Span<'static> {
+        match cell {
+            Cell::Char(c) => Span::styled(c.to_string(), theme.base()),
+            Cell::Image(_) => Span::styled(format!("[Image #{ordinal}]"), theme.accent()),
+            Cell::Paste(text) => Span::styled(paste_label(text), theme.accent()),
+        }
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, focused: bool) {
@@ -446,14 +573,19 @@ impl Composer {
         } else {
             (symbols::marker::PROMPT, theme.accent())
         };
-        let block = Block::bordered()
+        let mut block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(border)
             .padding(Padding::horizontal(1));
+        if let Some((pos, total)) = self.history_position() {
+            block = block.title_top(
+                Line::from(Span::styled(format!(" {pos}/{total} "), theme.muted())).right_aligned(),
+            );
+        }
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        if self.text_empty() && self.attachments.is_empty() {
+        if self.is_empty() {
             let placeholder = if self.shell {
                 SHELL_PLACEHOLDER
             } else {
@@ -476,23 +608,27 @@ impl Composer {
         let prompt_cols = prompt_cols();
         let wrap_width = inner.width.saturating_sub(prompt_cols).max(1);
         let mut rows: Vec<Line> = Vec::new();
-        for chars in &self.lines {
-            for range in wrap::wrap_chars(chars, wrap_width) {
+        let mut image_base = 0usize;
+        for line in &self.lines {
+            let (widths, _) = line_widths(line, image_base);
+            for range in wrap::wrap_widths(&widths, wrap_width) {
                 let prompt = if rows.is_empty() { marker } else { "  " };
-                let body: String = chars[range].iter().collect();
-                rows.push(Line::from(vec![
-                    Span::styled(prompt, marker_style),
-                    Span::styled(body, theme.base()),
-                ]));
+                let mut spans = vec![Span::styled(prompt, marker_style)];
+                let mut ordinal = image_base;
+                for cell in &line[..range.start] {
+                    if matches!(cell, Cell::Image(_)) {
+                        ordinal += 1;
+                    }
+                }
+                for cell in &line[range.clone()] {
+                    if matches!(cell, Cell::Image(_)) {
+                        ordinal += 1;
+                    }
+                    spans.push(Self::styled_cell(cell, ordinal, theme));
+                }
+                rows.push(Line::from(spans));
             }
-        }
-
-        for attachment in &self.attachments {
-            let prompt = if rows.is_empty() { marker } else { "  " };
-            rows.push(Line::from(vec![
-                Span::styled(prompt, marker_style),
-                Span::styled(format!("[image: {}]", attachment.label), theme.muted()),
-            ]));
+            image_base += line.iter().filter(|c| matches!(c, Cell::Image(_))).count();
         }
 
         let (cursor_row, cursor_col) = self.visual_cursor(wrap_width);
@@ -757,5 +893,62 @@ mod tests {
         composer.enter_shell();
         composer.insert_str("@file");
         assert_eq!(composer.at_query(), None);
+    }
+
+    #[test]
+    fn long_paste_becomes_token_and_expands_on_take() {
+        let mut composer = Composer::default();
+        let blob = "l1\nl2\nl3\nl4\nl5\nl6";
+        composer.insert_str("before ");
+        composer.insert_paste(blob);
+        composer.insert_str(" after");
+        assert!(!composer.is_empty());
+        assert_eq!(composer.take(), format!("before {blob} after"));
+    }
+
+    #[test]
+    fn short_paste_stays_inline_text() {
+        let mut composer = Composer::default();
+        composer.insert_paste("hi there");
+        assert_eq!(composer.text(), "hi there");
+    }
+
+    #[test]
+    fn image_excluded_from_text_but_in_attachments() {
+        use goat_protocol::InputAttachment;
+        let mut composer = Composer::default();
+        composer.insert_str("look ");
+        composer.push_attachment(InputAttachment {
+            media_type: "image/png".to_owned(),
+            data: "AAAA".to_owned(),
+            label: "x".to_owned(),
+        });
+        composer.insert_str(" here");
+        assert_eq!(composer.text(), "look  here");
+        assert_eq!(composer.take_attachments().len(), 1);
+    }
+
+    #[test]
+    fn history_restores_image_attachment() {
+        use goat_protocol::InputAttachment;
+        let mut composer = Composer::default();
+        composer.insert_str("with pic ");
+        composer.push_attachment(InputAttachment {
+            media_type: "image/png".to_owned(),
+            data: "AAAA".to_owned(),
+            label: "x".to_owned(),
+        });
+        composer.take();
+        composer.history_prev();
+        assert_eq!(composer.take_attachments().len(), 1);
+    }
+
+    #[test]
+    fn backspace_removes_whole_token() {
+        let mut composer = Composer::default();
+        composer.insert_paste("a\nb\nc\nd\ne\nf");
+        assert!(!composer.is_empty());
+        composer.backspace();
+        assert!(composer.is_empty());
     }
 }

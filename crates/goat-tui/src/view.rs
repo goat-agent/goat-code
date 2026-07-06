@@ -3,7 +3,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, BorderType, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -173,27 +173,32 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    let preview_h = composer_preview_height(app);
     if footer_visible(app) {
-        let [header, body, composer, footer] = Layout::vertical([
+        let [header, body, preview, composer, footer] = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(1),
+            Constraint::Length(preview_h),
             Constraint::Length(composer_h),
             Constraint::Length(1),
         ])
         .areas(area);
         render_header(frame, header, app, theme);
         render_transcript(frame, body, app, theme);
+        render_composer_preview(frame, preview, app, theme);
         app.composer().render(frame, composer, theme, true);
         render_footer(frame, footer, app, theme);
     } else {
-        let [header, body, composer] = Layout::vertical([
+        let [header, body, preview, composer] = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(1),
+            Constraint::Length(preview_h),
             Constraint::Length(composer_h),
         ])
         .areas(area);
         render_header(frame, header, app, theme);
         render_transcript(frame, body, app, theme);
+        render_composer_preview(frame, preview, app, theme);
         app.composer().render(frame, composer, theme, true);
     }
     render_toasts(frame, area, app, theme);
@@ -364,6 +369,80 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme)
             Paragraph::new(Line::from(Span::styled(label, theme.accent()))),
             hint,
         );
+    }
+}
+
+const PREVIEW_IMG_ROWS: u16 = 8;
+const PREVIEW_HEAD: usize = 3;
+const PREVIEW_TAIL: usize = 3;
+
+fn paste_preview_lines(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= PREVIEW_HEAD + PREVIEW_TAIL + 1 {
+        return lines.iter().map(|s| (*s).to_owned()).collect();
+    }
+    let mut out: Vec<String> = lines[..PREVIEW_HEAD]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    out.push(format!(
+        "⋮ ({} more lines)",
+        lines.len() - PREVIEW_HEAD - PREVIEW_TAIL
+    ));
+    out.extend(
+        lines[lines.len() - PREVIEW_TAIL..]
+            .iter()
+            .map(|s| (*s).to_owned()),
+    );
+    out
+}
+
+fn composer_preview_height(app: &App) -> u16 {
+    match app.composer().cursor_token() {
+        None => 0,
+        Some(crate::composer::CursorToken::Image(_)) => PREVIEW_IMG_ROWS,
+        Some(crate::composer::CursorToken::Paste(text)) => {
+            u16::try_from(paste_preview_lines(text).len() + 2).unwrap_or(u16::MAX)
+        }
+    }
+}
+
+fn render_composer_preview(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+    if area.height == 0 {
+        return;
+    }
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(theme.border_dim());
+    let inner = block.inner(area);
+    match app.composer().cursor_token() {
+        None => {}
+        Some(crate::composer::CursorToken::Image(att)) => {
+            frame.render_widget(block, area);
+            if let Some(picker) = app.picker.as_ref() {
+                let source = goat_protocol::ToolImageData {
+                    media_type: att.media_type.clone(),
+                    data: att.data.clone(),
+                };
+                crate::screenshot::render_zoom(frame, inner, picker, &source);
+            } else {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        " image preview unavailable in this terminal ",
+                        theme.muted(),
+                    ))),
+                    inner,
+                );
+            }
+        }
+        Some(crate::composer::CursorToken::Paste(text)) => {
+            frame.render_widget(block, area);
+            let lines: Vec<Line> = paste_preview_lines(text)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, theme.muted())))
+                .collect();
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
     }
 }
 

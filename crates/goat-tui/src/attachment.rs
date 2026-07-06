@@ -48,6 +48,32 @@ pub(crate) fn attachments_from_paste(text: &str) -> Result<Vec<InputAttachment>,
         .collect()
 }
 
+pub(crate) fn extract_image_paths(text: &str) -> (String, Vec<InputAttachment>) {
+    let mut attachments = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
+    for line in text.split('\n') {
+        let tokens = split_tokens(line);
+        if tokens.len() == 1
+            && attachments.len() < MAX_ATTACHMENTS
+            && let Some(att) = image_attachment_from_token(&tokens[0])
+        {
+            attachments.push(att);
+            continue;
+        }
+        kept.push(line.to_owned());
+    }
+    (kept.join("\n"), attachments)
+}
+
+fn image_file(candidate: &str) -> Option<PathBuf> {
+    let path = token_to_path(candidate)?;
+    (looks_like_image(&path) && path.is_file()).then_some(path)
+}
+
+fn image_attachment_from_token(token: &str) -> Option<InputAttachment> {
+    image_file(token).and_then(|path| attachment_from_path(&path).ok())
+}
+
 pub(crate) fn attachment_from_clipboard() -> Result<InputAttachment, AttachError> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|err| AttachError::Clipboard(err.to_string()))?;
@@ -63,21 +89,35 @@ pub(crate) fn attachment_from_clipboard() -> Result<InputAttachment, AttachError
 }
 
 fn parse_pasted_paths(text: &str) -> Result<Vec<PathBuf>, AttachError> {
-    let tokens = split_tokens(text);
-    if tokens.is_empty() {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
         return Err(AttachError::Empty);
     }
-    let mut out = Vec::new();
-    for token in tokens {
-        let Some(path) = token_to_path(&token) else {
-            return Err(AttachError::NotImages);
-        };
-        if !looks_like_image(&path) {
-            return Err(AttachError::NotImages);
-        }
-        out.push(path);
+    if let Some(path) = image_file(&unescape(trimmed)) {
+        return Ok(vec![path]);
     }
-    Ok(out)
+    split_tokens(text)
+        .iter()
+        .map(|token| image_file(token))
+        .collect::<Option<Vec<PathBuf>>>()
+        .filter(|paths| !paths.is_empty())
+        .ok_or(AttachError::NotImages)
+}
+
+fn unescape(text: &str) -> String {
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in text.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn split_tokens(text: &str) -> Vec<String> {
@@ -201,7 +241,7 @@ fn encode_dynamic(
 
 #[cfg(test)]
 mod tests {
-    use super::split_tokens;
+    use super::{extract_image_paths, split_tokens};
 
     #[test]
     fn split_quoted_paths() {
@@ -209,5 +249,39 @@ mod tests {
             split_tokens("'/tmp/a b.png' /tmp/c.png"),
             vec!["/tmp/a b.png", "/tmp/c.png"]
         );
+    }
+
+    #[test]
+    fn extract_keeps_plain_multiword_text() {
+        let (text, atts) = extract_image_paths("hello world\nfoo bar");
+        assert_eq!(text, "hello world\nfoo bar");
+        assert!(atts.is_empty());
+    }
+
+    #[test]
+    fn extract_ignores_nonexistent_image_path() {
+        let (text, atts) = extract_image_paths("/no/such/screenshot.png");
+        assert_eq!(text, "/no/such/screenshot.png");
+        assert!(atts.is_empty());
+    }
+
+    #[test]
+    fn dropped_path_with_unescaped_space_promotes() {
+        use super::attachments_from_paste;
+        let path = std::env::temp_dir().join("goat drop test image.png");
+        image::RgbaImage::new(2, 2).save(&path).unwrap();
+        let pasted = path.display().to_string();
+        assert!(pasted.contains(' '), "path must contain an unescaped space");
+        let atts = attachments_from_paste(&pasted).expect("should parse as one image");
+        assert_eq!(atts.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn nonexistent_spaced_path_is_not_promoted() {
+        use super::paste_contains_only_image_paths;
+        assert!(!paste_contains_only_image_paths(
+            "/no/such/Screenshot 2026 at 1 PM.png"
+        ));
     }
 }

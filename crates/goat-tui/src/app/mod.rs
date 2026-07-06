@@ -318,7 +318,7 @@ impl App {
             } => {
                 match result {
                     Ok(attachments) => self.composer.push_attachments(attachments),
-                    Err(_message) if fallback => self.composer.insert_str(&text),
+                    Err(_message) if fallback => self.composer.insert_paste(&text),
                     Err(message) => self.push_toast(NotifyKind::Error, message),
                 }
                 self.update_command_menu();
@@ -532,8 +532,10 @@ impl App {
             let command = self.composer.take();
             return self.submit_shell(command);
         }
+        let mut attachments = self.composer.take_attachments();
         let text = self.composer.take();
-        let attachments = self.composer.take_attachments();
+        let (text, promoted) = crate::attachment::extract_image_paths(&text);
+        attachments.extend(promoted);
         let trimmed = text.trim();
         if trimmed.is_empty() && attachments.is_empty() {
             return Vec::new();
