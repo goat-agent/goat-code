@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use goat_protocol::{Event, Op};
-use goat_wire::{ClientId, ServerFrame, SessionId, SessionLiveState};
+use goat_protocol::{
+    AccountEntry, Event, ModelEntry, ModelTarget, Op, RateLimitSnapshot, SkillInfo,
+};
+use goat_wire::{ClientId, RateLimitEntry, ServerFrame, SessionId, SessionLiveState};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
@@ -30,6 +32,13 @@ pub(crate) struct SessionInner {
     pub(crate) ready: Arc<tokio::sync::Notify>,
     pub(crate) resurrected: std::collections::HashSet<u64>,
     pub(crate) pending_attaches: usize,
+    pub(crate) skills: Vec<SkillInfo>,
+    pub(crate) accounts: Vec<AccountEntry>,
+    pub(crate) model_list: Vec<ModelEntry>,
+    pub(crate) selected_target: Option<ModelTarget>,
+    pub(crate) rate_limits: HashMap<(String, String), (RateLimitSnapshot, i64)>,
+    pub(crate) state_ready: bool,
+    pub(crate) state_watermark: u64,
 }
 
 #[derive(Clone)]
@@ -70,6 +79,45 @@ impl SessionInner {
         goat_protocol::TaskId(id)
     }
 
+    fn cache_state_event(&mut self, event: &Event) {
+        let is_state = match event {
+            Event::SkillsChanged { skills } => {
+                self.skills.clone_from(skills);
+                self.state_ready = true;
+                self.ready.notify_waiters();
+                true
+            }
+            Event::AccountsChanged { providers } => {
+                self.accounts.clone_from(providers);
+                true
+            }
+            Event::ModelListChanged { entries } => {
+                self.model_list.clone_from(entries);
+                true
+            }
+            Event::ModelSelected { target } => {
+                self.selected_target = Some(target.clone());
+                true
+            }
+            Event::RateLimits {
+                provider,
+                account,
+                snapshot,
+                cached_at,
+            } => {
+                self.rate_limits.insert(
+                    (provider.clone(), account.clone()),
+                    (snapshot.clone(), *cached_at),
+                );
+                true
+            }
+            _ => false,
+        };
+        if is_state {
+            self.state_watermark = self.next_seq + 1;
+        }
+    }
+
     pub(crate) fn record_and_fanout(&mut self, event: Event) -> Option<PersistEvent> {
         update_state_from_event(&mut self.state, &event);
         match &event {
@@ -86,6 +134,7 @@ impl SessionInner {
             Event::ThreadBound { thread_id } => self.thread_id = Some(*thread_id),
             _ => {}
         }
+        self.cache_state_event(&event);
         if let Event::ConversationRestored {
             target,
             entries,
@@ -123,6 +172,53 @@ impl SessionInner {
 
     pub(crate) fn presence(&self) -> Vec<ClientId> {
         self.subscribers.iter().map(|s| s.client).collect()
+    }
+
+    pub(crate) fn subscribe_ready(&self) -> bool {
+        if self.awaits_restore {
+            self.snapshot.is_some()
+        } else {
+            self.state_ready || self.snapshot.is_some()
+        }
+    }
+
+    pub(crate) fn build_snapshot(&self) -> ServerFrame {
+        let (watermark, target, transcript, context_tokens, compaction_threshold) =
+            match &self.snapshot {
+                Some(snap) => (
+                    snap.watermark,
+                    snap.target.clone(),
+                    snap.entries.clone(),
+                    snap.context_tokens,
+                    snap.compaction_threshold,
+                ),
+                None => (self.state_watermark, None, Vec::new(), None, None),
+            };
+        let rate_limits = self
+            .rate_limits
+            .iter()
+            .map(
+                |((provider, account), (snapshot, cached_at))| RateLimitEntry {
+                    provider: provider.clone(),
+                    account: account.clone(),
+                    snapshot: snapshot.clone(),
+                    cached_at: *cached_at,
+                },
+            )
+            .collect();
+        ServerFrame::Snapshot {
+            session: self.id,
+            watermark,
+            target,
+            transcript,
+            context_tokens,
+            compaction_threshold,
+            skills: self.skills.clone(),
+            accounts: self.accounts.clone(),
+            model_list: self.model_list.clone(),
+            selected: self.selected_target.clone(),
+            rate_limits,
+        }
     }
 
     pub(crate) fn evictable(&self) -> bool {
@@ -189,6 +285,8 @@ mod tests {
         PromptAction, SessionInner, Subscriber, prompt_action, subscriber_map_remove,
         subscriber_upsert,
     };
+    use std::collections::HashMap;
+
     use goat_protocol::{AskQuestion, Event, TaskId, ToolCallId};
     use goat_wire::{ClientId, ServerFrame, SessionId, SessionLiveState};
     use tokio::sync::mpsc;
@@ -213,6 +311,13 @@ mod tests {
             ready: std::sync::Arc::new(tokio::sync::Notify::new()),
             resurrected: std::collections::HashSet::new(),
             pending_attaches: 0,
+            skills: Vec::new(),
+            accounts: Vec::new(),
+            model_list: Vec::new(),
+            selected_target: None,
+            rate_limits: HashMap::new(),
+            state_ready: false,
+            state_watermark: 0,
         }
     }
 
@@ -263,6 +368,69 @@ mod tests {
             restored_seq < snap.watermark,
             "ConversationRestored seq {restored_seq} must be below watermark {}",
             snap.watermark
+        );
+    }
+
+    #[test]
+    fn skills_changed_caches_and_marks_ready() {
+        let mut inner = blank_inner();
+        assert!(!inner.state_ready);
+        inner.record_and_fanout(Event::SkillsChanged {
+            skills: vec![goat_protocol::SkillInfo {
+                name: "deploy".to_owned(),
+                description: "ship it".to_owned(),
+                command: None,
+            }],
+        });
+        assert!(inner.state_ready);
+        assert_eq!(inner.skills.len(), 1);
+        assert_eq!(inner.state_watermark, 1);
+    }
+
+    #[test]
+    fn state_events_populate_snapshot() {
+        let mut inner = blank_inner();
+        inner.record_and_fanout(Event::AccountsChanged {
+            providers: Vec::new(),
+        });
+        inner.record_and_fanout(Event::ModelListChanged {
+            entries: Vec::new(),
+        });
+        inner.record_and_fanout(Event::SkillsChanged {
+            skills: vec![goat_protocol::SkillInfo {
+                name: "deploy".to_owned(),
+                description: "ship it".to_owned(),
+                command: None,
+            }],
+        });
+        inner.record_and_fanout(Event::RateLimits {
+            provider: "anthropic".to_owned(),
+            account: "default".to_owned(),
+            snapshot: goat_protocol::RateLimitSnapshot {
+                windows: Vec::new(),
+                representative: None,
+            },
+            cached_at: 42,
+        });
+        let ServerFrame::Snapshot {
+            watermark,
+            target,
+            skills,
+            rate_limits,
+            ..
+        } = inner.build_snapshot()
+        else {
+            panic!("expected snapshot frame");
+        };
+        assert!(
+            target.is_none(),
+            "new session snapshot has no restore target"
+        );
+        assert_eq!(skills.len(), 1);
+        assert_eq!(rate_limits.len(), 1);
+        assert_eq!(
+            watermark, inner.state_watermark,
+            "new session snapshot rides on the state watermark"
         );
     }
 

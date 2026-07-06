@@ -4,8 +4,8 @@ pub mod transport;
 
 pub use codec::{WireConn, WireError};
 pub use protocol::{
-    ClientFrame, ClientId, DeviceInfo, DirEntry, DirEntryKind, PROTOCOL_VERSION, ResumeMode,
-    ServerFrame, SessionId, SessionInfo, SessionLiveState, ThreadInfo,
+    ClientFrame, ClientId, DeviceInfo, DirEntry, DirEntryKind, PROTOCOL_VERSION, RateLimitEntry,
+    ResumeMode, ServerFrame, SessionId, SessionInfo, SessionLiveState, ThreadInfo,
 };
 
 pub type ServerConn<S> = WireConn<S, ServerFrame, ClientFrame>;
