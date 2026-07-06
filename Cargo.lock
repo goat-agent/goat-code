@@ -2647,6 +2647,7 @@ dependencies = [
  "goat-tool",
  "goat-worktree",
  "image",
+ "open",
  "percent-encoding",
  "pulldown-cmark",
  "ratatui",

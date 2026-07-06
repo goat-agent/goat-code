@@ -42,6 +42,7 @@ pub(crate) struct AgentRunView {
     pub(crate) done: Option<bool>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainView {
     Live,
     Agent(TaskId),
@@ -110,6 +111,7 @@ pub struct App {
     pub(crate) selection_version: u64,
     pub(crate) transcript_area: ratatui::layout::Rect,
     pub(crate) pending_copy: Option<String>,
+    pub(crate) pending_open: Option<String>,
     pub(crate) last_click: Option<(std::time::Instant, usize, u16)>,
     pub(crate) models: Vec<ModelEntry>,
     pub(crate) models_loaded: bool,
@@ -198,6 +200,7 @@ impl App {
             selection_version: 0,
             transcript_area: ratatui::layout::Rect::default(),
             pending_copy: None,
+            pending_open: None,
             last_click: None,
             models: Vec::new(),
             models_loaded: false,
@@ -815,12 +818,12 @@ impl App {
 
     fn screen_to_cache(&self, col: u16, row: u16, clamp: bool) -> Option<(usize, u16)> {
         let area = self.transcript_area;
-        let static_len = self.active_transcript().static_len();
-        if area.height == 0 || static_len == 0 {
+        let selectable_len = self.active_transcript().selectable_len();
+        if area.height == 0 || selectable_len == 0 {
             return None;
         }
         let bottom = (self.scroll + usize::from(area.height))
-            .min(static_len)
+            .min(selectable_len)
             .saturating_sub(1);
         let line = if row < area.y {
             if !clamp {
@@ -877,8 +880,27 @@ impl App {
         self.pending_copy.take()
     }
 
+    pub(crate) fn take_pending_open(&mut self) -> Option<String> {
+        self.pending_open.take()
+    }
+
+    fn on_left_click(&mut self, col: u16, row: u16) {
+        if !self.selection_allowed() {
+            return;
+        }
+        let Some((line, content_col)) = self.screen_to_cache(col, row, false) else {
+            return;
+        };
+        if let Some(url) = self.active_transcript().url_at(line, content_col) {
+            self.pending_open = Some(url);
+        } else if let Some(img) = self.active_transcript().image_at(line) {
+            self.overlay = Overlay::ImageZoom(Box::new(img));
+        }
+    }
+
     fn on_left_down(&mut self, col: u16, row: u16) {
-        let Some(pos) = self.screen_to_cache(col, row, false) else {
+        let on_content = self.screen_to_cache(col, row, false).is_some();
+        let Some(pos) = self.screen_to_cache(col, row, true) else {
             self.selection = None;
             self.last_click = None;
             self.dirty = true;
@@ -886,11 +908,12 @@ impl App {
         };
         self.selection_version = self.active_transcript().version();
         let now = std::time::Instant::now();
-        let double = self.last_click.is_some_and(|(t, l, c)| {
-            l == pos.0
-                && c.abs_diff(pos.1) <= 1
-                && now.duration_since(t) < std::time::Duration::from_millis(400)
-        });
+        let double = on_content
+            && self.last_click.is_some_and(|(t, l, c)| {
+                l == pos.0
+                    && c.abs_diff(pos.1) <= 1
+                    && now.duration_since(t) < std::time::Duration::from_millis(400)
+            });
         if double && let Some((lo, hi)) = self.active_transcript().word_bounds_at(pos.0, pos.1) {
             self.selection = Some(crate::select::Selection {
                 anchor: (pos.0, lo),
@@ -902,7 +925,11 @@ impl App {
             return;
         }
         self.selection = Some(crate::select::Selection::new(pos));
-        self.last_click = Some((now, pos.0, pos.1));
+        self.last_click = if on_content {
+            Some((now, pos.0, pos.1))
+        } else {
+            None
+        };
         self.dirty = true;
     }
 
@@ -940,11 +967,7 @@ impl App {
                 if let Some(sel) = self.selection {
                     if sel.is_empty() {
                         self.selection = None;
-                        if self.selection_allowed()
-                            && let Some(img) = self.active_transcript().image_at(sel.anchor.0)
-                        {
-                            self.overlay = Overlay::ImageZoom(Box::new(img));
-                        }
+                        self.on_left_click(mouse.column, mouse.row);
                     } else if let Some(active) = self.selection.as_mut() {
                         active.dragging = false;
                     }
@@ -1149,10 +1172,18 @@ impl App {
 
     pub(crate) fn reset_agents(&mut self) {
         self.agent_runs.clear();
-        self.main_view = MainView::Live;
+        self.set_main_view(MainView::Live);
         if matches!(self.overlay, Overlay::Agents(_)) {
             self.overlay = Overlay::None;
         }
+    }
+
+    fn set_main_view(&mut self, view: MainView) {
+        if self.main_view != view {
+            self.selection = None;
+            self.last_click = None;
+        }
+        self.main_view = view;
     }
 
     pub(crate) fn active_transcript(&self) -> &Transcript {
@@ -1168,8 +1199,9 @@ impl App {
 
     pub(crate) fn set_agent_cursor(&mut self, cursor: usize) {
         if let Some(run) = self.agent_runs.get(cursor) {
+            let view = MainView::Agent(run.id);
             self.overlay = Overlay::Agents(cursor);
-            self.main_view = MainView::Agent(run.id);
+            self.set_main_view(view);
             self.follow = true;
             self.dirty = true;
         }
@@ -1177,7 +1209,7 @@ impl App {
 
     pub(crate) fn close_agent_selector(&mut self) {
         self.overlay = Overlay::None;
-        self.main_view = MainView::Live;
+        self.set_main_view(MainView::Live);
         self.follow = true;
         self.dirty = true;
     }
@@ -1360,6 +1392,14 @@ async fn event_loop(
                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                         let _ = clipboard.set_text(text);
                     }
+                })
+                .await;
+            });
+        }
+        if let Some(url) = app.take_pending_open() {
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = open::that(url);
                 })
                 .await;
             });

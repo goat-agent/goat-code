@@ -249,11 +249,18 @@ impl<'a> RenderState<'a> {
             let start = self.link_text_start;
             let spans = self.active_spans();
             let text: String = spans[start..].iter().map(|s| s.content.as_ref()).collect();
+            let autolink = !url.is_empty() && url == text;
             for span in &mut spans[start..] {
                 span.style = span.style.fg(accent);
+                if autolink {
+                    span.style = span.style.add_modifier(Modifier::UNDERLINED);
+                }
             }
             if !in_table && !url.is_empty() && url != text {
-                spans.push(Span::styled(format!(" ({url})"), muted));
+                spans.push(Span::styled(
+                    format!(" ({url})"),
+                    muted.add_modifier(Modifier::UNDERLINED),
+                ));
             }
         }
         self.link_text_start = 0;

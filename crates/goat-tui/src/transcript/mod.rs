@@ -60,6 +60,7 @@ pub struct Transcript {
     version: u64,
     cache: RefCell<Option<RenderCache>>,
     stream_cache: RefCell<Option<StreamCache>>,
+    tail_cache: RefCell<Vec<Line<'static>>>,
     item_memo: RefCell<ItemMemoCache>,
 }
 
@@ -166,17 +167,37 @@ impl Transcript {
         self.cache.borrow().as_ref().map_or(0, |c| c.lines.len())
     }
 
+    pub fn selectable_len(&self) -> usize {
+        self.static_len() + self.tail_cache.borrow().len()
+    }
+
     pub fn selected_text(&self, anchor: (usize, u16), focus: (usize, u16)) -> String {
-        let guard = self.cache.borrow();
-        guard.as_ref().map_or(String::new(), |cache| {
-            crate::select::extract(&cache.lines, anchor, focus)
-        })
+        let cache = self.cache.borrow();
+        let tail = self.tail_cache.borrow();
+        let head = cache.as_ref().map_or(&[][..], |c| c.lines.as_slice());
+        crate::select::extract_split(head, &tail, anchor, focus)
     }
 
     pub fn word_bounds_at(&self, line: usize, col: u16) -> Option<(u16, u16)> {
-        let guard = self.cache.borrow();
-        let cache = guard.as_ref()?;
-        crate::select::word_bounds(cache.lines.get(line)?, col)
+        let cache = self.cache.borrow();
+        let base = cache.as_ref().map_or(0, |c| c.lines.len());
+        if line < base {
+            return crate::select::word_bounds(cache.as_ref()?.lines.get(line)?, col);
+        }
+        drop(cache);
+        let tail = self.tail_cache.borrow();
+        crate::select::word_bounds(tail.get(line - base)?, col)
+    }
+
+    pub fn url_at(&self, line: usize, col: u16) -> Option<String> {
+        let cache = self.cache.borrow();
+        let base = cache.as_ref().map_or(0, |c| c.lines.len());
+        if line < base {
+            return crate::select::url_at(cache.as_ref()?.lines.get(line)?, col);
+        }
+        drop(cache);
+        let tail = self.tail_cache.borrow();
+        crate::select::url_at(tail.get(line - base)?, col)
     }
 
     pub fn image_at(&self, line: usize) -> Option<goat_protocol::ToolImageData> {
@@ -489,6 +510,7 @@ impl Transcript {
             ctx.queued,
             !cache.lines.is_empty(),
         );
+        self.tail_cache.borrow_mut().clone_from(&tail);
         let total = cache.lines.len() + tail.len();
         let height = usize::from(area.height);
         let start = ctx.scroll.min(total.saturating_sub(height));
