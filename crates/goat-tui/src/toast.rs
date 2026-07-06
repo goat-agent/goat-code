@@ -3,7 +3,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Clear, Paragraph},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -56,11 +56,11 @@ pub fn tick(toasts: &mut Vec<Toast>) -> bool {
 }
 
 pub fn render(frame: &mut Frame, area: Rect, theme: Theme, toasts: &[Toast]) {
-    if toasts.is_empty() || area.width < MIN_WIDTH + 4 || area.height < 2 {
+    if toasts.is_empty() || area.width < MIN_WIDTH + 4 || area.height < 3 {
         return;
     }
     let max_width = area.width.saturating_sub(4);
-    let text_width = max_width.saturating_sub(4).max(1);
+    let text_width = max_width.saturating_sub(6).max(1);
     let mut y = area.y.saturating_add(1);
     for toast in toasts.iter().rev() {
         let body = Line::from(Span::raw(toast.message.clone()));
@@ -70,7 +70,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: Theme, toasts: &[Toast]) {
         if wrapped.is_empty() {
             wrapped.push(Line::default());
         }
-        let height = u16::try_from(wrapped.len()).unwrap_or(1);
+        let height = u16::try_from(wrapped.len()).unwrap_or(1).saturating_add(2);
         if y.saturating_add(height) > area.bottom() {
             break;
         }
@@ -86,7 +86,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: Theme, toasts: &[Toast]) {
             .unwrap_or(0);
         let width = u16::try_from(content_w)
             .unwrap_or(u16::MAX)
-            .saturating_add(4)
+            .saturating_add(6)
             .clamp(MIN_WIDTH, max_width);
         let x = area.right().saturating_sub(width).saturating_sub(1);
         let rect = Rect {
@@ -96,6 +96,13 @@ pub fn render(frame: &mut Frame, area: Rect, theme: Theme, toasts: &[Toast]) {
             height,
         };
         frame.render_widget(Clear, rect);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(toast.icon_style(theme))
+            .style(theme.panel())
+            .padding(Padding::horizontal(1));
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
         let mut lines: Vec<Line> = Vec::with_capacity(wrapped.len());
         for (i, mut line) in wrapped.into_iter().enumerate() {
             let icon = if i == 0 {
@@ -107,11 +114,14 @@ pub fn render(frame: &mut Frame, area: Rect, theme: Theme, toasts: &[Toast]) {
                 line.spans
                     .push(Span::styled(symbols::ui::ELLIPSIS, theme.muted()));
             }
-            let mut spans = vec![Span::raw(" "), icon, Span::raw(" ")];
-            spans.extend(line.spans);
+            let mut spans = vec![icon, Span::raw(" ")];
+            for mut span in line.spans {
+                span.style = theme.text().patch(span.style);
+                spans.push(span);
+            }
             lines.push(Line::from(spans));
         }
-        frame.render_widget(Paragraph::new(lines).style(theme.panel()), rect);
+        frame.render_widget(Paragraph::new(lines), inner);
         y = y.saturating_add(height + TOAST_GAP);
     }
 }
