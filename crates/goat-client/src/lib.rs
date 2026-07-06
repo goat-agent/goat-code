@@ -295,7 +295,7 @@ async fn run_connection(
                 {
                     *shared.current_thread.lock().await = Some(*thread_id);
                 }
-                if let Some(mut event) = frame_to_event(frame) {
+                for mut event in frame_to_events(frame) {
                     shared.idmap.lock().await.translate_inbound(&mut event);
                     if events_tx.send(event).await.is_err() {
                         return false;
@@ -355,22 +355,51 @@ fn submit_correlation(op: &Op) -> u64 {
     }
 }
 
-fn frame_to_event(frame: ServerFrame) -> Option<Event> {
+fn frame_to_events(frame: ServerFrame) -> Vec<Event> {
     match frame {
-        ServerFrame::Event { event, .. } => Some(event),
+        ServerFrame::Event { event, .. } => vec![event],
         ServerFrame::Snapshot {
             target,
             transcript,
             context_tokens,
             compaction_threshold,
+            skills,
+            accounts,
+            model_list,
+            selected,
+            rate_limits,
             ..
-        } => target.map(|target| Event::ConversationRestored {
-            target,
-            entries: transcript,
-            context_tokens,
-            compaction_threshold,
-        }),
-        ServerFrame::Threads { threads } => Some(Event::ThreadsListed {
+        } => {
+            let mut events = Vec::new();
+            if let Some(target) = target {
+                events.push(Event::ConversationRestored {
+                    target,
+                    entries: transcript,
+                    context_tokens,
+                    compaction_threshold,
+                });
+            }
+            events.push(Event::SkillsChanged { skills });
+            events.push(Event::AccountsChanged {
+                providers: accounts,
+            });
+            events.push(Event::ModelListChanged {
+                entries: model_list,
+            });
+            if let Some(target) = selected {
+                events.push(Event::ModelSelected { target });
+            }
+            for entry in rate_limits {
+                events.push(Event::RateLimits {
+                    provider: entry.provider,
+                    account: entry.account,
+                    snapshot: entry.snapshot,
+                    cached_at: entry.cached_at,
+                });
+            }
+            events
+        }
+        ServerFrame::Threads { threads } => vec![Event::ThreadsListed {
             threads: threads
                 .into_iter()
                 .map(|t| goat_protocol::ThreadSummary {
@@ -381,13 +410,13 @@ fn frame_to_event(frame: ServerFrame) -> Option<Event> {
                     live: t.live.is_some(),
                 })
                 .collect(),
-        }),
-        ServerFrame::Error { message } => Some(Event::Error {
+        }],
+        ServerFrame::Error { message } => vec![Event::Error {
             id: None,
             message,
             hint: None,
-        }),
-        _ => None,
+        }],
+        _ => Vec::new(),
     }
 }
 
@@ -582,8 +611,8 @@ fn daemon_stderr(socket_path: &Path) -> std::process::Stdio {
 
 #[cfg(test)]
 mod tests {
-    use super::{Delivery, sequenced_delivery};
-    use goat_protocol::{Event, TaskId};
+    use super::{Delivery, frame_to_events, sequenced_delivery};
+    use goat_protocol::{Event, ModelTarget, SkillInfo, TaskId};
     use goat_wire::{ServerFrame, SessionId};
 
     fn text(seq: u64) -> ServerFrame {
@@ -630,6 +659,11 @@ mod tests {
             transcript: Vec::new(),
             context_tokens: None,
             compaction_threshold: None,
+            skills: Vec::new(),
+            accounts: Vec::new(),
+            model_list: Vec::new(),
+            selected: None,
+            rate_limits: Vec::new(),
         };
         assert_eq!(
             sequenced_delivery(&mut expected, &mut replaying, &snapshot),
@@ -642,6 +676,106 @@ mod tests {
             Delivery::Forward
         );
         assert_eq!(expected, Some(5));
+    }
+
+    #[test]
+    fn resumed_snapshot_expands_restore_first_then_state() {
+        let snapshot = ServerFrame::Snapshot {
+            session: SessionId(1),
+            watermark: 4,
+            target: Some(ModelTarget {
+                provider: "p".to_owned(),
+                model: "m".to_owned(),
+                account: "a".to_owned(),
+                effort: None,
+            }),
+            transcript: Vec::new(),
+            context_tokens: None,
+            compaction_threshold: None,
+            skills: vec![SkillInfo {
+                name: "deploy".to_owned(),
+                description: "ship".to_owned(),
+                command: None,
+            }],
+            accounts: Vec::new(),
+            model_list: Vec::new(),
+            selected: None,
+            rate_limits: Vec::new(),
+        };
+        let events = frame_to_events(snapshot);
+        assert!(
+            matches!(events.first(), Some(Event::ConversationRestored { .. })),
+            "restore must land before state events"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::SkillsChanged { skills } if skills.len() == 1)),
+            "skills must be delivered from the snapshot"
+        );
+    }
+
+    #[test]
+    fn new_session_snapshot_omits_restore_but_keeps_skills() {
+        let snapshot = ServerFrame::Snapshot {
+            session: SessionId(1),
+            watermark: 2,
+            target: None,
+            transcript: Vec::new(),
+            context_tokens: None,
+            compaction_threshold: None,
+            skills: vec![SkillInfo {
+                name: "deploy".to_owned(),
+                description: "ship".to_owned(),
+                command: None,
+            }],
+            accounts: Vec::new(),
+            model_list: Vec::new(),
+            selected: None,
+            rate_limits: Vec::new(),
+        };
+        let events = frame_to_events(snapshot);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::ConversationRestored { .. })),
+            "a new session has no restore target"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::SkillsChanged { .. })),
+            "skills still arrive for a new session"
+        );
+    }
+
+    #[test]
+    fn new_session_snapshot_watermark_keeps_seq_continuity() {
+        let snapshot = ServerFrame::Snapshot {
+            session: SessionId(1),
+            watermark: 2,
+            target: None,
+            transcript: Vec::new(),
+            context_tokens: None,
+            compaction_threshold: None,
+            skills: Vec::new(),
+            accounts: Vec::new(),
+            model_list: Vec::new(),
+            selected: None,
+            rate_limits: Vec::new(),
+        };
+        let mut expected = None;
+        let mut replaying = false;
+        assert_eq!(
+            sequenced_delivery(&mut expected, &mut replaying, &snapshot),
+            Delivery::Forward
+        );
+        assert_eq!(expected, Some(2));
+        assert_eq!(
+            sequenced_delivery(&mut expected, &mut replaying, &text(2)),
+            Delivery::Forward
+        );
+        assert_eq!(expected, Some(3));
     }
 
     #[test]

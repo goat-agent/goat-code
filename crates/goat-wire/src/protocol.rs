@@ -1,8 +1,10 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use goat_protocol::{Event, ModelTarget, Op, TranscriptEntry};
+use goat_protocol::{
+    AccountEntry, Event, ModelEntry, ModelTarget, Op, RateLimitSnapshot, SkillInfo, TranscriptEntry,
+};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 fn id_json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     <String as schemars::JsonSchema>::json_schema(generator)
@@ -135,6 +137,11 @@ pub enum ServerFrame {
         transcript: Vec<TranscriptEntry>,
         context_tokens: Option<u32>,
         compaction_threshold: Option<u32>,
+        skills: Vec<SkillInfo>,
+        accounts: Vec<AccountEntry>,
+        model_list: Vec<ModelEntry>,
+        selected: Option<ModelTarget>,
+        rate_limits: Vec<RateLimitEntry>,
     },
     Event {
         session: SessionId,
@@ -179,6 +186,14 @@ pub enum ServerFrame {
     VersionMismatch {
         daemon_version: u32,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RateLimitEntry {
+    pub provider: String,
+    pub account: String,
+    pub snapshot: RateLimitSnapshot,
+    pub cached_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

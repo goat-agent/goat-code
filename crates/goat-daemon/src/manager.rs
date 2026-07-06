@@ -206,6 +206,13 @@ impl Manager {
             ready,
             resurrected: std::collections::HashSet::new(),
             pending_attaches: 0,
+            skills: Vec::new(),
+            accounts: Vec::new(),
+            model_list: Vec::new(),
+            selected_target: None,
+            rate_limits: std::collections::HashMap::new(),
+            state_ready: false,
+            state_watermark: 0,
         }));
 
         let id = {
@@ -254,7 +261,7 @@ impl Manager {
         loop {
             let notified = {
                 let inner = live.inner.lock().await;
-                if inner.snapshot.is_some() || !inner.awaits_restore {
+                if inner.subscribe_ready() {
                     break;
                 }
                 inner.ready.clone()
@@ -264,7 +271,7 @@ impl Manager {
             wait.as_mut().enable();
             {
                 let inner = live.inner.lock().await;
-                if inner.snapshot.is_some() || !inner.awaits_restore {
+                if inner.subscribe_ready() {
                     break;
                 }
             }
@@ -272,49 +279,22 @@ impl Manager {
                 break;
             }
         }
-        let catalog_refresh = {
-            let inner = live.inner.lock().await;
-            if inner.snapshot.is_some() {
-                let credentials = CredentialStore::new(self.inner.auth_path.clone());
-                Some(goat_agent::model_list_entries(&credentials).await)
-            } else {
-                None
-            }
-        };
         let (backlog, live_rx) = {
             let mut inner = live.inner.lock().await;
-            let mut backlog = Vec::new();
-            if let Some(snap) = inner.snapshot.clone() {
-                backlog.push(ServerFrame::Snapshot {
-                    session,
-                    watermark: snap.watermark,
-                    target: snap.target,
-                    transcript: snap.entries,
-                    context_tokens: snap.context_tokens,
-                    compaction_threshold: snap.compaction_threshold,
-                });
-            }
+            let snapshot = inner.build_snapshot();
+            let ServerFrame::Snapshot { watermark, .. } = &snapshot else {
+                unreachable!("build_snapshot always returns a Snapshot frame")
+            };
+            let watermark = *watermark;
+            let mut backlog = vec![snapshot];
             for (seq, event) in &inner.log {
-                if let Some(snap) = &inner.snapshot
-                    && *seq < snap.watermark
-                {
+                if *seq < watermark {
                     continue;
                 }
                 backlog.push(ServerFrame::Event {
                     session,
                     seq: *seq,
                     event: event.clone(),
-                });
-            }
-            if let Some(entries) = catalog_refresh {
-                let event = goat_protocol::Event::ModelListChanged { entries };
-                let seq = inner.next_seq;
-                inner.next_seq += 1;
-                inner.log.push_back((seq, event.clone()));
-                backlog.push(ServerFrame::Event {
-                    session,
-                    seq,
-                    event,
                 });
             }
             let (bridge_tx, bridge_rx) = mpsc::channel(SUBSCRIBER_QUEUE);
