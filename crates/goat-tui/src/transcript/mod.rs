@@ -522,7 +522,7 @@ impl Transcript {
             if cache.spinner_lines.binary_search(&i).is_ok()
                 && let Some(span) = line.spans.first_mut()
             {
-                *span = Span::styled(ctx.spinner, ctx.theme.accent());
+                *span = Span::styled(format!("{} ", ctx.spinner), ctx.theme.accent());
             }
             visible.push(pad_left(line, ctx.left_pad, ctx.theme));
         }
@@ -942,7 +942,7 @@ mod tests {
                 );
             })
             .unwrap();
-        assert!(buffer_row(&terminal, 0).starts_with(symbols::SPINNER[3]));
+        assert!(buffer_row(&terminal, 0).starts_with(&format!("{} ", symbols::SPINNER[3])));
     }
 
     fn cell_bg(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Option<ratatui::style::Color> {
