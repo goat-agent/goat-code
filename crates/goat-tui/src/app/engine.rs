@@ -19,6 +19,7 @@ impl App {
                     picker.set_entries(entries.clone());
                 }
                 self.models = entries;
+                self.models_loaded = true;
             }
             EngineEvent::ModelSelected { target } => self.model = Some(target),
             EngineEvent::ThreadsListed { threads } => match self.pending.resume.take() {

@@ -112,6 +112,7 @@ pub struct App {
     pub(crate) pending_copy: Option<String>,
     pub(crate) last_click: Option<(std::time::Instant, usize, u16)>,
     pub(crate) models: Vec<ModelEntry>,
+    pub(crate) models_loaded: bool,
     pub(crate) model: Option<ModelTarget>,
     pub(crate) overlay: Overlay,
     pub(crate) pending: PendingState,
@@ -199,6 +200,7 @@ impl App {
             pending_copy: None,
             last_click: None,
             models: Vec::new(),
+            models_loaded: false,
             model: None,
             overlay: Overlay::None,
             pending: PendingState::default(),
@@ -357,7 +359,11 @@ impl App {
         self.dirty = true;
         match effect {
             CommandEffect::OpenModelPicker => {
-                self.overlay = Overlay::Model(Picker::new(self.models.clone(), self.model.clone()));
+                self.overlay = Overlay::Model(Picker::new(
+                    self.models.clone(),
+                    self.model.clone(),
+                    self.models.is_empty() && !self.models_loaded,
+                ));
                 Vec::new()
             }
             CommandEffect::SelectModelNamed(query) => self.select_model_named(&query),
@@ -714,7 +720,11 @@ impl App {
                 target: account.target.clone(),
             }];
         }
-        let mut picker = Picker::new(self.models.clone(), self.model.clone());
+        let mut picker = Picker::new(
+            self.models.clone(),
+            self.model.clone(),
+            self.models.is_empty() && !self.models_loaded,
+        );
         for ch in query.trim().chars() {
             picker.on_char(ch);
         }
