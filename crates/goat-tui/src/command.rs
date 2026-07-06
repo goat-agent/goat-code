@@ -5,7 +5,7 @@ use goat_commands::{
 use goat_protocol::Effort;
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -13,8 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     layout::LIST_MAX,
-    overlay::{hint_line, selection_row, truncate_to_width},
-    symbols,
+    overlay::{selection_row, truncate_to_width},
     theme::Theme,
 };
 
@@ -172,39 +171,26 @@ impl CommandMenu {
 
     pub fn desired_height(&self) -> u16 {
         let rows = self.rows().len().clamp(1, LIST_MAX);
-        u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(1)
+        u16::try_from(rows).unwrap_or(u16::MAX)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        let hint_height = 1u16;
-        let [list_area, hint_area] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(hint_height)]).areas(area);
-
-        let width = usize::from(list_area.width);
+        let width = usize::from(area.width);
         let rows = self.rows();
-        let win = crate::overlay::window(self.cursor, rows.len(), usize::from(list_area.height));
-        let mut lines: Vec<Line> = Vec::new();
-        if let Some(above) = &win.above {
-            lines.push(Line::from(Span::styled(format!(" {above}"), theme.muted())));
-        }
-        for (pos, entry) in rows.iter().enumerate().skip(win.start).take(win.shown) {
-            lines.push(render_row(pos == self.cursor, width, entry, theme));
-        }
-        if let Some(below) = &win.below {
-            lines.push(Line::from(Span::styled(format!(" {below}"), theme.muted())));
-        }
-        frame.render_widget(Paragraph::new(lines), list_area);
-
-        frame.render_widget(
-            Paragraph::new(hint_line(
-                &[
-                    (symbols::key::TAB, "complete"),
-                    (symbols::key::ENTER, "run"),
-                ],
-                theme,
-            )),
-            hint_area,
-        );
+        let visible = usize::from(area.height).max(1);
+        let start = if self.cursor >= visible {
+            self.cursor + 1 - visible
+        } else {
+            0
+        };
+        let lines: Vec<Line> = rows
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(pos, entry)| render_row(pos == self.cursor, width, entry, theme))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), area);
     }
 
     fn rows(&self) -> &[Row] {
