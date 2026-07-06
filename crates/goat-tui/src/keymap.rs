@@ -10,6 +10,19 @@ pub(crate) fn ctrl_key(key: &KeyEvent) -> Option<char> {
     }
 }
 
+pub(crate) fn super_char(key: &KeyEvent) -> Option<char> {
+    if !key
+        .modifiers
+        .intersects(KeyModifiers::SUPER | KeyModifiers::META)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(c) => Some(base_key(c)),
+        _ => None,
+    }
+}
+
 fn base_key(c: char) -> char {
     dubeolsik(c).unwrap_or_else(|| c.to_ascii_lowercase())
 }
@@ -50,7 +63,7 @@ fn dubeolsik(c: char) -> Option<char> {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
-    use super::{base_key, ctrl_key};
+    use super::{base_key, ctrl_key, super_char};
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
@@ -89,6 +102,42 @@ mod tests {
     fn ctrl_enter_returns_none() {
         let k = key(KeyCode::Enter, KeyModifiers::CONTROL);
         assert_eq!(ctrl_key(&k), None);
+    }
+
+    #[test]
+    fn super_c_latin_and_dubeolsik() {
+        assert_eq!(
+            super_char(&key(KeyCode::Char('c'), KeyModifiers::SUPER)),
+            Some('c')
+        );
+        assert_eq!(
+            super_char(&key(KeyCode::Char('ㅊ'), KeyModifiers::SUPER)),
+            Some('c')
+        );
+        assert_eq!(
+            super_char(&key(KeyCode::Char('C'), KeyModifiers::META)),
+            Some('c')
+        );
+    }
+
+    #[test]
+    fn super_v_dubeolsik() {
+        assert_eq!(
+            super_char(&key(KeyCode::Char('ㅍ'), KeyModifiers::SUPER)),
+            Some('v')
+        );
+    }
+
+    #[test]
+    fn super_char_requires_super_or_meta() {
+        assert_eq!(
+            super_char(&key(KeyCode::Char('c'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            super_char(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            None
+        );
     }
 
     #[test]

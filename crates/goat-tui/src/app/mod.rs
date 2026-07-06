@@ -3,9 +3,7 @@ mod keys;
 
 use std::{collections::HashMap, path::Path, time::Duration};
 
-use crossterm::event::{
-    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
-};
+use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
 use futures::StreamExt;
 use goat_commands::{CommandEffect, CommandRegistry};
 use goat_protocol::{
@@ -792,6 +790,13 @@ impl App {
         )
     }
 
+    pub(crate) fn overlay_captures_text(&self) -> bool {
+        matches!(
+            self.overlay,
+            Overlay::Model(_) | Overlay::Config(_) | Overlay::Ask(_, _)
+        )
+    }
+
     pub(crate) fn selection_allowed(&self) -> bool {
         matches!(self.overlay, Overlay::None | Overlay::Agents(_))
     }
@@ -1302,7 +1307,7 @@ async fn event_loop(
     while !app.should_quit {
         let event = tokio::select! {
             maybe = input.next() => match maybe {
-                Some(Ok(ev)) => match prepare_input_event(ev, &attach_tx) {
+                Some(Ok(ev)) => match prepare_input_event(ev, &attach_tx, app.overlay_captures_text()) {
                     Some(event) => event,
                     None => continue,
                 },
@@ -1337,6 +1342,7 @@ async fn event_loop(
             crate::notification::spawn(notification);
         }
         if let Some(text) = app.take_pending_copy() {
+            copy_to_terminal_clipboard(&text);
             tokio::spawn(async move {
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
@@ -1353,9 +1359,22 @@ async fn event_loop(
     Ok(())
 }
 
-fn prepare_input_event(ev: CtEvent, tx: &tokio::sync::mpsc::Sender<AppEvent>) -> Option<AppEvent> {
+fn copy_to_terminal_clipboard(text: &str) {
+    use base64::Engine as _;
+    use std::io::Write as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{encoded}\x07");
+    let _ = out.flush();
+}
+
+fn prepare_input_event(
+    ev: CtEvent,
+    tx: &tokio::sync::mpsc::Sender<AppEvent>,
+    overlay_captures_text: bool,
+) -> Option<AppEvent> {
     match &ev {
-        CtEvent::Paste(text) => {
+        CtEvent::Paste(text) if !overlay_captures_text => {
             let text = text.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
@@ -1380,11 +1399,9 @@ fn prepare_input_event(ev: CtEvent, tx: &tokio::sync::mpsc::Sender<AppEvent>) ->
             None
         }
         CtEvent::Key(key)
-            if key.kind == KeyEventKind::Press
-                && key
-                    .modifiers
-                    .intersects(KeyModifiers::SUPER | KeyModifiers::META)
-                && matches!(key.code, KeyCode::Char('v' | 'V')) =>
+            if !overlay_captures_text
+                && key.kind == KeyEventKind::Press
+                && crate::keymap::super_char(key) == Some('v') =>
         {
             let tx = tx.clone();
             tokio::spawn(async move {
@@ -1411,6 +1428,17 @@ mod tests {
 
     use super::{App, Overlay};
     use crate::theme::Theme;
+
+    #[test]
+    fn paste_passes_through_when_overlay_captures_text() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let ev = crossterm::event::Event::Paste("sk-secret".to_owned());
+        let out = super::prepare_input_event(ev, &tx, true);
+        assert!(
+            matches!(out, Some(super::AppEvent::Input(crossterm::event::Event::Paste(t))) if t == "sk-secret"),
+            "with a text-capturing overlay, paste must pass through untouched (not be grabbed as an attachment)"
+        );
+    }
 
     fn single_entry(provider: &str, model: &str) -> ModelEntry {
         ModelEntry {
