@@ -467,7 +467,12 @@ fn drain_tool_calls(tool_calls: &mut ToolAccumulator) -> Vec<StreamEvent> {
 fn data_has_error(data: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(data)
         .ok()
-        .and_then(|value| value.get("error").map(|_| ()))
+        .and_then(|value| {
+            value
+                .get("error")
+                .filter(|error| !error.is_null())
+                .map(|_| ())
+        })
         .is_some()
 }
 
@@ -705,6 +710,16 @@ mod tests {
         ToolAccumulator, accumulate_tool_calls, build_chat_body, data_has_error, drain_tool_calls,
         to_chat_messages,
     };
+
+    #[test]
+    fn null_error_field_is_not_a_stream_error() {
+        assert!(!data_has_error(
+            r#"{"choices":[{"delta":{"content":"hi"}}],"error":null}"#
+        ));
+        assert!(!data_has_error(r#"{"choices":[]}"#));
+        assert!(data_has_error(r#"{"error":{"message":"boom"}}"#));
+    }
+
     use goat_provider::{
         AuthMethod, ContentBlock, Effort, Message, MessageRole, Provider, Request, StreamEvent,
         ToolChoice, ToolDefinition,

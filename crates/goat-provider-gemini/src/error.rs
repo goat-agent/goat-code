@@ -58,7 +58,7 @@ pub(crate) fn classify_http(status: reqwest::StatusCode, body: &str) -> StreamEr
 pub(crate) fn stream_error(data: &str) -> Option<StreamError> {
     let value: Value = serde_json::from_str(data).ok()?;
     let root = value.get("response").unwrap_or(&value);
-    root.get("error")?;
+    root.get("error").filter(|error| !error.is_null())?;
     let body = serde_json::to_string(root).unwrap_or_else(|_| data.to_owned());
     let parsed = parse_body(&body);
     let message = if parsed.message.is_empty() {
