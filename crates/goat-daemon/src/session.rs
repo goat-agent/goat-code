@@ -48,7 +48,6 @@ pub(crate) struct LiveSession {
 
 pub(crate) struct PersistEvent {
     pub(crate) thread_id: i64,
-    pub(crate) body: String,
     pub(crate) prompt: Option<PromptAction>,
 }
 
@@ -110,7 +109,7 @@ impl SessionInner {
             self.log.pop_front();
         }
         let prompt = prompt_action(&event);
-        let body = self.thread_id.zip(serde_json::to_string(&event).ok());
+        let thread_id = self.thread_id;
         let frame = ServerFrame::Event {
             session: self.id,
             seq,
@@ -213,7 +212,21 @@ mod tests {
             awaits_restore: false,
             ready: std::sync::Arc::new(tokio::sync::Notify::new()),
             resurrected: std::collections::HashSet::new(),
+            pending_attaches: 0,
         }
+    }
+
+    #[test]
+    fn pending_attach_blocks_eviction() {
+        let mut inner = blank_inner();
+        assert!(inner.evictable(), "idle + no subscribers + no pending");
+        inner.pending_attaches += 1;
+        assert!(
+            !inner.evictable(),
+            "an in-flight attach must keep the session alive"
+        );
+        inner.pending_attaches -= 1;
+        assert!(inner.evictable());
     }
 
     #[test]

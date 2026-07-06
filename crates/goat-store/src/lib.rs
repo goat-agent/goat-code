@@ -219,48 +219,6 @@ impl Store {
         .await
     }
 
-    pub async fn append_session_event(
-        &self,
-        thread_id: i64,
-        body: String,
-        created_at: i64,
-    ) -> Result<(), StoreError> {
-        self.run(move |conn| {
-            let next: i64 = conn.query_row(
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM session_events WHERE thread_id = ?1",
-                params![thread_id],
-                |row| row.get(0),
-            )?;
-            conn.execute(
-                "INSERT INTO session_events (thread_id, seq, body, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![thread_id, next, body, created_at],
-            )?;
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn session_events(&self, thread_id: i64) -> Result<Vec<(u64, String)>, StoreError> {
-        self.run_read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT seq, body FROM session_events
-                 WHERE thread_id = ?1 ORDER BY seq ASC",
-            )?;
-            let rows = stmt.query_map(params![thread_id], |row| {
-                let seq: i64 = row.get(0)?;
-                let body: String = row.get(1)?;
-                Ok((u64::try_from(seq).unwrap_or(0), body))
-            })?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row?);
-            }
-            Ok(out)
-        })
-        .await
-    }
-
     pub async fn record_open_prompt(
         &self,
         thread_id: i64,
@@ -673,22 +631,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_events_append_and_read_in_order() {
-        let store = Store::open_in_memory().unwrap();
-        let thread_id = store.create_thread(sample_thread()).await.unwrap();
-        store
-            .append_session_event(thread_id, "a".into(), 1)
-            .await
-            .unwrap();
-        store
-            .append_session_event(thread_id, "b".into(), 2)
-            .await
-            .unwrap();
-        let events = store.session_events(thread_id).await.unwrap();
-        assert_eq!(events, vec![(0, "a".to_owned()), (1, "b".to_owned())]);
-    }
-
-    #[tokio::test]
     async fn open_prompts_roundtrip_and_clear() {
         let store = Store::open_in_memory().unwrap();
         let thread_id = store.create_thread(sample_thread()).await.unwrap();
@@ -899,7 +841,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(has_index, (1, 8));
+        assert_eq!(has_index, (1, 9));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -931,7 +873,44 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(result, (0, 8));
+        assert_eq!(result, (0, 9));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn migrates_v8_database_drops_session_events() {
+        let path = std::env::temp_dir().join("goat-store-v8-migration-test.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            for schema in [
+                crate::schema::SCHEMA_V1,
+                crate::schema::SCHEMA_V2,
+                crate::schema::SCHEMA_V3,
+                crate::schema::SCHEMA_V4,
+                crate::schema::SCHEMA_V5,
+                crate::schema::SCHEMA_V6,
+                crate::schema::SCHEMA_V7,
+                crate::schema::SCHEMA_V8,
+            ] {
+                conn.execute_batch(schema).unwrap();
+            }
+            conn.execute_batch("PRAGMA user_version = 8;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let result = store
+            .run(|conn| {
+                let has_table: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_events'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+                Ok((has_table, version))
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, (0, 9));
         let _ = std::fs::remove_file(&path);
     }
 

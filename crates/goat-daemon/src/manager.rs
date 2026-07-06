@@ -630,12 +630,6 @@ fn spawn_pump(
             };
             if let Some(persist) = persist {
                 let now = Manager::now_ms();
-                if let Err(err) = store
-                    .append_session_event(persist.thread_id, persist.body, now)
-                    .await
-                {
-                    tracing::warn!(%err, "failed to persist session event");
-                }
                 match persist.prompt {
                     Some(crate::session::PromptAction::Open {
                         call_id,
