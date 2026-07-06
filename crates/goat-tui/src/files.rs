@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     text::{Line, Span},
     widgets::Paragraph,
 };
 
-use crate::{layout::LIST_MAX, overlay::render_window, theme::Theme};
+use crate::{layout::LIST_MAX, overlay, theme::Theme};
 
 const SCAN_CAP: usize = 4000;
 const RESULT_CAP: usize = 200;
@@ -68,20 +68,35 @@ impl FileMenu {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: Theme) {
-        let [list_area] = Layout::vertical([Constraint::Min(1)]).areas(area);
-        let width = usize::from(list_area.width);
-        let rows = usize::from(list_area.height);
+        let width = usize::from(area.width);
         let lines = if self.matches.is_empty() {
             vec![Line::from(Span::styled(" no files match", theme.muted()))]
         } else {
-            render_window(theme, width, self.cursor, self.matches.len(), rows, |idx| {
-                let entry = &self.matches[idx];
-                let selected = idx == self.cursor;
-                let style = if selected { theme.key() } else { theme.base() };
-                (vec![Span::styled(entry.clone(), style)], None)
-            })
+            let visible = usize::from(area.height).max(1);
+            let start = if self.cursor >= visible {
+                self.cursor + 1 - visible
+            } else {
+                0
+            };
+            self.matches
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(visible)
+                .map(|(idx, entry)| {
+                    let selected = idx == self.cursor;
+                    let style = if selected { theme.key() } else { theme.base() };
+                    overlay::selection_row(
+                        theme,
+                        selected,
+                        width,
+                        vec![Span::styled(entry.clone(), style)],
+                        None,
+                    )
+                })
+                .collect()
         };
-        frame.render_widget(Paragraph::new(lines), list_area);
+        frame.render_widget(Paragraph::new(lines), area);
     }
 }
 

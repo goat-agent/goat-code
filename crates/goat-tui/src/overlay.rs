@@ -171,33 +171,6 @@ pub fn window(cursor: usize, len: usize, rows: usize) -> Window {
     }
 }
 
-pub fn render_window<'a, F>(
-    theme: Theme,
-    width: usize,
-    cursor: usize,
-    len: usize,
-    rows: usize,
-    mut row: F,
-) -> Vec<Line<'a>>
-where
-    F: FnMut(usize) -> (Vec<Span<'a>>, Option<Span<'a>>),
-{
-    let w = window(cursor, len, rows);
-    let mut lines: Vec<Line<'a>> = Vec::new();
-    if let Some(above) = &w.above {
-        lines.push(Line::from(Span::styled(format!(" {above}"), theme.muted())));
-    }
-    for idx in w.start..w.start + w.shown {
-        let selected = idx == cursor;
-        let (left, right) = row(idx);
-        lines.push(selection_row(theme, selected, width, left, right));
-    }
-    if let Some(below) = &w.below {
-        lines.push(Line::from(Span::styled(format!(" {below}"), theme.muted())));
-    }
-    lines
-}
-
 pub fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
     let width = max_width.min(area.width.saturating_sub(4));
     let height = max_height.min(area.height.saturating_sub(2));

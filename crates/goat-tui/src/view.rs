@@ -14,7 +14,6 @@ use crate::{
     theme::Theme,
 };
 
-#[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
     let full = frame.area();
@@ -25,183 +24,236 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         vertical: 0,
     });
 
-    let composer_h = app.composer_height(area.width);
-
     if let Overlay::ImageZoom(source) = app.overlay() {
-        let [body, hint] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-        let img_area = body.inner(Margin {
-            horizontal: 2,
-            vertical: 1,
-        });
-        if let Some(picker) = app.picker.as_ref() {
-            crate::screenshot::render_zoom(frame, img_area, picker, source);
-        } else {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    " image preview unavailable in this terminal ",
-                    theme.muted(),
-                ))),
-                img_area,
-            );
-        }
-        frame.render_widget(
-            Paragraph::new(overlay::hint_line(&[(symbols::key::ESC, "close")], theme)),
-            hint,
-        );
+        render_image_zoom(frame, area, app, theme, source);
         return;
     }
 
-    if let Overlay::Ask(picker, _) = app.overlay() {
-        let panel_h = picker
+    if let Overlay::Ask(..) = app.overlay() {
+        render_ask(frame, area, app, theme);
+        return;
+    }
+
+    render_main(frame, area, app, theme);
+    render_toasts(frame, area, app, theme);
+}
+
+fn render_image_zoom(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    theme: Theme,
+    source: &goat_protocol::ToolImageData,
+) {
+    let [body, hint] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    let img_area = body.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    if let Some(picker) = app.picker.as_ref() {
+        crate::screenshot::render_zoom(frame, img_area, picker, source);
+    } else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " image preview unavailable in this terminal ",
+                theme.muted(),
+            ))),
+            img_area,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(overlay::hint_line(&[(symbols::key::ESC, "close")], theme)),
+        hint,
+    );
+}
+
+fn render_ask(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
+    let panel_h = match app.overlay() {
+        Overlay::Ask(picker, _) => picker
             .desired_height()
             .min(area.height.saturating_sub(2))
-            .max(3);
-        let [header, transcript_area, _panel] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(panel_h),
-        ])
-        .areas(area);
-        render_header(frame, header, app, theme);
-        render_transcript(frame, transcript_area, app, theme);
-        if let Overlay::Ask(picker, _) = app.overlay() {
-            picker.render(frame, area, theme);
-        }
-        render_toasts(frame, area, app, theme);
-        return;
-    }
-
-    if let Overlay::Commands(menu) = app.overlay() {
-        let panel_h = menu
-            .desired_height()
-            .min(area.height.saturating_sub(composer_h + 2))
-            .max(1);
-        let [header, transcript_area, composer_area, panel] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(composer_h),
-            Constraint::Length(panel_h),
-        ])
-        .areas(area);
-
-        render_header(frame, header, app, theme);
-        render_transcript(frame, transcript_area, app, theme);
-        if let Overlay::Commands(menu) = app.overlay() {
-            menu.render(frame, panel, theme);
-        }
-        app.composer().render(frame, composer_area, theme, true);
-        render_toasts(frame, area, app, theme);
-        return;
-    }
-
-    if let Overlay::Files(menu) = app.overlay() {
-        let panel_h = menu
-            .desired_height()
-            .min(area.height.saturating_sub(composer_h + 2))
-            .max(1);
-        let [header, transcript_area, composer_area, panel] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(composer_h),
-            Constraint::Length(panel_h),
-        ])
-        .areas(area);
-
-        render_header(frame, header, app, theme);
-        render_transcript(frame, transcript_area, app, theme);
-        if let Overlay::Files(menu) = app.overlay() {
-            menu.render(frame, panel, theme);
-        }
-        app.composer().render(frame, composer_area, theme, true);
-        render_toasts(frame, area, app, theme);
-        return;
-    }
-
-    match app.overlay() {
-        Overlay::Config(_)
-        | Overlay::Model(_)
-        | Overlay::Effort(_)
-        | Overlay::Thread(_)
-        | Overlay::Usage
-        | Overlay::Help => {
-            let [header, body, composer] = Layout::vertical([
-                Constraint::Length(2),
-                Constraint::Min(1),
-                Constraint::Length(composer_h),
-            ])
-            .areas(area);
-            render_header(frame, header, app, theme);
-            render_transcript(frame, body, app, theme);
-            match app.overlay() {
-                Overlay::Config(config) => config.render(frame, body, theme),
-                Overlay::Model(picker) => picker.render(frame, body, theme),
-                Overlay::Effort(picker) => picker.render(frame, body, theme),
-                Overlay::Thread(picker) => picker.render(frame, body, theme),
-                Overlay::Usage => {
-                    let view = app.build_usage_view();
-                    view.render(frame, body, theme);
-                }
-                Overlay::Help => crate::help::render(frame, body, theme),
-                _ => {}
-            }
-            app.composer().render(frame, composer, theme, false);
-            render_toasts(frame, area, app, theme);
-            return;
-        }
-        _ => {}
-    }
-
-    if let Some(cursor) = app.agent_selector() {
-        let count = u16::try_from(app.agent_runs().len())
-            .unwrap_or(1)
-            .clamp(1, u16::try_from(LIST_MAX).unwrap_or(10));
-        let [header, body, composer, panel, footer] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(composer_h),
-            Constraint::Length(count),
-            Constraint::Length(1),
-        ])
-        .areas(area);
-        render_header(frame, header, app, theme);
-        render_transcript(frame, body, app, theme);
-        render_agent_panel(frame, panel, app, theme, cursor);
-        render_agent_footer(frame, footer, theme);
-        app.composer().render(frame, composer, theme, false);
-        render_toasts(frame, area, app, theme);
-        return;
-    }
-
-    let preview_h = composer_preview_height(app);
-    if footer_visible(app) {
-        let [header, body, preview, composer, footer] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(preview_h),
-            Constraint::Length(composer_h),
-            Constraint::Length(1),
-        ])
-        .areas(area);
-        render_header(frame, header, app, theme);
-        render_transcript(frame, body, app, theme);
-        render_composer_preview(frame, preview, app, theme);
-        app.composer().render(frame, composer, theme, true);
-        render_footer(frame, footer, app, theme);
-    } else {
-        let [header, body, preview, composer] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(preview_h),
-            Constraint::Length(composer_h),
-        ])
-        .areas(area);
-        render_header(frame, header, app, theme);
-        render_transcript(frame, body, app, theme);
-        render_composer_preview(frame, preview, app, theme);
-        app.composer().render(frame, composer, theme, true);
+            .max(3),
+        _ => 3,
+    };
+    let [header, transcript_area, _panel] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(panel_h),
+    ])
+    .areas(area);
+    render_header(frame, header, app, theme);
+    render_transcript(frame, transcript_area, app, theme);
+    if let Overlay::Ask(picker, _) = app.overlay() {
+        picker.render(frame, area, theme);
     }
     render_toasts(frame, area, app, theme);
+}
+
+enum Panel {
+    None,
+    Commands,
+    Files,
+    Agents(usize),
+}
+
+const HEADER_H: u16 = 2;
+
+fn active_panel(app: &App) -> Panel {
+    match app.overlay() {
+        Overlay::Commands(_) => Panel::Commands,
+        Overlay::Files(_) => Panel::Files,
+        Overlay::Agents(cursor) => Panel::Agents(*cursor),
+        _ => Panel::None,
+    }
+}
+
+fn composer_focused(app: &App) -> bool {
+    !is_full_body_overlay(app) && !matches!(app.overlay(), Overlay::Agents(_))
+}
+
+fn panel_desired_height(app: &App, panel: &Panel) -> u16 {
+    match panel {
+        Panel::None => 0,
+        Panel::Commands => match app.overlay() {
+            Overlay::Commands(menu) => menu.desired_height(),
+            _ => 0,
+        },
+        Panel::Files => match app.overlay() {
+            Overlay::Files(menu) => menu.desired_height(),
+            _ => 0,
+        },
+        Panel::Agents(_) => u16::try_from(app.agent_runs().len())
+            .unwrap_or(1)
+            .clamp(1, u16::try_from(LIST_MAX).unwrap_or(10)),
+    }
+}
+
+fn render_main(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
+    let composer_h = app.composer_height(area.width);
+    let panel = active_panel(app);
+    let focused = composer_focused(app);
+    let full_body = is_full_body_overlay(app);
+
+    let footer_h = 1u16;
+    let min_body = 1u16;
+    let reserved = HEADER_H
+        .saturating_add(min_body)
+        .saturating_add(composer_h)
+        .saturating_add(footer_h);
+    let stack_budget = area.height.saturating_sub(reserved);
+
+    let panel_want = panel_desired_height(app, &panel);
+    let preview_want = if full_body {
+        0
+    } else {
+        composer_preview_height(app)
+    };
+    let (panel_h, preview_h) = fit_stack(panel_want, preview_want, stack_budget);
+
+    let [
+        header,
+        body,
+        panel_area,
+        preview_area,
+        composer_area,
+        footer_area,
+    ] = Layout::vertical([
+        Constraint::Length(HEADER_H),
+        Constraint::Min(1),
+        Constraint::Length(panel_h),
+        Constraint::Length(preview_h),
+        Constraint::Length(composer_h),
+        Constraint::Length(footer_h),
+    ])
+    .areas(area);
+
+    render_header(frame, header, app, theme);
+    render_transcript(frame, body, app, theme);
+    render_full_body_overlay(frame, body, app, theme);
+    render_panel(frame, panel_area, app, theme, &panel);
+    render_composer_preview(frame, preview_area, app, theme);
+    app.composer().render(frame, composer_area, theme, focused);
+    render_hint(frame, footer_area, app, theme, &panel);
+}
+
+fn render_hint(frame: &mut Frame, area: Rect, app: &App, theme: Theme, panel: &Panel) {
+    if area.height == 0 {
+        return;
+    }
+    match panel {
+        Panel::Commands => frame.render_widget(
+            Paragraph::new(overlay::hint_line(
+                &[
+                    (symbols::key::TAB, "complete"),
+                    (symbols::key::ENTER, "run"),
+                ],
+                theme,
+            )),
+            area.inner(Margin {
+                horizontal: PAD_X,
+                vertical: 0,
+            }),
+        ),
+        Panel::Agents(_) => render_agent_footer(frame, area, theme),
+        Panel::None | Panel::Files => {
+            if footer_visible(app) {
+                render_footer(frame, area, app, theme);
+            }
+        }
+    }
+}
+
+fn is_full_body_overlay(app: &App) -> bool {
+    matches!(
+        app.overlay(),
+        Overlay::Config(_)
+            | Overlay::Model(_)
+            | Overlay::Effort(_)
+            | Overlay::Thread(_)
+            | Overlay::Usage
+            | Overlay::Help
+    )
+}
+
+fn fit_stack(panel_want: u16, preview_want: u16, budget: u16) -> (u16, u16) {
+    let panel_h = panel_want.min(budget);
+    let preview_h = preview_want.min(budget.saturating_sub(panel_h));
+    (panel_h, preview_h)
+}
+
+fn render_full_body_overlay(frame: &mut Frame, body: Rect, app: &mut App, theme: Theme) {
+    match app.overlay() {
+        Overlay::Config(config) => config.render(frame, body, theme),
+        Overlay::Model(picker) => picker.render(frame, body, theme),
+        Overlay::Effort(picker) => picker.render(frame, body, theme),
+        Overlay::Thread(picker) => picker.render(frame, body, theme),
+        Overlay::Usage => {
+            let view = app.build_usage_view();
+            view.render(frame, body, theme);
+        }
+        Overlay::Help => crate::help::render(frame, body, theme),
+        _ => {}
+    }
+}
+
+fn render_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, panel: &Panel) {
+    if area.height == 0 {
+        return;
+    }
+    match panel {
+        Panel::None => {}
+        Panel::Commands => {
+            if let Overlay::Commands(menu) = app.overlay() {
+                menu.render(frame, area, theme);
+            }
+        }
+        Panel::Files => {
+            if let Overlay::Files(menu) = app.overlay() {
+                menu.render(frame, area, theme);
+            }
+        }
+        Panel::Agents(cursor) => render_agent_panel(frame, area, app, theme, *cursor),
+    }
 }
 
 fn render_agent_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, cursor: usize) {
