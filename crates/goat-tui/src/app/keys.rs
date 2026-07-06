@@ -12,11 +12,7 @@ use crate::{
 impl App {
     pub(crate) fn on_key(&mut self, key: KeyEvent) -> Vec<Op> {
         tracing::trace!(code = ?key.code, modifiers = ?key.modifiers, "key");
-        if key
-            .modifiers
-            .intersects(KeyModifiers::SUPER | KeyModifiers::META)
-            && matches!(key.code, KeyCode::Char('c' | 'C'))
-        {
+        if keymap::super_char(&key) == Some('c') {
             self.copy_selection();
             return Vec::new();
         }

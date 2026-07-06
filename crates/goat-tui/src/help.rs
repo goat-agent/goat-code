@@ -12,7 +12,7 @@ use crate::{
     theme::Theme,
 };
 
-const BINDINGS: [(&str, &str); 13] = [
+const BINDINGS: [(&str, &str); 15] = [
     ("⇧↵ ⌥↵", "newline"),
     ("↑↓", "history · move cursor"),
     ("pgup pgdn", "scroll transcript by page"),
@@ -26,6 +26,8 @@ const BINDINGS: [(&str, &str); 13] = [
     ("⌃c", "quit ×2"),
     ("/", "commands"),
     ("!", "shell command (first char)"),
+    ("drag ⌘c", "select · copy transcript"),
+    ("click", "open link"),
 ];
 
 fn desired_height() -> u16 {

@@ -55,6 +55,7 @@ pub struct AskPicker {
     pub cursor: usize,
     current_q: usize,
     answers: Vec<Option<String>>,
+    saved: Vec<Option<(Vec<bool>, String, usize)>>,
     selected: Vec<bool>,
     typing: bool,
     input: String,
@@ -70,6 +71,7 @@ impl AskPicker {
             cursor: 0,
             current_q: 0,
             answers: vec![None; count],
+            saved: vec![None; count],
             selected: vec![false; first_options],
             typing: false,
             input: String::new(),
@@ -110,18 +112,6 @@ impl AskPicker {
     fn reset_selection(&mut self, q_idx: usize) {
         let len = self.questions[q_idx].options.len();
         self.selected = vec![false; len];
-    }
-
-    fn restore_selection(&mut self, q_idx: usize, saved: &str) {
-        let len = self.questions[q_idx].options.len();
-        let mut selection = vec![false; len];
-        let tokens: Vec<&str> = saved.split(',').map(str::trim).collect();
-        for (i, opt) in self.questions[q_idx].options.iter().enumerate() {
-            if tokens.iter().any(|t| *t == opt.label) {
-                selection[i] = true;
-            }
-        }
-        self.selected = selection;
     }
 
     pub fn is_confirming(&self) -> bool {
@@ -203,13 +193,11 @@ impl AskPicker {
                 self.typing = false;
             }
             let answer = self.join_selection();
-            self.input.clear();
-            self.cursor = 0;
             return self.record_answer(answer);
         }
         if self.cursor == type_own_idx {
             if !self.input.is_empty() {
-                let answer = std::mem::take(&mut self.input);
+                let answer = self.input.clone();
                 self.typing = false;
                 return self.record_answer(answer);
             }
@@ -218,7 +206,6 @@ impl AskPicker {
         }
         if let Some(opt) = self.questions[self.current_q].options.get(self.cursor) {
             let answer = opt.label.clone();
-            self.cursor = 0;
             return self.record_answer(answer);
         }
         AskOutcome::NoOp
@@ -289,29 +276,19 @@ impl AskPicker {
         self.input.clear();
         self.cursor = 0;
         self.reset_selection(q_idx);
-        let saved = self.answers.get(q_idx).cloned().flatten();
-        let Some(saved) = saved else {
+        let Some((selected, input, cursor)) = self.saved.get(q_idx).cloned().flatten() else {
             return;
         };
-        if self.questions[q_idx].multiple {
-            self.restore_selection(q_idx, &saved);
-            self.cursor = self.questions[q_idx].options.len();
-            return;
+        if selected.len() == self.questions[q_idx].options.len() {
+            self.selected = selected;
         }
-        let pos = self.questions[q_idx]
-            .options
-            .iter()
-            .position(|o| o.label == saved);
-        if let Some(pos) = pos {
-            self.cursor = pos;
-        } else {
-            self.input = saved;
-            self.cursor = self.questions[q_idx].options.len();
-        }
+        self.input = input;
+        self.cursor = cursor.min(self.questions[q_idx].options.len());
     }
 
     fn record_answer(&mut self, answer: String) -> AskOutcome {
         self.answers[self.current_q] = Some(answer);
+        self.saved[self.current_q] = Some((self.selected.clone(), self.input.clone(), self.cursor));
         self.advance()
     }
 
@@ -790,6 +767,28 @@ mod tests {
         picker.insert_str("teal");
         match picker.choose() {
             AskOutcome::Submit(answers) => assert_eq!(answers, vec!["red, teal"]),
+            AskOutcome::NoOp | AskOutcome::Pending => panic!("expected submit"),
+        }
+    }
+
+    #[test]
+    fn go_back_restores_multi_select_with_comma_label() {
+        let mut picker = AskPicker::new(vec![
+            multi_question(
+                "Colors?",
+                vec![option("red, crimson", ""), option("green", "")],
+            ),
+            question("Deploy?", vec![option("yes", "")]),
+        ]);
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        picker.move_down();
+        picker.move_down();
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        picker.go_back();
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        assert!(matches!(picker.choose(), AskOutcome::Pending));
+        match picker.choose() {
+            AskOutcome::Submit(answers) => assert_eq!(answers, vec!["red, crimson", "yes"]),
             AskOutcome::NoOp | AskOutcome::Pending => panic!("expected submit"),
         }
     }

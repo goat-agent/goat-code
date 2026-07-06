@@ -3,9 +3,7 @@ mod keys;
 
 use std::{collections::HashMap, path::Path, time::Duration};
 
-use crossterm::event::{
-    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
-};
+use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
 use futures::StreamExt;
 use goat_commands::{CommandEffect, CommandRegistry};
 use goat_protocol::{
@@ -44,6 +42,7 @@ pub(crate) struct AgentRunView {
     pub(crate) done: Option<bool>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainView {
     Live,
     Agent(TaskId),
@@ -112,8 +111,10 @@ pub struct App {
     pub(crate) selection_version: u64,
     pub(crate) transcript_area: ratatui::layout::Rect,
     pub(crate) pending_copy: Option<String>,
+    pub(crate) pending_open: Option<String>,
     pub(crate) last_click: Option<(std::time::Instant, usize, u16)>,
     pub(crate) models: Vec<ModelEntry>,
+    pub(crate) models_loaded: bool,
     pub(crate) model: Option<ModelTarget>,
     pub(crate) overlay: Overlay,
     pub(crate) pending: PendingState,
@@ -199,8 +200,10 @@ impl App {
             selection_version: 0,
             transcript_area: ratatui::layout::Rect::default(),
             pending_copy: None,
+            pending_open: None,
             last_click: None,
             models: Vec::new(),
+            models_loaded: false,
             model: None,
             overlay: Overlay::None,
             pending: PendingState::default(),
@@ -320,7 +323,7 @@ impl App {
             } => {
                 match result {
                     Ok(attachments) => self.composer.push_attachments(attachments),
-                    Err(_message) if fallback => self.composer.insert_str(&text),
+                    Err(_message) if fallback => self.composer.insert_paste(&text),
                     Err(message) => self.push_toast(NotifyKind::Error, message),
                 }
                 self.update_command_menu();
@@ -359,7 +362,11 @@ impl App {
         self.dirty = true;
         match effect {
             CommandEffect::OpenModelPicker => {
-                self.overlay = Overlay::Model(Picker::new(self.models.clone(), self.model.clone()));
+                self.overlay = Overlay::Model(Picker::new(
+                    self.models.clone(),
+                    self.model.clone(),
+                    self.models.is_empty() && !self.models_loaded,
+                ));
                 Vec::new()
             }
             CommandEffect::SelectModelNamed(query) => self.select_model_named(&query),
@@ -534,8 +541,10 @@ impl App {
             let command = self.composer.take();
             return self.submit_shell(command);
         }
+        let mut attachments = self.composer.take_attachments();
         let text = self.composer.take();
-        let attachments = self.composer.take_attachments();
+        let (text, promoted) = crate::attachment::extract_image_paths(&text);
+        attachments.extend(promoted);
         let trimmed = text.trim();
         if trimmed.is_empty() && attachments.is_empty() {
             return Vec::new();
@@ -714,7 +723,11 @@ impl App {
                 target: account.target.clone(),
             }];
         }
-        let mut picker = Picker::new(self.models.clone(), self.model.clone());
+        let mut picker = Picker::new(
+            self.models.clone(),
+            self.model.clone(),
+            self.models.is_empty() && !self.models_loaded,
+        );
         for ch in query.trim().chars() {
             picker.on_char(ch);
         }
@@ -781,10 +794,21 @@ impl App {
         usize::from(self.viewport_rows.saturating_sub(1)).max(1)
     }
 
+    fn wheel_step(&self) -> usize {
+        (usize::from(self.viewport_rows) / 4).max(3)
+    }
+
     pub(crate) fn wheel_scroll_allowed(&self) -> bool {
         matches!(
             self.overlay,
             Overlay::None | Overlay::Commands(_) | Overlay::Files(_) | Overlay::Agents(_)
+        )
+    }
+
+    pub(crate) fn overlay_captures_text(&self) -> bool {
+        matches!(
+            self.overlay,
+            Overlay::Model(_) | Overlay::Config(_) | Overlay::Ask(_, _)
         )
     }
 
@@ -794,12 +818,12 @@ impl App {
 
     fn screen_to_cache(&self, col: u16, row: u16, clamp: bool) -> Option<(usize, u16)> {
         let area = self.transcript_area;
-        let static_len = self.active_transcript().static_len();
-        if area.height == 0 || static_len == 0 {
+        let selectable_len = self.active_transcript().selectable_len();
+        if area.height == 0 || selectable_len == 0 {
             return None;
         }
         let bottom = (self.scroll + usize::from(area.height))
-            .min(static_len)
+            .min(selectable_len)
             .saturating_sub(1);
         let line = if row < area.y {
             if !clamp {
@@ -856,8 +880,27 @@ impl App {
         self.pending_copy.take()
     }
 
+    pub(crate) fn take_pending_open(&mut self) -> Option<String> {
+        self.pending_open.take()
+    }
+
+    fn on_left_click(&mut self, col: u16, row: u16) {
+        if !self.selection_allowed() {
+            return;
+        }
+        let Some((line, content_col)) = self.screen_to_cache(col, row, false) else {
+            return;
+        };
+        if let Some(url) = self.active_transcript().url_at(line, content_col) {
+            self.pending_open = Some(url);
+        } else if let Some(img) = self.active_transcript().image_at(line) {
+            self.overlay = Overlay::ImageZoom(Box::new(img));
+        }
+    }
+
     fn on_left_down(&mut self, col: u16, row: u16) {
-        let Some(pos) = self.screen_to_cache(col, row, false) else {
+        let on_content = self.screen_to_cache(col, row, false).is_some();
+        let Some(pos) = self.screen_to_cache(col, row, true) else {
             self.selection = None;
             self.last_click = None;
             self.dirty = true;
@@ -865,11 +908,12 @@ impl App {
         };
         self.selection_version = self.active_transcript().version();
         let now = std::time::Instant::now();
-        let double = self.last_click.is_some_and(|(t, l, c)| {
-            l == pos.0
-                && c.abs_diff(pos.1) <= 1
-                && now.duration_since(t) < std::time::Duration::from_millis(400)
-        });
+        let double = on_content
+            && self.last_click.is_some_and(|(t, l, c)| {
+                l == pos.0
+                    && c.abs_diff(pos.1) <= 1
+                    && now.duration_since(t) < std::time::Duration::from_millis(400)
+            });
         if double && let Some((lo, hi)) = self.active_transcript().word_bounds_at(pos.0, pos.1) {
             self.selection = Some(crate::select::Selection {
                 anchor: (pos.0, lo),
@@ -881,7 +925,11 @@ impl App {
             return;
         }
         self.selection = Some(crate::select::Selection::new(pos));
-        self.last_click = Some((now, pos.0, pos.1));
+        self.last_click = if on_content {
+            Some((now, pos.0, pos.1))
+        } else {
+            None
+        };
         self.dirty = true;
     }
 
@@ -889,12 +937,12 @@ impl App {
         use crossterm::event::MouseButton;
         match mouse.kind {
             MouseEventKind::ScrollUp if self.wheel_scroll_allowed() => {
-                self.scroll = self.scroll.saturating_sub(3);
+                self.scroll = self.scroll.saturating_sub(self.wheel_step());
                 self.follow = false;
                 self.dirty = true;
             }
             MouseEventKind::ScrollDown if self.wheel_scroll_allowed() => {
-                self.scroll = self.scroll.saturating_add(3);
+                self.scroll = self.scroll.saturating_add(self.wheel_step());
                 self.dirty = true;
             }
             MouseEventKind::Down(MouseButton::Left)
@@ -919,11 +967,7 @@ impl App {
                 if let Some(sel) = self.selection {
                     if sel.is_empty() {
                         self.selection = None;
-                        if self.selection_allowed()
-                            && let Some(img) = self.active_transcript().image_at(sel.anchor.0)
-                        {
-                            self.overlay = Overlay::ImageZoom(Box::new(img));
-                        }
+                        self.on_left_click(mouse.column, mouse.row);
                     } else if let Some(active) = self.selection.as_mut() {
                         active.dragging = false;
                     }
@@ -1128,10 +1172,18 @@ impl App {
 
     pub(crate) fn reset_agents(&mut self) {
         self.agent_runs.clear();
-        self.main_view = MainView::Live;
+        self.set_main_view(MainView::Live);
         if matches!(self.overlay, Overlay::Agents(_)) {
             self.overlay = Overlay::None;
         }
+    }
+
+    fn set_main_view(&mut self, view: MainView) {
+        if self.main_view != view {
+            self.selection = None;
+            self.last_click = None;
+        }
+        self.main_view = view;
     }
 
     pub(crate) fn active_transcript(&self) -> &Transcript {
@@ -1147,8 +1199,9 @@ impl App {
 
     pub(crate) fn set_agent_cursor(&mut self, cursor: usize) {
         if let Some(run) = self.agent_runs.get(cursor) {
+            let view = MainView::Agent(run.id);
             self.overlay = Overlay::Agents(cursor);
-            self.main_view = MainView::Agent(run.id);
+            self.set_main_view(view);
             self.follow = true;
             self.dirty = true;
         }
@@ -1156,7 +1209,7 @@ impl App {
 
     pub(crate) fn close_agent_selector(&mut self) {
         self.overlay = Overlay::None;
-        self.main_view = MainView::Live;
+        self.set_main_view(MainView::Live);
         self.follow = true;
         self.dirty = true;
     }
@@ -1298,7 +1351,7 @@ async fn event_loop(
     while !app.should_quit {
         let event = tokio::select! {
             maybe = input.next() => match maybe {
-                Some(Ok(ev)) => match prepare_input_event(ev, &attach_tx) {
+                Some(Ok(ev)) => match prepare_input_event(ev, &attach_tx, app.overlay_captures_text()) {
                     Some(event) => event,
                     None => continue,
                 },
@@ -1333,11 +1386,20 @@ async fn event_loop(
             crate::notification::spawn(notification);
         }
         if let Some(text) = app.take_pending_copy() {
+            copy_to_terminal_clipboard(&text);
             tokio::spawn(async move {
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                         let _ = clipboard.set_text(text);
                     }
+                })
+                .await;
+            });
+        }
+        if let Some(url) = app.take_pending_open() {
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = open::that(url);
                 })
                 .await;
             });
@@ -1349,9 +1411,22 @@ async fn event_loop(
     Ok(())
 }
 
-fn prepare_input_event(ev: CtEvent, tx: &tokio::sync::mpsc::Sender<AppEvent>) -> Option<AppEvent> {
+fn copy_to_terminal_clipboard(text: &str) {
+    use base64::Engine as _;
+    use std::io::Write as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{encoded}\x07");
+    let _ = out.flush();
+}
+
+fn prepare_input_event(
+    ev: CtEvent,
+    tx: &tokio::sync::mpsc::Sender<AppEvent>,
+    overlay_captures_text: bool,
+) -> Option<AppEvent> {
     match &ev {
-        CtEvent::Paste(text) => {
+        CtEvent::Paste(text) if !overlay_captures_text => {
             let text = text.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
@@ -1376,11 +1451,9 @@ fn prepare_input_event(ev: CtEvent, tx: &tokio::sync::mpsc::Sender<AppEvent>) ->
             None
         }
         CtEvent::Key(key)
-            if key.kind == KeyEventKind::Press
-                && key
-                    .modifiers
-                    .intersects(KeyModifiers::SUPER | KeyModifiers::META)
-                && matches!(key.code, KeyCode::Char('v' | 'V')) =>
+            if !overlay_captures_text
+                && key.kind == KeyEventKind::Press
+                && crate::keymap::super_char(key) == Some('v') =>
         {
             let tx = tx.clone();
             tokio::spawn(async move {
@@ -1407,6 +1480,17 @@ mod tests {
 
     use super::{App, Overlay};
     use crate::theme::Theme;
+
+    #[test]
+    fn paste_passes_through_when_overlay_captures_text() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let ev = crossterm::event::Event::Paste("sk-secret".to_owned());
+        let out = super::prepare_input_event(ev, &tx, true);
+        assert!(
+            matches!(out, Some(super::AppEvent::Input(crossterm::event::Event::Paste(t))) if t == "sk-secret"),
+            "with a text-capturing overlay, paste must pass through untouched (not be grabbed as an attachment)"
+        );
+    }
 
     fn single_entry(provider: &str, model: &str) -> ModelEntry {
         ModelEntry {

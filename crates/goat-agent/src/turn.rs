@@ -137,6 +137,19 @@ pub(crate) async fn handle_idle_op(
         Op::ListThreads {} => {
             crate::threads::handle_list_threads(store, cwd, events).await;
         }
+        Op::Login { .. }
+        | Op::AddAccount { .. }
+        | Op::RemoveAccount { .. }
+        | Op::Resume { .. }
+        | Op::ResumeLatest { .. } => {
+            let _ = events
+                .send(Event::Notify {
+                    kind: goat_protocol::NotifyKind::Info,
+                    message: "ignored while a task is running — try again after it finishes"
+                        .to_owned(),
+                })
+                .await;
+        }
         _ => {}
     }
 }

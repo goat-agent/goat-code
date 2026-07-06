@@ -29,6 +29,7 @@ pub(crate) struct SessionInner {
     pub(crate) awaits_restore: bool,
     pub(crate) ready: Arc<tokio::sync::Notify>,
     pub(crate) resurrected: std::collections::HashSet<u64>,
+    pub(crate) pending_attaches: usize,
 }
 
 #[derive(Clone)]
@@ -47,7 +48,6 @@ pub(crate) struct LiveSession {
 
 pub(crate) struct PersistEvent {
     pub(crate) thread_id: i64,
-    pub(crate) body: String,
     pub(crate) prompt: Option<PromptAction>,
 }
 
@@ -109,7 +109,7 @@ impl SessionInner {
             self.log.pop_front();
         }
         let prompt = prompt_action(&event);
-        let body = self.thread_id.zip(serde_json::to_string(&event).ok());
+        let thread_id = self.thread_id;
         let frame = ServerFrame::Event {
             session: self.id,
             seq,
@@ -118,11 +118,7 @@ impl SessionInner {
         self.log.push_back((seq, event));
         self.subscribers
             .retain(|sub| sub.sender.try_send(frame.clone()).is_ok());
-        body.map(|(thread_id, body)| PersistEvent {
-            thread_id,
-            body,
-            prompt,
-        })
+        thread_id.map(|thread_id| PersistEvent { thread_id, prompt })
     }
 
     pub(crate) fn presence(&self) -> Vec<ClientId> {
@@ -131,6 +127,7 @@ impl SessionInner {
 
     pub(crate) fn evictable(&self) -> bool {
         self.subscribers.is_empty()
+            && self.pending_attaches == 0
             && self.open_asks == 0
             && matches!(self.state, SessionLiveState::Idle {})
     }
@@ -215,7 +212,21 @@ mod tests {
             awaits_restore: false,
             ready: std::sync::Arc::new(tokio::sync::Notify::new()),
             resurrected: std::collections::HashSet::new(),
+            pending_attaches: 0,
         }
+    }
+
+    #[test]
+    fn pending_attach_blocks_eviction() {
+        let mut inner = blank_inner();
+        assert!(inner.evictable(), "idle + no subscribers + no pending");
+        inner.pending_attaches += 1;
+        assert!(
+            !inner.evictable(),
+            "an in-flight attach must keep the session alive"
+        );
+        inner.pending_attaches -= 1;
+        assert!(inner.evictable());
     }
 
     #[test]

@@ -307,6 +307,8 @@ pub fn inner_request_to_value(inner: InnerRequest) -> Value {
     Value::Object(obj)
 }
 
+static SYNTHETIC_TOOL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 pub fn parse_chunk(value: &Value, oauth: bool) -> Vec<StreamEvent> {
     let payload = if oauth {
         value.get("response").unwrap_or(value)
@@ -325,20 +327,20 @@ pub fn parse_chunk(value: &Value, oauth: bool) -> Vec<StreamEvent> {
         return events;
     };
 
-    let mut synthetic_counter: u32 = 0;
-
     for part in parts {
         if let Some(fc) = part.get("functionCall") {
-            synthetic_counter += 1;
             let name = fc
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned();
-            let id = fc
-                .get("id")
-                .and_then(Value::as_str)
-                .map_or_else(|| format!("goat-{synthetic_counter}"), str::to_owned);
+            let id = fc.get("id").and_then(Value::as_str).map_or_else(
+                || {
+                    let n = SYNTHETIC_TOOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    format!("goat-{n}")
+                },
+                str::to_owned,
+            );
             let input = fc
                 .get("args")
                 .map_or_else(|| "{}".to_owned(), Value::to_string);

@@ -213,8 +213,10 @@ pub(crate) fn plan_tail(messages: &[Message], db_ids: &[Option<i64>], keep_budge
         used = used.saturating_add(cost);
         start = group;
     }
-    while start < messages.len() && db_ids[start].is_none() {
-        start += 1;
+    if db_ids[start..].iter().any(Option::is_some) {
+        while start < messages.len() && db_ids[start].is_none() {
+            start += 1;
+        }
     }
     start
 }
@@ -672,6 +674,23 @@ mod compact_tests {
         let db_ids = vec![None, None, Some(5)];
         let tail_start = plan_tail(&messages, &db_ids, 100_000);
         assert_eq!(tail_start, 2, "tail must snap to the first persisted row");
+    }
+
+    #[test]
+    fn plan_tail_keeps_full_tail_for_unpersisted_child_run() {
+        let messages = vec![
+            text(MessageRole::System, "sys"),
+            text(MessageRole::User, "prompt"),
+            text(MessageRole::Assistant, "step 1"),
+            text(MessageRole::User, "more"),
+            text(MessageRole::Assistant, "step 2"),
+        ];
+        let db_ids = vec![None; messages.len()];
+        let tail_start = plan_tail(&messages, &db_ids, 100_000);
+        assert!(
+            tail_start < messages.len(),
+            "child run (all unpersisted) must not snap the tail away to empty"
+        );
     }
 
     #[test]

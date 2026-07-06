@@ -2513,6 +2513,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2643,8 +2644,10 @@ dependencies = [
  "goat-commands",
  "goat-config",
  "goat-protocol",
+ "goat-tool",
  "goat-worktree",
  "image",
+ "open",
  "percent-encoding",
  "pulldown-cmark",
  "ratatui",

@@ -34,10 +34,11 @@ pub struct Picker {
     cursor: usize,
     current: Option<ModelTarget>,
     account: Option<AccountPicker>,
+    loading: bool,
 }
 
 impl Picker {
-    pub fn new(entries: Vec<ModelEntry>, current: Option<ModelTarget>) -> Self {
+    pub fn new(entries: Vec<ModelEntry>, current: Option<ModelTarget>, loading: bool) -> Self {
         let mut picker = Self {
             entries,
             query: String::new(),
@@ -45,6 +46,7 @@ impl Picker {
             cursor: 0,
             current,
             account: None,
+            loading,
         };
         picker.refilter();
         picker.cursor = picker.current_index().unwrap_or(0);
@@ -60,6 +62,7 @@ impl Picker {
 
     pub fn set_entries(&mut self, entries: Vec<ModelEntry>) {
         self.entries = entries;
+        self.loading = false;
         self.refilter();
     }
 
@@ -171,13 +174,15 @@ impl Picker {
         let rows = usize::from(list_area.height);
         let mut lines: Vec<Line> = Vec::new();
         if self.matches.is_empty() {
-            lines.push(Line::from(Span::styled(
+            let message = if self.loading && self.query.is_empty() {
+                format!(" loading models {}", symbols::ui::ELLIPSIS)
+            } else {
                 format!(
                     " no models yet {} run /config to connect a provider",
                     symbols::ui::ELLIPSIS
-                ),
-                theme.muted(),
-            )));
+                )
+            };
+            lines.push(Line::from(Span::styled(message, theme.muted())));
         } else {
             let start = if self.cursor >= rows {
                 self.cursor + 1 - rows
@@ -330,7 +335,7 @@ mod tests {
 
     #[test]
     fn single_account_selects_directly() {
-        let mut picker = Picker::new(vec![entry("openai", "gpt", 1)], None);
+        let mut picker = Picker::new(vec![entry("openai", "gpt", 1)], None, false);
         match picker.choose() {
             PickerOutcome::Selected(target) => {
                 assert_eq!(target.provider, "openai");
@@ -342,7 +347,7 @@ mod tests {
 
     #[test]
     fn multiple_accounts_open_interstitial() {
-        let mut picker = Picker::new(vec![entry("openai", "gpt", 2)], None);
+        let mut picker = Picker::new(vec![entry("openai", "gpt", 2)], None, false);
         assert!(matches!(picker.choose(), PickerOutcome::NoOp));
         picker.move_down();
         match picker.choose() {
@@ -356,6 +361,7 @@ mod tests {
         let mut picker = Picker::new(
             vec![entry("openai", "gpt", 1), entry("anthropic", "claude", 1)],
             None,
+            false,
         );
         for ch in "claude".chars() {
             picker.on_char(ch);
@@ -368,7 +374,7 @@ mod tests {
 
     #[test]
     fn empty_choose_is_noop() {
-        let mut picker = Picker::new(vec![], None);
+        let mut picker = Picker::new(vec![], None, false);
         assert!(matches!(picker.choose(), PickerOutcome::NoOp));
     }
 }

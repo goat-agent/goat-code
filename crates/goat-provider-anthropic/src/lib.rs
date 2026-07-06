@@ -576,6 +576,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
     let mut stream = response.bytes_stream().eventsource();
     let mut tool_calls: HashMap<u32, (String, String, String)> = HashMap::new();
     let mut usage = Usage::default();
+    let mut stopped = false;
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => match event.event.as_str() {
@@ -661,6 +662,7 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
                 }
                 "message_stop" => {
                     let _ = events.send(StreamEvent::Usage { usage }).await;
+                    stopped = true;
                     break;
                 }
                 "error" => {
@@ -683,7 +685,17 @@ async fn stream_messages(response: reqwest::Response, events: &mpsc::Sender<Stre
             }
         }
     }
-    let _ = events.send(StreamEvent::Completed).await;
+    if stopped {
+        let _ = events.send(StreamEvent::Completed).await;
+    } else {
+        let _ = events
+            .send(StreamEvent::Failed {
+                error: goat_provider::StreamError::transport(
+                    "stream ended before message_stop".to_owned(),
+                ),
+            })
+            .await;
+    }
 }
 
 fn parse_web_search_results(value: &serde_json::Value) -> Vec<SearchResult> {

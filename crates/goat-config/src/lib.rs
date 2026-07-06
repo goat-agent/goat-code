@@ -98,10 +98,17 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Self {
-        config_path()
-            .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+        let Some(path) = config_path() else {
+            return Self::default();
+        };
+        let Ok(raw) = fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        let Ok(config) = serde_json::from_str::<Self>(&raw) else {
+            let _ = fs::rename(&path, path.with_extension("json.corrupt"));
+            return Self::default();
+        };
+        config
     }
 
     #[cfg(test)]

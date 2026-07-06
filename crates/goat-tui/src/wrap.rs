@@ -58,17 +58,16 @@ pub(crate) fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
     rows
 }
 
-pub(crate) fn wrap_chars(chars: &[char], width: u16) -> Vec<Range<usize>> {
+pub(crate) fn wrap_widths(widths: &[usize], width: u16) -> Vec<Range<usize>> {
     let max = usize::from(width);
     let mut rows = Vec::new();
     if max == 0 {
-        rows.push(0..chars.len());
+        rows.push(0..widths.len());
         return rows;
     }
     let mut start = 0usize;
     let mut row_width = 0usize;
-    for (i, c) in chars.iter().enumerate() {
-        let cw = c.width().unwrap_or(0);
+    for (i, &cw) in widths.iter().enumerate() {
         if row_width + cw > max && row_width > 0 {
             rows.push(start..i);
             start = i;
@@ -76,7 +75,7 @@ pub(crate) fn wrap_chars(chars: &[char], width: u16) -> Vec<Range<usize>> {
         }
         row_width += cw;
     }
-    rows.push(start..chars.len());
+    rows.push(start..widths.len());
     rows
 }
 
@@ -148,7 +147,7 @@ mod tests {
         text::{Line, Span},
     };
 
-    use super::{wrap_chars, wrap_line};
+    use super::{wrap_line, wrap_widths};
 
     fn text(line: &Line<'_>) -> Vec<String> {
         vec![line.spans.iter().map(|s| s.content.as_ref()).collect()]
@@ -222,13 +221,17 @@ mod tests {
     }
 
     #[test]
-    fn wrap_chars_handles_wide_boundary() {
-        let chars: Vec<char> = "한글한".chars().collect();
-        assert_eq!(wrap_chars(&chars, 4), vec![0..2, 2..3]);
+    fn wrap_widths_handles_wide_boundary() {
+        assert_eq!(wrap_widths(&[2, 2, 2], 4), vec![0..2, 2..3]);
     }
 
     #[test]
-    fn wrap_chars_empty_yields_one_row() {
-        assert_eq!(wrap_chars(&[], 8), vec![0..0]);
+    fn wrap_widths_empty_yields_one_row() {
+        assert_eq!(wrap_widths(&[], 8), vec![0..0]);
+    }
+
+    #[test]
+    fn wrap_widths_keeps_atomic_unit_whole() {
+        assert_eq!(wrap_widths(&[1, 9, 1], 6), vec![0..1, 1..2, 2..3]);
     }
 }

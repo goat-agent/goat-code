@@ -36,8 +36,25 @@ fn parse_error_body(data: &str) -> ErrorBody {
     serde_json::from_str::<ErrorBody>(data).unwrap_or_default()
 }
 
+fn is_overflow_code(code: &str) -> bool {
+    matches!(
+        code,
+        "context_length_exceeded"
+            | "context_window_exceeded"
+            | "string_above_max_length"
+            | "invalid_request_error_context_length"
+    )
+}
+
 fn overflow_message(message: &str) -> bool {
-    message.contains("maximum context length") || message.contains("context window")
+    let m = message.to_ascii_lowercase();
+    m.contains("context length")
+        || m.contains("context window")
+        || m.contains("context size")
+        || m.contains("maximum context")
+        || m.contains("reduce the length")
+        || m.contains("too many tokens")
+        || m.contains("exceeds the available context")
 }
 
 fn classify_body(
@@ -52,7 +69,7 @@ fn classify_body(
         body.message
     };
     let code = body.code.as_deref().unwrap_or("");
-    if code == "context_length_exceeded" || overflow_message(&message) {
+    if is_overflow_code(code) || overflow_message(&message) {
         return StreamError::context_overflow(message);
     }
     if code == "insufficient_quota" {
@@ -224,6 +241,21 @@ mod tests {
             r#"{"error":{"message":"This model's maximum context length is 128000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#,
         );
         assert!(matches!(error, StreamError::ContextOverflow { .. }));
+    }
+
+    #[test]
+    fn non_openai_overflow_wordings_are_context_overflow() {
+        for body in [
+            r#"{"error":{"message":"the request exceeds the available context size","type":"invalid_request_error"}}"#,
+            r#"{"error":{"message":"This model's maximum context is 32768 tokens","code":"string_above_max_length"}}"#,
+            r#"{"error":{"message":"Please reduce the length of the messages"}}"#,
+            r#"{"error":{"message":"Input is too many tokens for this model"}}"#,
+        ] {
+            assert!(
+                matches!(http(400, body), StreamError::ContextOverflow { .. }),
+                "expected overflow for: {body}"
+            );
+        }
     }
 
     #[test]
