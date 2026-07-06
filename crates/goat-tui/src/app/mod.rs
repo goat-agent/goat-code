@@ -781,6 +781,10 @@ impl App {
         usize::from(self.viewport_rows.saturating_sub(1)).max(1)
     }
 
+    fn wheel_step(&self) -> usize {
+        (usize::from(self.viewport_rows) / 4).max(3)
+    }
+
     pub(crate) fn wheel_scroll_allowed(&self) -> bool {
         matches!(
             self.overlay,
@@ -889,12 +893,12 @@ impl App {
         use crossterm::event::MouseButton;
         match mouse.kind {
             MouseEventKind::ScrollUp if self.wheel_scroll_allowed() => {
-                self.scroll = self.scroll.saturating_sub(3);
+                self.scroll = self.scroll.saturating_sub(self.wheel_step());
                 self.follow = false;
                 self.dirty = true;
             }
             MouseEventKind::ScrollDown if self.wheel_scroll_allowed() => {
-                self.scroll = self.scroll.saturating_add(3);
+                self.scroll = self.scroll.saturating_add(self.wheel_step());
                 self.dirty = true;
             }
             MouseEventKind::Down(MouseButton::Left)
