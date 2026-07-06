@@ -63,13 +63,19 @@ impl RemoteServer {
         let server = Arc::new(self);
 
         loop {
+            let dev_wait = devices_changed.notified();
+            let pair_wait = pairing_changed.notified();
+            tokio::pin!(dev_wait, pair_wait);
+            dev_wait.as_mut().enable();
+            pair_wait.as_mut().enable();
+
             let should_listen =
                 !server.devices.is_empty().await || server.pairing.has_pending().await;
             if !should_listen {
                 tokio::select! {
                     () = shutdown.cancelled() => break,
-                    () = devices_changed.notified() => continue,
-                    () = pairing_changed.notified() => continue,
+                    () = &mut dev_wait => continue,
+                    () = &mut pair_wait => continue,
                 }
             }
 
