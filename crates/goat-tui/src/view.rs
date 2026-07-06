@@ -92,6 +92,7 @@ fn render_ask(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
 enum Panel {
     None,
     Commands,
+    Account,
     Files,
     Agents(usize),
 }
@@ -101,6 +102,7 @@ const HEADER_H: u16 = 2;
 fn active_panel(app: &App) -> Panel {
     match app.overlay() {
         Overlay::Commands(_) => Panel::Commands,
+        Overlay::Account(_) => Panel::Account,
         Overlay::Files(_) => Panel::Files,
         Overlay::Agents(cursor) => Panel::Agents(*cursor),
         _ => Panel::None,
@@ -116,6 +118,10 @@ fn panel_desired_height(app: &App, panel: &Panel) -> u16 {
         Panel::None => 0,
         Panel::Commands => match app.overlay() {
             Overlay::Commands(menu) => menu.desired_height(),
+            _ => 0,
+        },
+        Panel::Account => match app.overlay() {
+            Overlay::Account(menu) => menu.desired_height(),
             _ => 0,
         },
         Panel::Files => match app.overlay() {
@@ -195,6 +201,20 @@ fn render_hint(frame: &mut Frame, area: Rect, app: &App, theme: Theme, panel: &P
             }),
         ),
         Panel::Agents(_) => render_agent_footer(frame, area, theme),
+        Panel::Account => frame.render_widget(
+            Paragraph::new(overlay::hint_line(
+                &[
+                    (symbols::key::ARROWS_UPDOWN, "navigate"),
+                    (symbols::key::ENTER, "select"),
+                    (symbols::key::ESC, "cancel"),
+                ],
+                theme,
+            )),
+            area.inner(Margin {
+                horizontal: PAD_X,
+                vertical: 0,
+            }),
+        ),
         Panel::None | Panel::Files => {
             if footer_visible(app) {
                 render_footer(frame, area, app, theme);
@@ -244,6 +264,11 @@ fn render_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, panel: &
         Panel::None => {}
         Panel::Commands => {
             if let Overlay::Commands(menu) = app.overlay() {
+                menu.render(frame, area, theme);
+            }
+        }
+        Panel::Account => {
+            if let Overlay::Account(menu) = app.overlay() {
                 menu.render(frame, area, theme);
             }
         }
