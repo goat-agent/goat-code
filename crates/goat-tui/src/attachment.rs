@@ -4,6 +4,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use goat_protocol::InputAttachment;
 use image::{GenericImageView as _, ImageFormat, imageops::FilterType};
 
+#[cfg(unix)]
+const ESCAPE: Option<char> = Some('\\');
+#[cfg(not(unix))]
+const ESCAPE: Option<char> = None;
+
 const MAX_ATTACHMENTS: usize = 8;
 const MAX_SOURCE_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_SIDE: u32 = 2048;
@@ -111,7 +116,7 @@ fn unescape(text: &str) -> String {
         if escaped {
             out.push(ch);
             escaped = false;
-        } else if ch == '\\' {
+        } else if ESCAPE == Some(ch) {
             escaped = true;
         } else {
             out.push(ch);
@@ -131,7 +136,7 @@ fn split_tokens(text: &str) -> Vec<String> {
             escaped = false;
             continue;
         }
-        if ch == '\\' {
+        if ESCAPE == Some(ch) {
             escaped = true;
             continue;
         }
