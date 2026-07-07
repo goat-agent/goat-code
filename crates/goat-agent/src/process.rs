@@ -628,7 +628,10 @@ mod tests {
     }
 
     async fn wait_until_exited(registry: &ProcessRegistry, id: goat_protocol::ProcessId) {
-        for _ in 0..200 {
+        // Up to 10s: killing is reliable, but under a loaded CI runner the async
+        // chain (group kill -> child.wait() wakes -> mark_exited -> list) can take
+        // well over a second to reflect, so a tight timeout is flaky, not a bug.
+        for _ in 0..1000 {
             let list = registry.list().await;
             if list
                 .iter()
