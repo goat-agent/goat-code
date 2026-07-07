@@ -135,6 +135,7 @@ pub struct App {
     pub(crate) focused: bool,
     pub(crate) notification_pending: Option<crate::notification::Notification>,
     pub(crate) picker: Option<ratatui_image::picker::Picker>,
+    pub(crate) processes: Vec<goat_protocol::ProcessInfo>,
 }
 
 #[derive(Default)]
@@ -224,6 +225,7 @@ impl App {
             focused: true,
             notification_pending: None,
             picker: None,
+            processes: Vec::new(),
         }
     }
 
@@ -1303,6 +1305,35 @@ impl App {
             .map(|(kind, n)| format!("{n} {kind}"))
             .collect();
         Some(format!("{running} agents · {}", parts.join(", ")))
+    }
+
+    pub(crate) fn process_summary(&self) -> Option<String> {
+        let running: Vec<&goat_protocol::ProcessInfo> = self
+            .processes
+            .iter()
+            .filter(|p| p.state == goat_protocol::ProcessState::Running)
+            .collect();
+        if running.is_empty() {
+            return None;
+        }
+        let mut shown: Vec<String> = running
+            .iter()
+            .take(3)
+            .map(|p| {
+                let watch = if p.watched { "*" } else { "" };
+                let cmd: String = p
+                    .command
+                    .split_whitespace()
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("#{}{watch} {cmd}", p.id)
+            })
+            .collect();
+        if running.len() > 3 {
+            shown.push(format!("+{}", running.len() - 3));
+        }
+        Some(shown.join(", "))
     }
 
     pub(crate) fn current_context_window(&self) -> Option<u32> {
@@ -2722,5 +2753,35 @@ mod tests {
         let ops = app.update(super::AppEvent::Presence(2));
         assert!(ops.is_empty());
         assert!(!app.take_dirty());
+    }
+
+    #[test]
+    fn process_list_updates_summary_and_ignores_exited() {
+        let mut app = App::new(Theme::dark());
+        assert!(app.process_summary().is_none());
+        app.on_engine(EngineEvent::ProcessListChanged {
+            processes: vec![
+                goat_protocol::ProcessInfo {
+                    id: goat_protocol::ProcessId(1),
+                    command: "pnpm dev".to_owned(),
+                    state: goat_protocol::ProcessState::Running,
+                    watched: false,
+                    exit_code: None,
+                },
+                goat_protocol::ProcessInfo {
+                    id: goat_protocol::ProcessId(2),
+                    command: "gh run watch".to_owned(),
+                    state: goat_protocol::ProcessState::Exited,
+                    watched: true,
+                    exit_code: Some(0),
+                },
+            ],
+        });
+        let summary = app.process_summary().expect("running process shown");
+        assert!(summary.contains("#1"), "got: {summary}");
+        assert!(
+            !summary.contains("#2"),
+            "exited process must not show: {summary}"
+        );
     }
 }

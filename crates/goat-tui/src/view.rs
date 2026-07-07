@@ -329,7 +329,7 @@ fn render_toasts(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 }
 
 fn footer_visible(app: &App) -> bool {
-    app.quit_armed() || app.is_busy() || app.clear_armed()
+    app.quit_armed() || app.is_busy() || app.clear_armed() || app.process_summary().is_some()
 }
 
 fn render_selection(frame: &mut Frame, app: &mut App, theme: Theme) {
@@ -796,6 +796,14 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             Paragraph::new(Line::from(vec![
                 Span::styled(symbols::key::ESC, theme.hint_key()),
                 Span::styled(" again to clear", theme.muted()),
+            ])),
+            inner,
+        );
+    } else if let Some(summary) = app.process_summary() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(symbols::ui::BULLET, theme.hint_key()),
+                Span::styled(format!(" {summary}"), theme.muted()),
             ])),
             inner,
         );

@@ -74,7 +74,8 @@ impl App {
                         } => {
                             self.transcript.push_compaction(tokens_before, tokens_after);
                         }
-                        TranscriptEntry::Shell { command, output } => {
+                        TranscriptEntry::Shell { command, output }
+                        | TranscriptEntry::Process { command, output } => {
                             let id = TaskId(0);
                             self.transcript.push_shell(id, command);
                             self.transcript.finish_shell(id, output);
@@ -104,6 +105,16 @@ impl App {
                 }
             }
             EngineEvent::LoginProviders { .. } | EngineEvent::ThreadBound { .. } => {}
+            EngineEvent::ProcessListChanged { processes } => {
+                self.processes = processes;
+                self.dirty = true;
+            }
+            EngineEvent::ProcessStarted { .. }
+            | EngineEvent::ProcessOutput { .. }
+            | EngineEvent::ProcessExited { .. }
+            | EngineEvent::ProcessObserved { .. } => {
+                self.dirty = true;
+            }
             EngineEvent::CompactionStarted { id } => {
                 if self.agent_index(id).is_none() {
                     self.turn.compacting = true;
