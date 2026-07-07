@@ -697,6 +697,41 @@ mod tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
+    fn init_repo(repo: &std::path::Path) {
+        std::fs::create_dir(repo).unwrap();
+        git(repo, &["init", "-b", "main"]);
+        git(repo, &["config", "user.email", "t@example.invalid"]);
+        git(repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git(repo, &["add", "README.md"]);
+        git(repo, &["commit", "-m", "init"]);
+    }
+
+    fn add_worktree(repo: &std::path::Path) -> std::path::PathBuf {
+        let worktree = repo.join(".goat").join("worktrees").join("test");
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        git(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "worktree-test",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        worktree
+    }
+
+    fn owner_key(worktree: &std::path::Path) -> String {
+        goat_worktree::workspace(worktree)
+            .unwrap()
+            .owner_root
+            .display()
+            .to_string()
+    }
+
     fn seeded_thread(cwd: &str, model: &str) -> NewThread {
         NewThread {
             cwd: cwd.to_owned(),
@@ -717,35 +752,12 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        git(&repo, &["init", "-b", "main"]);
-        git(&repo, &["config", "user.email", "t@example.invalid"]);
-        git(&repo, &["config", "user.name", "Test"]);
-        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
-        git(&repo, &["add", "README.md"]);
-        git(&repo, &["commit", "-m", "init"]);
-        let owner_root = repo.canonicalize().unwrap();
-
-        let worktree = owner_root.join(".goat/worktrees/test");
-        git(
-            &owner_root,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "worktree-test",
-                worktree.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
-        let worktree = worktree.canonicalize().unwrap();
+        init_repo(&repo);
+        let worktree = add_worktree(&repo);
 
         let store = Store::open(&dir.path().join("db.sqlite")).unwrap();
         store
-            .create_thread(seeded_thread(
-                &owner_root.display().to_string(),
-                "claude-opus-4-8",
-            ))
+            .create_thread(seeded_thread(&owner_key(&worktree), "claude-opus-4-8"))
             .await
             .unwrap();
 
@@ -761,35 +773,12 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        git(&repo, &["init", "-b", "main"]);
-        git(&repo, &["config", "user.email", "t@example.invalid"]);
-        git(&repo, &["config", "user.name", "Test"]);
-        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
-        git(&repo, &["add", "README.md"]);
-        git(&repo, &["commit", "-m", "init"]);
-        let owner_root = repo.canonicalize().unwrap();
-
-        let worktree = owner_root.join(".goat/worktrees/test");
-        git(
-            &owner_root,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "worktree-test",
-                worktree.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
-        let worktree = worktree.canonicalize().unwrap();
+        init_repo(&repo);
+        let worktree = add_worktree(&repo);
 
         let store = Store::open(&dir.path().join("db.sqlite")).unwrap();
         store
-            .create_thread(seeded_thread(
-                &owner_root.display().to_string(),
-                "claude-opus-4-8",
-            ))
+            .create_thread(seeded_thread(&owner_key(&worktree), "claude-opus-4-8"))
             .await
             .unwrap();
         store
@@ -811,25 +800,18 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        git(&repo, &["init", "-b", "main"]);
-        git(&repo, &["config", "user.email", "t@example.invalid"]);
-        git(&repo, &["config", "user.name", "Test"]);
-        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
-        git(&repo, &["add", "README.md"]);
-        git(&repo, &["commit", "-m", "init"]);
-        let owner_root = repo.canonicalize().unwrap();
+        init_repo(&repo);
 
         let store = Store::open(&dir.path().join("db.sqlite")).unwrap();
         store
             .create_thread(seeded_thread(
-                &owner_root.display().to_string(),
+                &repo.display().to_string(),
                 "claude-opus-4-8",
             ))
             .await
             .unwrap();
 
-        let fresh = owner_root.join("sub");
+        let fresh = repo.join("sub");
         std::fs::create_dir(&fresh).unwrap();
         assert!(latest_thread_or_seed(&store, &fresh).await.is_none());
     }
