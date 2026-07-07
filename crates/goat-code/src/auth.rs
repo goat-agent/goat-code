@@ -6,7 +6,7 @@ use goat_auth::{
     Credential, CredentialKey, CredentialKind, CredentialService, CredentialStore, SecretString,
 };
 use goat_provider::{AuthMethod, LoginEndpointMetadata, ProviderId, ProviderMetadata};
-use goat_providers::{DEFAULT_ACCOUNT, Registry};
+use goat_providers::Registry;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -31,8 +31,26 @@ pub async fn run_provider(command: ProviderCommand) -> color_eyre::Result<()> {
                 Some(provider) => provider,
                 None => pick_login_provider(&store)?,
             };
-            let account = account.as_deref().unwrap_or(DEFAULT_ACCOUNT);
-            login(&store, &provider, account, key, endpoint).await
+            let existing = provider_accounts(&store.entries(), &provider)
+                .into_iter()
+                .map(|(account, _)| account)
+                .collect::<Vec<_>>();
+            let resolution = cli_ui::resolve_account(
+                "provider",
+                &provider,
+                account.as_deref(),
+                &existing,
+                goat_providers::DEFAULT_ACCOUNT,
+            )?;
+            login(
+                &store,
+                &provider,
+                &resolution.name,
+                key,
+                endpoint,
+                resolution.replacing,
+            )
+            .await
         }
         ProviderCommand::List => {
             list_providers(&store);
@@ -94,6 +112,7 @@ async fn login(
     account: &str,
     key: Option<String>,
     endpoint: Option<String>,
+    replacing: bool,
 ) -> color_eyre::Result<()> {
     let registry = Registry::new(store);
     let provider_handle = registry
@@ -169,7 +188,8 @@ async fn login(
         }
     }
 
-    cli_ui::success(&format!("stored credential for {provider} ({account})"));
+    let verb = if replacing { "updated" } else { "stored" };
+    cli_ui::success(&format!("{verb} credential for {provider} ({account})"));
     verify(store, provider, account).await;
     Ok(())
 }

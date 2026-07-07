@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 
 use color_eyre::eyre::{Report, Result, eyre};
-use dialoguer::{Input, Password, Select};
+use dialoguer::{Confirm, Input, Password, Select};
 use goat_provider::AuthMethod;
 
 use crate::{
@@ -19,6 +19,130 @@ pub struct ProviderPick {
 pub enum AuthPick {
     OAuth,
     ApiKey,
+}
+
+#[derive(Debug)]
+pub struct AccountResolution {
+    pub name: String,
+    pub replacing: bool,
+}
+
+pub fn resolve_account(
+    service: &str,
+    provider: &str,
+    requested: Option<&str>,
+    existing: &[String],
+    default_name: &str,
+) -> Result<AccountResolution> {
+    let taken = |name: &str| existing.iter().any(|account| account == name);
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+
+    if let Some(requested) = requested {
+        let name = requested.trim();
+        if name.is_empty() {
+            return Err(report("account name must not be empty"));
+        }
+        return Ok(AccountResolution {
+            replacing: taken(name),
+            name: name.to_owned(),
+        });
+    }
+
+    if existing.is_empty() {
+        if !interactive {
+            return Ok(AccountResolution {
+                name: default_name.to_owned(),
+                replacing: false,
+            });
+        }
+        let name = prompt_account_name(provider, Some(default_name))?;
+        return Ok(AccountResolution {
+            replacing: taken(&name),
+            name,
+        });
+    }
+
+    if !interactive {
+        return Err(report_hint(
+            format!(
+                "{service} {provider} already has an account: {}",
+                existing.join(", ")
+            ),
+            format!("pass `--account <name>` to choose or add an account for {provider}"),
+        ));
+    }
+
+    match pick_account_slot(provider, existing)? {
+        AccountSlot::Existing(name) => Ok(AccountResolution {
+            replacing: true,
+            name,
+        }),
+        AccountSlot::New => {
+            let name = prompt_account_name(provider, None)?;
+            if taken(&name) && !confirm_replace(provider, &name)? {
+                return Err(report("login cancelled"));
+            }
+            Ok(AccountResolution {
+                replacing: taken(&name),
+                name,
+            })
+        }
+    }
+}
+
+enum AccountSlot {
+    Existing(String),
+    New,
+}
+
+fn pick_account_slot(provider: &str, existing: &[String]) -> Result<AccountSlot> {
+    terminal_required()?;
+    let color = ColorMode::detect_stderr();
+    let mut sorted = existing.to_vec();
+    sorted.sort();
+    let mut labels: Vec<String> = sorted
+        .iter()
+        .map(|account| provider_table::option_label(color, account, Palette::Value, "update"))
+        .collect();
+    labels.push(provider_table::option_label(
+        color,
+        "＋ new account",
+        Palette::Muted,
+        "add",
+    ));
+    let index = Select::with_theme(goat_theme())
+        .with_prompt(select_prompt(color, "account", Some(provider)))
+        .items(&labels)
+        .default(0)
+        .report(false)
+        .interact_opt()
+        .map_err(dialoguer_error)?
+        .ok_or_else(|| report("login cancelled"))?;
+    Ok(sorted
+        .get(index)
+        .cloned()
+        .map_or(AccountSlot::New, AccountSlot::Existing))
+}
+
+fn prompt_account_name(provider: &str, default: Option<&str>) -> Result<String> {
+    let color = ColorMode::detect_stderr();
+    let name = prompt_text(&input_prompt(color, "account", Some(provider)), default)?;
+    if name.is_empty() {
+        return Err(report("account name must not be empty"));
+    }
+    Ok(name)
+}
+
+fn confirm_replace(provider: &str, account: &str) -> Result<bool> {
+    terminal_required()?;
+    Confirm::with_theme(goat_theme())
+        .with_prompt(format!(
+            "account `{account}` already exists for {provider}; update it?"
+        ))
+        .default(false)
+        .report(false)
+        .interact()
+        .map_err(dialoguer_error)
 }
 
 pub fn terminal_required() -> Result<()> {
@@ -215,8 +339,57 @@ pub fn format_failure(message: &str, hint: Option<String>) -> String {
 mod tests {
     use super::{
         format_failure, input_prompt, oauth_status, parse_browser_url, parse_device_code_message,
+        resolve_account,
     };
     use crate::style::ColorMode;
+
+    #[test]
+    fn resolve_account_uses_requested_name() {
+        let resolved =
+            resolve_account("provider", "anthropic", Some("work"), &[], "default").unwrap();
+        assert_eq!(resolved.name, "work");
+        assert!(!resolved.replacing);
+    }
+
+    #[test]
+    fn resolve_account_flags_requested_name_as_replacing() {
+        let existing = vec!["work".to_owned()];
+        let resolved =
+            resolve_account("provider", "anthropic", Some("work"), &existing, "default").unwrap();
+        assert_eq!(resolved.name, "work");
+        assert!(resolved.replacing);
+    }
+
+    #[test]
+    fn resolve_account_rejects_blank_requested_name() {
+        let error = resolve_account("provider", "anthropic", Some("  "), &[], "default")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must not be empty"));
+    }
+
+    #[test]
+    fn resolve_account_defaults_when_no_accounts_noninteractive() {
+        let resolved = resolve_account("provider", "anthropic", None, &[], "default").unwrap();
+        assert_eq!(resolved.name, "default");
+        assert!(!resolved.replacing);
+    }
+
+    #[test]
+    fn resolve_account_honors_provider_default_name() {
+        let resolved = resolve_account("search provider", "duckduckgo", None, &[], "html").unwrap();
+        assert_eq!(resolved.name, "html");
+    }
+
+    #[test]
+    fn resolve_account_errors_noninteractive_when_accounts_exist() {
+        let existing = vec!["default".to_owned()];
+        let error = resolve_account("provider", "anthropic", None, &existing, "default")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already has an account"));
+        assert!(error.contains("--account"));
+    }
 
     #[test]
     fn input_prompt_names_provider() {
