@@ -107,7 +107,7 @@ async fn drain_daemon(force: bool) -> color_eyre::Result<()> {
         .count();
     if active > 0 && !force {
         return Err(eyre!(
-            "{active} session(s) are still running in the daemon. Finish them or run `goat daemon stop`, then retry (or use `goat update --force`)."
+            "{active} session(s) are still running in the daemon. Finish them or run `goat-code daemon stop`, then retry (or use `goat-code update --force`)."
         ));
     }
     println!("Stopping the running daemon before update...");
@@ -229,7 +229,7 @@ fn install_paths() -> color_eyre::Result<InstallPaths> {
             .ok_or_else(|| eyre!("could not resolve current executable directory"))?
             .to_path_buf();
         Ok(InstallPaths {
-            bin_path: install_dir.join(exe_name("goat")),
+            bin_path: install_dir.join(exe_name("goat-code")),
             helper_path: install_dir.join(exe_name("goat-update")),
             install_dir,
         })

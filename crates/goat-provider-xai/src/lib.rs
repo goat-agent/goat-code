@@ -17,8 +17,8 @@ const ALLOWED_HOST: &str = "api.x.ai";
 
 const SETUP: &[&str] = &[
     "xAI Grok provider (API key or SuperGrok / X Premium+ OAuth).",
-    "API key: `goat provider login xai --key xai-...` or `XAI_API_KEY`.",
-    "OAuth: `goat provider login xai` (browser or device code; no API key).",
+    "API key: `goat-code provider login xai --key xai-...` or `XAI_API_KEY`.",
+    "OAuth: `goat-code provider login xai` (browser or device code; no API key).",
     "OAuth coding models (Composer, Grok Build) use the same api.x.ai Responses API.",
 ];
 

@@ -12,7 +12,7 @@ const ENV_VAR: &str = "ZAI_CODING_API_KEY";
 
 const ZAI_CODING_SETUP: &[&str] = &[
     "Z.AI Coding Plan API-key provider.",
-    "Use `ZAI_CODING_API_KEY` or `goat provider login zai-coding --key sk-...`.",
+    "Use `ZAI_CODING_API_KEY` or `goat-code provider login zai-coding --key sk-...`.",
     "This is not OAuth and does not reuse the standard `zai` credential.",
 ];
 

@@ -61,24 +61,24 @@ jobs:
         run: git config --global core.longpaths true
       - uses: Swatinem/rust-cache@v2
       - run: rustup target add ${{ matrix.target }}
-      - run: cargo build --profile dist -p goat-code --bin goat --target ${{ matrix.target }}
+      - run: cargo build --profile dist -p goat-code --bin goat-code --target ${{ matrix.target }}
       - run: cargo build --profile dist -p goat-update --bin goat-update --target ${{ matrix.target }}
       - name: package unix
         if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/dist/goat dist/goat
+          cp target/${{ matrix.target }}/dist/goat-code dist/goat-code
           cp target/${{ matrix.target }}/dist/goat-update dist/goat-update
-          tar -C dist -czf goat-code-${{ matrix.target }}.tar.gz goat goat-update
+          tar -C dist -czf goat-code-${{ matrix.target }}.tar.gz goat-code goat-update
       - name: package windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist
-          Copy-Item target/${{ matrix.target }}/dist/goat.exe dist/goat.exe
+          Copy-Item target/${{ matrix.target }}/dist/goat-code.exe dist/goat-code.exe
           Copy-Item target/${{ matrix.target }}/dist/goat-update.exe dist/goat-update.exe
-          tar -C dist -czf goat-code-${{ matrix.target }}.tar.gz goat.exe goat-update.exe
+          tar -C dist -czf goat-code-${{ matrix.target }}.tar.gz goat-code.exe goat-update.exe
       - uses: actions/upload-artifact@v4
         with:
           name: goat-code-${{ matrix.target }}
@@ -103,3 +103,4 @@ jobs:
           files: artifacts/*
           prerelease: ${{ needs.validate.outputs.prerelease }}
           generate_release_notes: true
+tes: true

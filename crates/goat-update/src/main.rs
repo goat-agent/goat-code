@@ -50,7 +50,7 @@ fn apply(args: &ApplyArgs) -> color_eyre::Result<()> {
         )
     })?;
 
-    let staged_bin = args.staged_dir.join(exe_name("goat"));
+    let staged_bin = args.staged_dir.join(exe_name("goat-code"));
     let staged_helper = args.staged_dir.join(exe_name("goat-update"));
     require_file(&staged_bin)?;
     require_file(&staged_helper)?;

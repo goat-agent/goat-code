@@ -16,7 +16,7 @@ pub fn metadata() -> SearchProviderMetadata {
         default_account: "default",
         kind: SearchProviderKind::Searxng,
         credential: SearchCredentialMetadata::None,
-        setup: "run `goat search login searxng --endpoint <url>`",
+        setup: "run `goat-code search login searxng --endpoint <url>`",
         builtins: &[],
     }
 }

@@ -16,7 +16,7 @@ pub fn metadata() -> SearchProviderMetadata {
         default_account: "default",
         kind: SearchProviderKind::Tavily,
         credential: SearchCredentialMetadata::EnvApiKey { env_var: ENV_VAR },
-        setup: "set TAVILY_API_KEY or run `goat search login tavily --key <key>`",
+        setup: "set TAVILY_API_KEY or run `goat-code search login tavily --key <key>`",
         builtins: &[],
     }
 }
