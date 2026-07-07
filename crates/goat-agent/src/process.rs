@@ -40,9 +40,19 @@ struct Entry {
     watch_flooded: bool,
     stdin: Option<tokio::process::ChildStdin>,
     kill_pending: bool,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Entry {
+    /// Abort the reader/waiter background tasks tied to this process so a
+    /// leaked child can never keep them (and its inherited stdout/stderr
+    /// pipes) alive after the process is gone.
+    fn abort_tasks(&mut self) {
+        for task in self.tasks.drain(..) {
+            task.abort();
+        }
+    }
+
     fn info(&self, id: ProcessId) -> ProcessInfo {
         ProcessInfo {
             id,
@@ -51,6 +61,12 @@ impl Entry {
             watched: self.watched,
             exit_code: self.exit_code,
         }
+    }
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        self.abort_tasks();
     }
 }
 
@@ -143,6 +159,20 @@ impl ProcessRegistry {
         let stderr = child.stderr.take();
         let stdin = child.stdin.take();
 
+        // Spawn the reader/waiter tasks up front and keep their handles on the
+        // entry. This is what makes cleanup deterministic: when the process
+        // exits, is killed, or the entry is dropped, we abort these tasks so a
+        // leaked child can never keep them — and the stdout/stderr pipes they
+        // hold — alive indefinitely.
+        let mut tasks = Vec::with_capacity(3);
+        if let Some(pipe) = stdout {
+            tasks.push(self.spawn_reader(id, pipe, Stream::Out));
+        }
+        if let Some(pipe) = stderr {
+            tasks.push(self.spawn_reader(id, pipe, Stream::Err));
+        }
+        tasks.push(self.spawn_waiter(id, child));
+
         {
             let mut inner = self.inner.lock().await;
             inner.next_id += 1;
@@ -164,6 +194,7 @@ impl ProcessRegistry {
                     watch_flooded: false,
                     stdin,
                     kill_pending: false,
+                    tasks,
                 },
             );
         }
@@ -178,14 +209,6 @@ impl ProcessRegistry {
             .await;
         self.broadcast_list().await;
 
-        if let Some(pipe) = stdout {
-            self.spawn_reader(id, pipe, Stream::Out);
-        }
-        if let Some(pipe) = stderr {
-            self.spawn_reader(id, pipe, Stream::Err);
-        }
-        self.spawn_waiter(id, child);
-
         Ok(Started { id, pgid })
     }
 
@@ -196,7 +219,12 @@ impl ProcessRegistry {
         }
     }
 
-    fn spawn_reader<R>(self: &Arc<Self>, id: ProcessId, pipe: R, stream: Stream)
+    fn spawn_reader<R>(
+        self: &Arc<Self>,
+        id: ProcessId,
+        pipe: R,
+        stream: Stream,
+    ) -> tokio::task::JoinHandle<()>
     where
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
     {
@@ -206,10 +234,14 @@ impl ProcessRegistry {
             while let Ok(Some(line)) = reader.next_line().await {
                 registry.append_line(id, stream, line).await;
             }
-        });
+        })
     }
 
-    fn spawn_waiter(self: &Arc<Self>, id: ProcessId, mut child: tokio::process::Child) {
+    fn spawn_waiter(
+        self: &Arc<Self>,
+        id: ProcessId,
+        mut child: tokio::process::Child,
+    ) -> tokio::task::JoinHandle<()> {
         let registry = Arc::clone(self);
         tokio::spawn(async move {
             let status = child.wait().await;
@@ -217,7 +249,7 @@ impl ProcessRegistry {
             registry
                 .mark_exited(id, code, ProcessExitReason::Natural)
                 .await;
-        });
+        })
     }
 
     async fn append_line(self: &Arc<Self>, id: ProcessId, stream: Stream, text: String) {
@@ -404,6 +436,11 @@ impl ProcessRegistry {
                 return Ok(());
             }
             entry.kill_pending = true;
+            // Closing stdin sends EOF, which lets input-driven processes (a
+            // shell blocked on `cat`/`findstr`, a REPL, ...) exit on their own
+            // even if the group kill below races or misses. Dropping the handle
+            // closes the write end of the pipe.
+            entry.stdin.take();
             entry.pgid
         };
         kill_group(pgid);
@@ -426,19 +463,34 @@ impl ProcessRegistry {
             .await;
     }
 
+    /// Close the child's stdin, sending EOF. Useful for processes that only
+    /// act once their input stream ends (e.g. `cat`, filters, some REPLs).
+    #[cfg(test)]
+    pub(crate) async fn close_stdin(&self, id: ProcessId) -> Result<(), String> {
+        let mut inner = self.inner.lock().await;
+        let entry = inner
+            .entries
+            .get_mut(&id)
+            .ok_or_else(|| format!("no process #{id}"))?;
+        // Dropping the handle closes the write end of the stdin pipe.
+        entry.stdin.take();
+        Ok(())
+    }
+
     pub(crate) async fn shutdown_all(&self) {
-        let pgids: Vec<Option<i32>> = {
-            let inner = self.inner.lock().await;
-            inner
-                .entries
-                .values()
-                .filter(|e| e.state == ProcessState::Running)
-                .map(|e| e.pgid)
-                .collect()
+        // Take every entry out of the map. Dropping the entries aborts their
+        // reader/waiter tasks (see `Entry::drop`), guaranteeing no background
+        // task can outlive shutdown holding a leaked child's pipes open.
+        let entries: Vec<Entry> = {
+            let mut inner = self.inner.lock().await;
+            inner.entries.drain().map(|(_, entry)| entry).collect()
         };
-        for pgid in pgids {
-            kill_group(pgid);
+        for entry in &entries {
+            if entry.state == ProcessState::Running {
+                kill_group(entry.pgid);
+            }
         }
+        // `entries` drops here, aborting all associated tasks.
     }
 }
 
@@ -689,15 +741,23 @@ mod tests {
         let cwd = std::env::temp_dir();
         let started = registry.spawn(plat::CAT, &cwd, false).await.unwrap();
         registry.write_stdin(started.id, "typed\n").await.unwrap();
+        // Close stdin so the filter flushes its input and exits. Without the
+        // EOF, line-oriented filters (notably Windows `findstr`) may buffer the
+        // whole input and never echo it back while stdin stays open.
+        registry.close_stdin(started.id).await.unwrap();
+        let mut echoed = String::new();
         for _ in 0..200 {
             let chunk = registry.read_new(started.id).await.unwrap();
-            if chunk.text.contains("typed") {
-                registry.kill(started.id).await.unwrap();
-                return;
+            echoed.push_str(&chunk.text);
+            if echoed.contains("typed") {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("stdin was not echoed back");
+        assert!(echoed.contains("typed"), "stdin was not echoed back");
+        // The filter exits on EOF; make sure it is fully reaped before the test
+        // ends so no child (or its inherited pipes) can outlive the registry.
+        wait_until_exited(&registry, started.id).await;
     }
 
     #[tokio::test]
@@ -720,5 +780,24 @@ mod tests {
         registry.set_watch(started.id, false).await.unwrap();
         registry.kill(started.id).await.unwrap();
         let _ = wake.try_recv();
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_terminates_running_processes() {
+        let (registry, _events, _wake) = harness();
+        let cwd = std::env::temp_dir();
+        let a = registry.spawn(plat::SLEEP_LONG, &cwd, false).await.unwrap();
+        let b = registry.spawn(plat::SLEEP_LONG, &cwd, false).await.unwrap();
+        assert_eq!(registry.list().await.len(), 2);
+
+        // shutdown_all must kill the still-running children and drop their
+        // entries, aborting the reader/waiter tasks. If it left a child (and
+        // its inherited pipes) alive, the tasks would linger and, in the real
+        // daemon, keep the process from exiting — the root cause of the CI hang.
+        registry.shutdown_all().await;
+
+        assert!(registry.list().await.is_empty());
+        assert!(registry.read_new(a.id).await.is_none());
+        assert!(registry.read_new(b.id).await.is_none());
     }
 }
