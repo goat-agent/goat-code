@@ -125,25 +125,19 @@ impl ProcessRegistry {
             ProcessId(inner.next_id)
         };
 
-        let mut builder = Command::new("sh");
+        let mut builder = shell_command(command);
         builder
-            .arg("-c")
-            .arg(command)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(unix)]
-        builder.process_group(0);
+        set_process_group(&mut builder);
 
         let mut child = builder
             .spawn()
             .map_err(|err| SpawnError::Spawn(err.to_string()))?;
 
-        #[cfg(unix)]
         let pgid = child.id().and_then(|pid| i32::try_from(pid).ok());
-        #[cfg(not(unix))]
-        let pgid = None;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -486,9 +480,50 @@ fn collect_infos(inner: &Inner) -> Vec<ProcessInfo> {
     infos
 }
 
-fn kill_group(pgid: Option<i32>) {
+fn shell_command(command: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut builder = Command::new("cmd");
+        builder.arg("/C").arg(command);
+        builder
+    }
+    #[cfg(not(windows))]
+    {
+        let mut builder = Command::new("sh");
+        builder.arg("-c").arg(command);
+        builder
+    }
+}
+
+fn set_process_group(builder: &mut Command) {
     #[cfg(unix)]
-    if let Some(pgid) = pgid {
+    builder.process_group(0);
+    #[cfg(windows)]
+    {
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        builder.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = builder;
+}
+
+fn kill_group(pgid: Option<i32>) {
+    let Some(pgid) = pgid else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .arg("/F")
+            .arg("/T")
+            .arg("/PID")
+            .arg(pgid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
         let _ = std::process::Command::new("kill")
             .arg("-KILL")
             .arg(format!("-{pgid}"))
@@ -496,8 +531,6 @@ fn kill_group(pgid: Option<i32>) {
             .stderr(Stdio::null())
             .status();
     }
-    #[cfg(not(unix))]
-    let _ = pgid;
 }
 
 fn now_ms() -> i64 {
@@ -514,6 +547,30 @@ mod tests {
     use goat_protocol::{Event, ProcessState};
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[cfg(not(windows))]
+    mod plat {
+        pub const TWO_ECHOES: &str = "echo hello; echo world";
+        pub const ECHO_ONE: &str = "echo one";
+        pub const ECHO_STDERR: &str = "echo oops 1>&2";
+        pub const ECHO_PING: &str = "echo ping";
+        pub const ECHO_QUIET: &str = "echo quiet";
+        pub const SLEEP_LONG: &str = "sleep 30";
+        pub const CAT: &str = "cat";
+        pub const TRUE: &str = "true";
+    }
+
+    #[cfg(windows)]
+    mod plat {
+        pub const TWO_ECHOES: &str = "echo hello& echo world";
+        pub const ECHO_ONE: &str = "echo one";
+        pub const ECHO_STDERR: &str = "echo oops 1>&2";
+        pub const ECHO_PING: &str = "echo ping";
+        pub const ECHO_QUIET: &str = "echo quiet";
+        pub const SLEEP_LONG: &str = "ping -n 31 127.0.0.1 >nul";
+        pub const CAT: &str = "findstr \"^\"";
+        pub const TRUE: &str = "type nul";
+    }
 
     fn harness() -> (
         std::sync::Arc<ProcessRegistry>,
@@ -545,7 +602,7 @@ mod tests {
         let (registry, _events, _wake) = harness();
         let cwd = std::env::temp_dir();
         let started = registry
-            .spawn("echo hello; echo world", &cwd, false)
+            .spawn(plat::TWO_ECHOES, &cwd, false)
             .await
             .unwrap_or_else(|e| panic!("spawn failed: {e}"));
         wait_until_exited(&registry, started.id).await;
@@ -560,7 +617,7 @@ mod tests {
     async fn read_new_is_cursor_based() {
         let (registry, _events, _wake) = harness();
         let cwd = std::env::temp_dir();
-        let started = registry.spawn("echo one", &cwd, false).await.unwrap();
+        let started = registry.spawn(plat::ECHO_ONE, &cwd, false).await.unwrap();
         wait_until_exited(&registry, started.id).await;
         let first = registry.read_new(started.id).await.unwrap();
         assert!(first.text.contains("one"));
@@ -575,7 +632,10 @@ mod tests {
     async fn stderr_is_tagged() {
         let (registry, _events, _wake) = harness();
         let cwd = std::env::temp_dir();
-        let started = registry.spawn("echo oops 1>&2", &cwd, false).await.unwrap();
+        let started = registry
+            .spawn(plat::ECHO_STDERR, &cwd, false)
+            .await
+            .unwrap();
         wait_until_exited(&registry, started.id).await;
         let chunk = registry.read_new(started.id).await.unwrap();
         assert!(chunk.text.contains("[err] oops"), "got: {}", chunk.text);
@@ -585,7 +645,7 @@ mod tests {
     async fn watched_process_wakes_on_output() {
         let (registry, _events, mut wake) = harness();
         let cwd = std::env::temp_dir();
-        let started = registry.spawn("echo ping", &cwd, true).await.unwrap();
+        let started = registry.spawn(plat::ECHO_PING, &cwd, true).await.unwrap();
         let _woke = tokio::time::timeout(Duration::from_secs(5), wake.recv())
             .await
             .expect("should wake")
@@ -606,7 +666,7 @@ mod tests {
     async fn unwatched_process_does_not_wake() {
         let (registry, _events, mut wake) = harness();
         let cwd = std::env::temp_dir();
-        let started = registry.spawn("echo quiet", &cwd, false).await.unwrap();
+        let started = registry.spawn(plat::ECHO_QUIET, &cwd, false).await.unwrap();
         wait_until_exited(&registry, started.id).await;
         let result = tokio::time::timeout(Duration::from_millis(200), wake.recv()).await;
         assert!(result.is_err(), "unwatched process must not wake the agent");
@@ -616,7 +676,7 @@ mod tests {
     async fn kill_terminates_running_process() {
         let (registry, _events, _wake) = harness();
         let cwd = std::env::temp_dir();
-        let started = registry.spawn("sleep 30", &cwd, false).await.unwrap();
+        let started = registry.spawn(plat::SLEEP_LONG, &cwd, false).await.unwrap();
         let running = registry.list().await;
         assert_eq!(running[0].state, ProcessState::Running);
         registry.kill(started.id).await.unwrap();
@@ -627,7 +687,7 @@ mod tests {
     async fn stdin_write_reaches_process() {
         let (registry, _events, _wake) = harness();
         let cwd = std::env::temp_dir();
-        let started = registry.spawn("cat", &cwd, false).await.unwrap();
+        let started = registry.spawn(plat::CAT, &cwd, false).await.unwrap();
         registry.write_stdin(started.id, "typed\n").await.unwrap();
         for _ in 0..200 {
             let chunk = registry.read_new(started.id).await.unwrap();
@@ -644,7 +704,7 @@ mod tests {
     async fn write_to_exited_process_errors() {
         let (registry, _events, _wake) = harness();
         let cwd = std::env::temp_dir();
-        let started = registry.spawn("true", &cwd, false).await.unwrap();
+        let started = registry.spawn(plat::TRUE, &cwd, false).await.unwrap();
         wait_until_exited(&registry, started.id).await;
         let result = registry.write_stdin(started.id, "x\n").await;
         assert!(result.is_err());
@@ -654,7 +714,7 @@ mod tests {
     async fn watch_can_be_toggled() {
         let (registry, _events, mut wake) = harness();
         let cwd = std::env::temp_dir();
-        let started = registry.spawn("sleep 30", &cwd, false).await.unwrap();
+        let started = registry.spawn(plat::SLEEP_LONG, &cwd, false).await.unwrap();
         registry.set_watch(started.id, true).await.unwrap();
         registry.write_stdin(started.id, "").await.ok();
         registry.set_watch(started.id, false).await.unwrap();
