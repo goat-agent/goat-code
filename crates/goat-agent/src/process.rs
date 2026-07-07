@@ -146,7 +146,13 @@ impl ProcessRegistry {
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // If the waiter task is aborted or its `Child` is otherwise
+            // dropped, tokio kills the child instead of leaving it orphaned.
+            // Without this, an aborted reader/waiter task leaves the OS process
+            // (and its inherited stdout/stderr pipes) alive, which stalls
+            // shutdown — the root cause of the CI hang.
+            .kill_on_drop(true);
         set_process_group(&mut builder);
 
         let mut child = builder
@@ -463,20 +469,6 @@ impl ProcessRegistry {
             .await;
     }
 
-    /// Close the child's stdin, sending EOF. Useful for processes that only
-    /// act once their input stream ends (e.g. `cat`, filters, some REPLs).
-    #[cfg(test)]
-    pub(crate) async fn close_stdin(&self, id: ProcessId) -> Result<(), String> {
-        let mut inner = self.inner.lock().await;
-        let entry = inner
-            .entries
-            .get_mut(&id)
-            .ok_or_else(|| format!("no process #{id}"))?;
-        // Dropping the handle closes the write end of the stdin pipe.
-        entry.stdin.take();
-        Ok(())
-    }
-
     pub(crate) async fn shutdown_all(&self) {
         // Take every entry out of the map. Dropping the entries aborts their
         // reader/waiter tasks (see `Entry::drop`), guaranteeing no background
@@ -735,28 +727,43 @@ mod tests {
         wait_until_exited(&registry, started.id).await;
     }
 
+    // On unix, `cat` echoes stdin back, so we can verify the full round trip:
+    // bytes written via `write_stdin` actually reach the child and come back
+    // out. On Windows there is no reliable shell filter that line-echoes a piped
+    // stdin, so `stdin_write_succeeds` there only asserts the write half.
+    #[cfg(unix)]
     #[tokio::test]
     async fn stdin_write_reaches_process() {
         let (registry, _events, _wake) = harness();
         let cwd = std::env::temp_dir();
         let started = registry.spawn(plat::CAT, &cwd, false).await.unwrap();
         registry.write_stdin(started.id, "typed\n").await.unwrap();
-        // Close stdin so the filter flushes its input and exits. Without the
-        // EOF, line-oriented filters (notably Windows `findstr`) may buffer the
-        // whole input and never echo it back while stdin stays open.
-        registry.close_stdin(started.id).await.unwrap();
         let mut echoed = String::new();
+        let mut got = false;
         for _ in 0..200 {
             let chunk = registry.read_new(started.id).await.unwrap();
             echoed.push_str(&chunk.text);
             if echoed.contains("typed") {
+                got = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(echoed.contains("typed"), "stdin was not echoed back");
-        // The filter exits on EOF; make sure it is fully reaped before the test
-        // ends so no child (or its inherited pipes) can outlive the registry.
+        // Always tear the child down, whether or not the assertion below trips,
+        // so a surviving process can never outlive the test and stall shutdown.
+        registry.kill(started.id).await.unwrap();
+        wait_until_exited(&registry, started.id).await;
+        assert!(got, "stdin was not echoed back");
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn stdin_write_succeeds() {
+        let (registry, _events, _wake) = harness();
+        let cwd = std::env::temp_dir();
+        let started = registry.spawn(plat::CAT, &cwd, false).await.unwrap();
+        registry.write_stdin(started.id, "typed\n").await.unwrap();
+        registry.kill(started.id).await.unwrap();
         wait_until_exited(&registry, started.id).await;
     }
 
