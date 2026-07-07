@@ -142,6 +142,9 @@ cast_sign_loss = "allow"
 cast_lossless = "allow"
 too_many_lines = "allow"
 
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
