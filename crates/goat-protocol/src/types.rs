@@ -125,6 +125,65 @@ impl JsonSchema for ToolCallId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProcessId(pub u64);
+
+impl Serialize for ProcessId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        id_serde::serialize(&self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProcessId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        id_serde::deserialize(d).map(Self)
+    }
+}
+
+impl fmt::Display for ProcessId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl JsonSchema for ProcessId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ProcessId".into()
+    }
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::ProcessId").into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        id_json_schema(generator)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessState {
+    Running,
+    Exited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessExitReason {
+    Natural,
+    Killed,
+    Timeout,
+    Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProcessInfo {
+    pub id: ProcessId,
+    pub command: String,
+    pub state: ProcessState,
+    pub watched: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolDisplay {
     pub primary: String,
@@ -280,6 +339,10 @@ pub enum TranscriptEntry {
         tokens_after: u32,
     },
     Shell {
+        command: String,
+        output: String,
+    },
+    Process {
         command: String,
         output: String,
     },
