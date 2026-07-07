@@ -27,6 +27,8 @@ mod conversation;
 mod delegate;
 mod instructions;
 mod persist;
+mod process;
+mod process_tools;
 mod prompt;
 mod rate_limit_cache;
 mod retry;
@@ -45,6 +47,11 @@ pub async fn model_list_entries(credentials: &CredentialStore) -> Vec<goat_proto
 }
 
 const CHILD_ID_BASE: u64 = 1 << 32;
+const WAKE_ID_BASE: u64 = 1 << 48;
+
+fn drain_extra_wakes(wake_rx: &mut mpsc::Receiver<process::Wake>) {
+    while wake_rx.try_recv().is_ok() {}
+}
 
 pub struct GoatAgent {
     registry: Registry,
@@ -109,6 +116,8 @@ pub(crate) struct Ctx<'a> {
     pub(crate) instructions: Option<&'a str>,
     pub(crate) semaphore: &'a Arc<Semaphore>,
     pub(crate) child_ids: &'a AtomicU64,
+    pub(crate) wake_ids: &'a AtomicU64,
+    pub(crate) processes: &'a Arc<process::ProcessRegistry>,
     pub(crate) asks: &'a Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>>,
     pub(crate) rl_cache: &'a std::sync::Mutex<rate_limit_cache::RateLimitCache>,
     pub(crate) rl_path: Option<&'a std::path::Path>,
@@ -205,6 +214,7 @@ pub(crate) struct LoopEnv<'a> {
     pub(crate) tool_defs: &'a [ToolDefinition],
     pub(crate) cwd: &'a Path,
     pub(crate) allow_delegate: bool,
+    pub(crate) allow_ask: bool,
     pub(crate) exec_policy: SandboxPolicy,
 }
 
@@ -237,6 +247,9 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     let session_date = prompt::current_utc_date();
     let semaphore = Arc::new(Semaphore::new(delegate::MAX_CONCURRENT_AGENTS));
     let child_ids = AtomicU64::new(CHILD_ID_BASE);
+    let wake_ids = AtomicU64::new(WAKE_ID_BASE);
+    let (wake_tx, mut wake_rx) = mpsc::channel::<process::Wake>(256);
+    let processes = process::ProcessRegistry::new(events.clone(), wake_tx, Some(store.clone()));
     let asks: Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>> = Mutex::new(HashMap::new());
     let _ = events
         .send(Event::SkillsChanged {
@@ -280,6 +293,8 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 instructions: project_instructions.as_deref(),
                 semaphore: &semaphore,
                 child_ids: &child_ids,
+                wake_ids: &wake_ids,
+                processes: &processes,
                 asks: &asks,
                 rl_cache: &rl_cache,
                 rl_path: rl_path.as_deref(),
@@ -289,7 +304,24 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
         };
     }
 
-    while let Some(op) = ops.recv().await {
+    loop {
+        let op = tokio::select! {
+            biased;
+            maybe_op = ops.recv() => match maybe_op {
+                Some(op) => op,
+                None => break,
+            },
+            Some(_wake) = wake_rx.recv() => {
+                let ctx = ctx!();
+                drain_extra_wakes(&mut wake_rx);
+                if let Flow::Shutdown =
+                    turn::handle_wake(&ctx, &mut state, &mut ops).await
+                {
+                    break;
+                }
+                continue;
+            }
+        };
         match op {
             Op::SubmitMessage {
                 id,
@@ -306,6 +338,12 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 }
             }
             Op::Interrupt { .. } | Op::Answer { .. } | Op::DequeueMessage { .. } | Op::Clear {} => {
+            }
+            Op::ProcessKill { process } => {
+                let _ = processes.kill(process).await;
+            }
+            Op::ProcessWatch { process, on } => {
+                let _ = processes.set_watch(process, on).await;
             }
             Op::Compact { id, instructions } => {
                 let ctx = ctx!();
@@ -331,6 +369,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                     state.thread_id,
                     &mut state.target,
                     &events,
+                    &processes,
                 )
                 .await;
             }
@@ -414,6 +453,7 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
             Op::Shutdown {} => break,
         }
     }
+    processes.shutdown_all().await;
     mcp.shutdown().await;
 }
 

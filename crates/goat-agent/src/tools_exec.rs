@@ -65,6 +65,9 @@ pub(crate) fn call_display(tools: &ToolRegistry, name: &str, input: &str) -> Too
         AGENT_TOOL_NAME => agent_call_display(input),
         ASK_TOOL_NAME => ask_call_display(input),
         WEB_SEARCH_TOOL_NAME => web_search_display(input),
+        _ if crate::process_tools::is_process_tool(name) => {
+            crate::process_tools::call_display(name, input)
+        }
         _ => tools.get(name).map_or_else(
             || goat_tool::display::generic_named(name, input),
             |tool| tool.display_input(input),
@@ -135,7 +138,9 @@ async fn execute_tool(
                 .await
                 .map(ToolOutput::text),
         )
-    } else if prep.name == ASK_TOOL_NAME && env.allow_delegate {
+    } else if crate::process_tools::is_process_tool(prep.name) && env.allow_delegate {
+        crate::process_tools::run_process_tool(ctx, env, prep.name, prep.input_json, token).await
+    } else if prep.name == ASK_TOOL_NAME && env.allow_ask {
         Some(run_ask(ctx, run, prep.input_json, ToolCallId(prep.tui_id), token).await)
     } else if prep.name == AGENT_TOOL_NAME && env.allow_delegate {
         let permit = tokio::select! {
@@ -272,6 +277,7 @@ pub(crate) fn build_tool_defs(
     provider: &dyn Provider,
     selection: Option<&ToolSelection>,
     allow_delegate: bool,
+    allow_ask: bool,
 ) -> Vec<ToolDefinition> {
     if !provider.capabilities().tools {
         return Vec::new();
@@ -294,6 +300,9 @@ pub(crate) fn build_tool_defs(
         if !ctx.agents.is_empty() {
             defs.push(agent_tool_def(ctx));
         }
+        defs.extend(crate::process_tools::tool_defs());
+    }
+    if allow_ask {
         defs.push(ask_tool_def());
     }
     defs

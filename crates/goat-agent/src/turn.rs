@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use goat_protocol::{Event, InputAttachment, ModelTarget, Op, TaskId};
 use goat_provider::{ContentBlock, Message, MessageRole, Provider, ToolDefinition};
 use goat_store::Store;
@@ -39,9 +41,13 @@ pub(crate) fn user_message(text: &str, attachments: &[InputAttachment]) -> Messa
     }
 }
 
-fn top_regime(ctx: &Ctx<'_>, provider: &dyn Provider) -> (Vec<ToolDefinition>, SandboxPolicy) {
+fn top_regime(
+    ctx: &Ctx<'_>,
+    provider: &dyn Provider,
+    allow_ask: bool,
+) -> (Vec<ToolDefinition>, SandboxPolicy) {
     (
-        build_tool_defs(ctx, provider, None, true),
+        build_tool_defs(ctx, provider, None, true, allow_ask),
         SandboxPolicy::Full,
     )
 }
@@ -111,8 +117,15 @@ pub(crate) async fn handle_idle_op(
     thread_id: Option<i64>,
     target: &mut Option<ModelTarget>,
     events: &mpsc::Sender<Event>,
+    processes: &std::sync::Arc<crate::process::ProcessRegistry>,
 ) {
     match op {
+        Op::ProcessKill { process } => {
+            let _ = processes.kill(process).await;
+        }
+        Op::ProcessWatch { process, on } => {
+            let _ = processes.set_watch(process, on).await;
+        }
         Op::SelectModel { target: chosen } => {
             if let Some(tid) = thread_id
                 && let Err(err) = store
@@ -160,6 +173,56 @@ enum TurnFlow {
     Shutdown,
 }
 
+pub(crate) async fn handle_wake(
+    ctx: &Ctx<'_>,
+    state: &mut SessionState,
+    ops: &mut mpsc::Receiver<Op>,
+) -> Flow {
+    let observations = ctx.processes.take_pending_observations().await;
+    if observations.is_empty() {
+        return Flow::Continue;
+    }
+    let mut body = String::from(
+        "<process-observation>\nBackground processes you are watching produced output or exited. React if needed; otherwise keep waiting.\n",
+    );
+    for (id, obs) in &observations {
+        let status = match obs.state {
+            goat_protocol::ProcessState::Running => "running".to_owned(),
+            goat_protocol::ProcessState::Exited => match obs.exit_code {
+                Some(code) => format!("exited(code {code})"),
+                None => "exited".to_owned(),
+            },
+        };
+        let _ = write!(body, "\n[process #{id} · {} · {status}]\n", obs.command);
+        if obs.output.trim().is_empty() {
+            body.push_str("(no new output)\n");
+        } else {
+            body.push_str(obs.output.trim_end());
+            body.push('\n');
+        }
+    }
+    body.push_str("</process-observation>");
+
+    let wake_id = TaskId(
+        ctx.wake_ids
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    );
+    run_turn_chain(
+        ctx,
+        crate::UserInput {
+            id: wake_id,
+            text: body,
+            display: Some("(process activity)".to_owned()),
+            attachments: Vec::new(),
+        },
+        std::collections::VecDeque::new(),
+        state,
+        ops,
+        false,
+    )
+    .await
+}
+
 pub(crate) async fn handle_turn(
     ctx: &Ctx<'_>,
     id: TaskId,
@@ -180,6 +243,7 @@ pub(crate) async fn handle_turn(
         std::collections::VecDeque::new(),
         state,
         ops,
+        true,
     )
     .await
 }
@@ -190,11 +254,13 @@ async fn run_turn_chain(
     seed: std::collections::VecDeque<crate::UserInput>,
     state: &mut SessionState,
     ops: &mut mpsc::Receiver<Op>,
+    allow_ask: bool,
 ) -> Flow {
     let mut next = Some((input, seed));
     let mut pending: Vec<Op> = Vec::new();
     while let Some((turn_input, turn_seed)) = next.take() {
-        let (flow, deferred) = run_one_turn(ctx, turn_input, turn_seed, state, ops).await;
+        let (flow, deferred) =
+            run_one_turn(ctx, turn_input, turn_seed, state, ops, allow_ask).await;
         pending.extend(deferred);
         match flow {
             TurnFlow::Shutdown => return Flow::Shutdown,
@@ -238,6 +304,7 @@ async fn drain_deferred(
                     state.thread_id,
                     &mut state.target,
                     ctx.events,
+                    ctx.processes,
                 )
                 .await;
             }
@@ -361,7 +428,7 @@ pub(crate) async fn handle_shell(
     );
     drop(steering);
     if let Some(next_input) = captured.pop_front() {
-        return Box::pin(run_turn_chain(ctx, next_input, captured, state, ops)).await;
+        return Box::pin(run_turn_chain(ctx, next_input, captured, state, ops, true)).await;
     }
     Flow::Continue
 }
@@ -413,7 +480,7 @@ pub(crate) async fn handle_compact(
         return Flow::Shutdown;
     }
     let cwd = resolve_thread_cwd(ctx, state.thread_id).await;
-    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref());
+    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref(), true);
     let ids = crate::TurnIds {
         stored_thread: state.thread_id,
         turn_db_id: None,
@@ -427,6 +494,7 @@ pub(crate) async fn handle_compact(
         tool_defs: &tool_defs,
         cwd: &cwd,
         allow_delegate: true,
+        allow_ask: true,
         exec_policy,
     };
     let token = CancellationToken::new();
@@ -530,7 +598,7 @@ pub(crate) async fn handle_compact(
     );
     drop(steering);
     if let Some(next_input) = captured.pop_front() {
-        return Box::pin(run_turn_chain(ctx, next_input, captured, state, ops)).await;
+        return Box::pin(run_turn_chain(ctx, next_input, captured, state, ops, true)).await;
     }
     Flow::Continue
 }
@@ -542,6 +610,7 @@ async fn run_one_turn(
     seed: std::collections::VecDeque<crate::UserInput>,
     state: &mut SessionState,
     ops: &mut mpsc::Receiver<Op>,
+    allow_ask: bool,
 ) -> (TurnFlow, Vec<Op>) {
     let id = input.id;
     let text = input.text;
@@ -612,7 +681,7 @@ async fn run_one_turn(
     }
 
     let cwd = resolve_thread_cwd(ctx, ids.stored_thread).await;
-    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref());
+    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref(), allow_ask);
     let steering: crate::SteeringQueue = std::sync::Mutex::new(seed);
     let run = Run::top(id, &ids, &steering);
     let env = crate::LoopEnv {
@@ -621,6 +690,7 @@ async fn run_one_turn(
         tool_defs: &tool_defs,
         cwd: &cwd,
         allow_delegate: true,
+        allow_ask,
         exec_policy,
     };
     let token = CancellationToken::new();
