@@ -37,6 +37,15 @@ impl Drop for ChildGuard {
                 .stderr(Stdio::null())
                 .status();
         }
+        #[cfg(windows)]
+        if let Some(pid) = self.child.id() {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/T", "/F", "/PID"])
+                .arg(pid.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         let _ = self.child.start_kill();
     }
 }
