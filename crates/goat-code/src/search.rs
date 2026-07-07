@@ -57,7 +57,15 @@ fn login(
             "run `goat search list` to see available providers",
         )
     })?;
-    let account = account.unwrap_or(metadata.default_account);
+    let existing = existing_search_accounts(provider);
+    let resolution = cli_ui::resolve_account(
+        "search provider",
+        provider,
+        account,
+        &existing,
+        metadata.default_account,
+    )?;
+    let account = resolution.name.as_str();
     let entry =
         build_search_account_config(provider, account, endpoint, engine).map_err(cli_ui::report)?;
     store_search_key(provider, account, key, metadata.credential)?;
@@ -72,12 +80,33 @@ fn login(
         config.search.default_target = Some(target.clone());
     }
     config.save()?;
-    if make_default {
-        cli_ui::success(&format!("connected {target} (default)"));
+    let verb = if resolution.replacing {
+        "updated"
     } else {
-        cli_ui::success(&format!("connected {target}"));
+        "connected"
+    };
+    if make_default {
+        cli_ui::success(&format!("{verb} {target} (default)"));
+    } else {
+        cli_ui::success(&format!("{verb} {target}"));
     }
     Ok(())
+}
+
+fn existing_search_accounts(provider: &str) -> Vec<String> {
+    let mut accounts = Config::load()
+        .search
+        .accounts
+        .iter()
+        .filter(|account| configured_search_provider(account) == provider)
+        .map(|account| configured_search_target(account).account.to_owned())
+        .collect::<Vec<_>>();
+    for (key, _) in search_credentials() {
+        if key.provider == provider && !accounts.contains(&key.account) {
+            accounts.push(key.account);
+        }
+    }
+    accounts
 }
 
 fn store_search_key(
