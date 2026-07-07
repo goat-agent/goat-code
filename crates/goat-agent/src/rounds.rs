@@ -428,8 +428,18 @@ pub(crate) async fn core_loop(
                 }
             }
         }
-        let round =
-            crate::retry::run_round_with_retry(ctx, run, env, conversation.messages(), token).await;
+        let roster = if run.is_top() {
+            crate::process_tools::roster_message(ctx).await
+        } else {
+            None
+        };
+        let round = if let Some(roster) = roster {
+            let mut messages = conversation.messages().to_vec();
+            messages.push(roster);
+            crate::retry::run_round_with_retry(ctx, run, env, &messages, token).await
+        } else {
+            crate::retry::run_round_with_retry(ctx, run, env, conversation.messages(), token).await
+        };
         match &round.end {
             RoundEnd::Cancelled => return LoopOutcome::Cancelled,
             RoundEnd::Failed(StreamError::ContextOverflow { .. }) if !compacted_for_overflow => {

@@ -142,4 +142,70 @@ mod tests {
         let back: TaskId = serde_json::from_str(&json).unwrap();
         assert_eq!(back, big);
     }
+
+    #[test]
+    fn process_id_serializes_as_string() {
+        assert_eq!(
+            serde_json::to_string(&super::ProcessId(7)).unwrap(),
+            r#""7""#
+        );
+    }
+
+    #[test]
+    fn op_process_kill_roundtrips() {
+        let op = Op::ProcessKill {
+            process: super::ProcessId(3),
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        assert_eq!(json, r#"{"type":"ProcessKill","process":"3"}"#);
+        let back: Op = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, op);
+    }
+
+    #[test]
+    fn op_process_watch_roundtrips() {
+        let op = Op::ProcessWatch {
+            process: super::ProcessId(4),
+            on: true,
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        let back: Op = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, op);
+    }
+
+    #[test]
+    fn event_process_started_roundtrips() {
+        let ev = Event::ProcessStarted {
+            process: super::ProcessId(1),
+            command: "pnpm dev".to_owned(),
+            watched: false,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ev);
+    }
+
+    #[test]
+    fn event_process_exited_omits_code_when_absent() {
+        let ev = Event::ProcessExited {
+            process: super::ProcessId(1),
+            code: None,
+            reason: super::ProcessExitReason::Killed,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(!json.contains("code"));
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ev);
+    }
+
+    #[test]
+    fn transcript_entry_process_roundtrips() {
+        let entry = TranscriptEntry::Process {
+            command: "pnpm dev".to_owned(),
+            output: "ready".to_owned(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: TranscriptEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, entry);
+    }
 }

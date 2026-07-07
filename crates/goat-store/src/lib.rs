@@ -12,8 +12,8 @@ use models::thread_from_row;
 use schema::migrate;
 
 pub use models::{
-    Compaction, NewCompaction, NewMessage, NewThread, NewToolCall, NewTurn, OpenPrompt, StoreError,
-    StoredMessage, Thread,
+    Compaction, NewCompaction, NewMessage, NewProcess, NewThread, NewToolCall, NewTurn, OpenPrompt,
+    OrphanProcess, StoreError, StoredMessage, Thread,
 };
 
 const READER_POOL_MAX: usize = 4;
@@ -387,6 +387,60 @@ impl Store {
         .await
     }
 
+    pub async fn create_process(&self, process: NewProcess) -> Result<i64, StoreError> {
+        self.run(move |conn| {
+            conn.execute(
+                "INSERT INTO processes (pgid, command, cwd, status, started_at)
+                 VALUES (?1, ?2, ?3, 'running', ?4)",
+                params![
+                    process.pgid,
+                    process.command,
+                    process.cwd,
+                    process.started_at,
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+        .await
+    }
+
+    pub async fn finish_process(&self, id: i64, finished_at: i64) -> Result<(), StoreError> {
+        self.run(move |conn| {
+            conn.execute(
+                "UPDATE processes SET status = 'dead', finished_at = ?2 WHERE id = ?1",
+                params![id, finished_at],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn take_orphan_processes(
+        &self,
+        finished_at: i64,
+    ) -> Result<Vec<OrphanProcess>, StoreError> {
+        self.run(move |conn| {
+            let orphans = {
+                let mut stmt = conn
+                    .prepare("SELECT id, pgid, command FROM processes WHERE status = 'running'")?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(OrphanProcess {
+                        id: row.get(0)?,
+                        pgid: row.get(1)?,
+                        command: row.get(2)?,
+                    })
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            conn.execute(
+                "UPDATE processes SET status = 'dead', finished_at = ?1 WHERE status = 'running'",
+                params![finished_at],
+            )?;
+            Ok(orphans)
+        })
+        .await
+    }
+
     pub async fn create_message(&self, message: NewMessage) -> Result<i64, StoreError> {
         self.run(move |conn| {
             conn.execute(
@@ -502,7 +556,7 @@ impl Store {
 #[cfg(test)]
 #[cfg(test)]
 mod tests {
-    use super::{NewMessage, NewThread, NewToolCall, NewTurn, Store};
+    use super::{NewMessage, NewProcess, NewThread, NewToolCall, NewTurn, Store};
 
     fn sample_thread() -> NewThread {
         NewThread {
@@ -841,7 +895,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(has_index, (1, 9));
+        assert_eq!(has_index, (1, 10));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -873,7 +927,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(result, (0, 9));
+        assert_eq!(result, (0, 10));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -910,7 +964,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(result, (0, 9));
+        assert_eq!(result, (0, 10));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -966,5 +1020,38 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn processes_roundtrip_and_sweep_orphans() {
+        let store = Store::open_in_memory().unwrap();
+        let alive = store
+            .create_process(NewProcess {
+                pgid: 4242,
+                command: "pnpm dev".into(),
+                cwd: "/tmp/project".into(),
+                started_at: 100,
+            })
+            .await
+            .unwrap();
+        let finished = store
+            .create_process(NewProcess {
+                pgid: 4343,
+                command: "gh run watch".into(),
+                cwd: "/tmp/project".into(),
+                started_at: 101,
+            })
+            .await
+            .unwrap();
+        store.finish_process(finished, 150).await.unwrap();
+
+        let orphans = store.take_orphan_processes(200).await.unwrap();
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].id, alive);
+        assert_eq!(orphans[0].pgid, 4242);
+        assert_eq!(orphans[0].command, "pnpm dev");
+
+        let again = store.take_orphan_processes(300).await.unwrap();
+        assert!(again.is_empty());
     }
 }

@@ -124,7 +124,7 @@ pub(crate) async fn run_delegation(
         account: env.target.account.clone(),
         effort,
     };
-    let tool_defs = build_tool_defs(ctx, provider.as_ref(), Some(&spec.tools), false);
+    let tool_defs = build_tool_defs(ctx, provider.as_ref(), Some(&spec.tools), false, false);
     let mut conversation = Conversation::new();
     conversation.push(
         Message::text(
@@ -152,6 +152,7 @@ pub(crate) async fn run_delegation(
         tool_defs: &tool_defs,
         cwd: env.cwd,
         allow_delegate: false,
+        allow_ask: false,
         exec_policy: crate::agent::tighter(&env.exec_policy, &spec.exec_policy),
     };
     let child_token = token.child_token();

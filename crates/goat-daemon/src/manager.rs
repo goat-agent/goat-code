@@ -201,6 +201,7 @@ impl Manager {
             snapshot: None,
             tokens: 0,
             open_asks: 0,
+            live_processes: 0,
             thread_id,
             awaits_restore: thread_id.is_some(),
             ready,
@@ -367,6 +368,24 @@ impl Manager {
         self.unregister_thread_if_owner(session).await;
         let _ = ops.send(Op::Shutdown {}).await;
         tracing::info!(session = session.0, "evicted idle session with no windows");
+    }
+
+    pub(crate) async fn shutdown_all_sessions(&self) {
+        let all_ops: Vec<mpsc::Sender<Op>> = {
+            let table = self.inner.sessions.lock().await;
+            let mut ops = Vec::new();
+            for live in table.values() {
+                let inner = live.inner.lock().await;
+                ops.push(inner.ops.clone());
+            }
+            ops
+        };
+        for ops in &all_ops {
+            let _ = ops.send(Op::Shutdown {}).await;
+        }
+        if !all_ops.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
     }
 
     pub(crate) async fn rebind(

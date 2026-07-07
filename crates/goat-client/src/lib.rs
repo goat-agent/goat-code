@@ -233,7 +233,9 @@ async fn run_connection(
                             }
                             Op::Interrupt { .. }
                             | Op::Answer { .. }
-                            | Op::DequeueMessage { .. } => {
+                            | Op::DequeueMessage { .. }
+                            | Op::ProcessKill { .. }
+                            | Op::ProcessWatch { .. } => {
                                 let mut op = op;
                                 shared.idmap.lock().await.translate_outbound(&mut op);
                                 ClientFrame::Control { session, op }

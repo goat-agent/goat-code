@@ -27,6 +27,7 @@ pub(crate) struct SessionInner {
     pub(crate) snapshot: Option<RestoredSnapshot>,
     pub(crate) tokens: u64,
     pub(crate) open_asks: usize,
+    pub(crate) live_processes: usize,
     pub(crate) thread_id: Option<i64>,
     pub(crate) awaits_restore: bool,
     pub(crate) ready: Arc<tokio::sync::Notify>,
@@ -124,6 +125,10 @@ impl SessionInner {
             Event::AskStarted { .. } => self.open_asks += 1,
             Event::AskDismissed { .. } => {
                 self.open_asks = self.open_asks.saturating_sub(1);
+            }
+            Event::ProcessStarted { .. } => self.live_processes += 1,
+            Event::ProcessExited { .. } => {
+                self.live_processes = self.live_processes.saturating_sub(1);
             }
             Event::Usage { usage, .. } => {
                 self.tokens = self
@@ -225,6 +230,7 @@ impl SessionInner {
         self.subscribers.is_empty()
             && self.pending_attaches == 0
             && self.open_asks == 0
+            && self.live_processes == 0
             && matches!(self.state, SessionLiveState::Idle {})
     }
 }
@@ -306,6 +312,7 @@ mod tests {
             snapshot: None,
             tokens: 0,
             open_asks: 0,
+            live_processes: 0,
             thread_id: None,
             awaits_restore: false,
             ready: std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -332,6 +339,30 @@ mod tests {
         );
         inner.pending_attaches -= 1;
         assert!(inner.evictable());
+    }
+
+    #[test]
+    fn live_process_blocks_eviction() {
+        let mut inner = blank_inner();
+        assert!(inner.evictable());
+        inner.record_and_fanout(Event::ProcessStarted {
+            process: goat_protocol::ProcessId(1),
+            command: "pnpm dev".to_owned(),
+            watched: false,
+        });
+        assert!(
+            !inner.evictable(),
+            "a live background process must keep the session alive after the window closes"
+        );
+        inner.record_and_fanout(Event::ProcessExited {
+            process: goat_protocol::ProcessId(1),
+            code: Some(0),
+            reason: goat_protocol::ProcessExitReason::Natural,
+        });
+        assert!(
+            inner.evictable(),
+            "once the process exits the session may be evicted"
+        );
     }
 
     #[test]

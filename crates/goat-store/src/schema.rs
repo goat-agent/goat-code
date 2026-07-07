@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::StoreError;
 
-pub(crate) const LATEST_VERSION: i64 = 9;
+pub(crate) const LATEST_VERSION: i64 = 10;
 
 pub(crate) const SCHEMA_V1: &str = "\
 CREATE TABLE threads (
@@ -96,6 +96,18 @@ pub(crate) const SCHEMA_V8: &str = "ALTER TABLE threads DROP COLUMN mode;";
 
 pub(crate) const SCHEMA_V9: &str = "DROP TABLE IF EXISTS session_events;";
 
+pub(crate) const SCHEMA_V10: &str = "\
+CREATE TABLE processes (
+    id INTEGER PRIMARY KEY,
+    pgid INTEGER NOT NULL,
+    command TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER
+);
+CREATE INDEX idx_processes_status ON processes(status);";
+
 pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > LATEST_VERSION {
@@ -112,6 +124,7 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             6 => SCHEMA_V7,
             7 => SCHEMA_V8,
             8 => SCHEMA_V9,
+            9 => SCHEMA_V10,
             _ => return Err(StoreError::UnknownVersion(version)),
         };
         let next = version + 1;

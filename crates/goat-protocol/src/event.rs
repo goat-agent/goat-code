@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AccountEntry, InputAttachment, LoginProvider, ModelEntry, ModelTarget, RateLimitSnapshot,
-    SkillInfo, TaskId, ThreadSummary, ToolCall, ToolCallId, ToolOutcome, TranscriptEntry, Usage,
+    AccountEntry, InputAttachment, LoginProvider, ModelEntry, ModelTarget, ProcessExitReason,
+    ProcessId, ProcessInfo, RateLimitSnapshot, SkillInfo, TaskId, ThreadSummary, ToolCall,
+    ToolCallId, ToolOutcome, TranscriptEntry, Usage,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -156,6 +157,30 @@ pub enum Event {
     },
     ThreadBound {
         thread_id: i64,
+    },
+    ProcessStarted {
+        process: ProcessId,
+        command: String,
+        watched: bool,
+    },
+    ProcessOutput {
+        process: ProcessId,
+        chunk: String,
+    },
+    ProcessExited {
+        process: ProcessId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<i32>,
+        reason: ProcessExitReason,
+    },
+    ProcessObserved {
+        id: TaskId,
+        process: ProcessId,
+        command: String,
+        output: String,
+    },
+    ProcessListChanged {
+        processes: Vec<ProcessInfo>,
     },
 }
 
