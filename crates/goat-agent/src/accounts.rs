@@ -14,7 +14,7 @@ use goat_protocol::{
 };
 use goat_provider::{ModelListSource, Provider};
 use goat_providers::{DEFAULT_ACCOUNT, Registry};
-use goat_store::Store;
+use goat_store::{Store, Thread};
 use tokio::sync::mpsc;
 
 use crate::Ctx;
@@ -26,8 +26,7 @@ pub(crate) async fn restore_target(
     credentials: &CredentialStore,
     cwd: &std::path::Path,
 ) -> Option<ModelTarget> {
-    let cwd = cwd.display().to_string();
-    let thread = store.latest_thread_in(cwd).await.ok().flatten()?;
+    let thread = latest_thread_or_seed(store, cwd).await?;
     let provider = Registry::load(credentials, &thread.account)
         .get(&goat_provider::ProviderId::from(thread.provider.as_str()))?;
     if !provider.authenticated() {
@@ -39,6 +38,27 @@ pub(crate) async fn restore_target(
         account: thread.account,
         effort: thread.effort.as_deref().and_then(Effort::parse),
     })
+}
+
+async fn latest_thread_or_seed(store: &Store, cwd: &std::path::Path) -> Option<Thread> {
+    let key = cwd.display().to_string();
+    if let Some(thread) = store.latest_thread_in(key).await.ok().flatten() {
+        return Some(thread);
+    }
+    let owner = worktree_owner_root(cwd)?;
+    store
+        .latest_thread_in(owner.display().to_string())
+        .await
+        .ok()
+        .flatten()
+}
+
+fn worktree_owner_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let workspace = goat_worktree::workspace(cwd).ok()?;
+    if !matches!(workspace.kind, goat_worktree::WorkspaceKind::Managed { .. }) {
+        return None;
+    }
+    Some(workspace.owner_root)
 }
 
 pub(crate) async fn emit_accounts_changed(
@@ -565,8 +585,9 @@ mod tests {
     use goat_auth::{Credential, CredentialStore, SecretString};
     use goat_provider::{ModelListSource, Provider, ProviderId};
 
-    use super::{catalog_only, models_for_provider};
+    use super::{catalog_only, latest_thread_or_seed, models_for_provider};
     use goat_providers::Registry;
+    use goat_store::{NewThread, Store};
 
     fn store(name: &str) -> CredentialStore {
         let path = std::env::temp_dir().join(name);
@@ -654,5 +675,162 @@ mod tests {
         let api_models = models_for_provider(&store, &ProviderId::from("xai"), &["api".to_owned()]);
         assert!(api_models.iter().any(|id| id == "grok-4"));
         assert!(!api_models.iter().any(|id| id == "grok-composer-2.5-fast"));
+    }
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn seeded_thread(cwd: &str, model: &str) -> NewThread {
+        NewThread {
+            cwd: cwd.to_owned(),
+            title: None,
+            provider: "anthropic".to_owned(),
+            model: model.to_owned(),
+            account: "default".to_owned(),
+            effort: Some("xhigh".to_owned()),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn worktree_seeds_model_from_owner_repo() {
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.invalid"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let owner_root = repo.canonicalize().unwrap();
+
+        let worktree = owner_root.join(".goat/worktrees/test");
+        git(
+            &owner_root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "worktree-test",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let worktree = worktree.canonicalize().unwrap();
+
+        let store = Store::open(&dir.path().join("db.sqlite")).unwrap();
+        store
+            .create_thread(seeded_thread(
+                &owner_root.display().to_string(),
+                "claude-opus-4-8",
+            ))
+            .await
+            .unwrap();
+
+        let seeded = latest_thread_or_seed(&store, &worktree).await.unwrap();
+        assert_eq!(seeded.model, "claude-opus-4-8");
+        assert_eq!(seeded.effort.as_deref(), Some("xhigh"));
+    }
+
+    #[tokio::test]
+    async fn worktree_own_thread_wins_over_owner_seed() {
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.invalid"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let owner_root = repo.canonicalize().unwrap();
+
+        let worktree = owner_root.join(".goat/worktrees/test");
+        git(
+            &owner_root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "worktree-test",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let worktree = worktree.canonicalize().unwrap();
+
+        let store = Store::open(&dir.path().join("db.sqlite")).unwrap();
+        store
+            .create_thread(seeded_thread(
+                &owner_root.display().to_string(),
+                "claude-opus-4-8",
+            ))
+            .await
+            .unwrap();
+        store
+            .create_thread(seeded_thread(
+                &worktree.display().to_string(),
+                "claude-haiku-4-8",
+            ))
+            .await
+            .unwrap();
+
+        let resolved = latest_thread_or_seed(&store, &worktree).await.unwrap();
+        assert_eq!(resolved.model, "claude-haiku-4-8");
+    }
+
+    #[tokio::test]
+    async fn plain_repo_does_not_seed() {
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.invalid"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let owner_root = repo.canonicalize().unwrap();
+
+        let store = Store::open(&dir.path().join("db.sqlite")).unwrap();
+        store
+            .create_thread(seeded_thread(
+                &owner_root.display().to_string(),
+                "claude-opus-4-8",
+            ))
+            .await
+            .unwrap();
+
+        let fresh = owner_root.join("sub");
+        std::fs::create_dir(&fresh).unwrap();
+        assert!(latest_thread_or_seed(&store, &fresh).await.is_none());
     }
 }
