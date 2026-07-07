@@ -40,6 +40,10 @@ struct Entry {
     watch_flooded: bool,
     stdin: Option<tokio::process::ChildStdin>,
     kill_pending: bool,
+    /// Signals the waiter task to kill the child directly via tokio (SIGKILL +
+    /// reap), which is deterministic — unlike an external `kill -PGID` that can
+    /// race process-group setup. `None` once the signal has been sent.
+    kill_tx: Option<tokio::sync::oneshot::Sender<()>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -177,7 +181,8 @@ impl ProcessRegistry {
         if let Some(pipe) = stderr {
             tasks.push(self.spawn_reader(id, pipe, Stream::Err));
         }
-        tasks.push(self.spawn_waiter(id, child));
+        let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+        tasks.push(self.spawn_waiter(id, child, kill_rx));
 
         {
             let mut inner = self.inner.lock().await;
@@ -200,6 +205,7 @@ impl ProcessRegistry {
                     watch_flooded: false,
                     stdin,
                     kill_pending: false,
+                    kill_tx: Some(kill_tx),
                     tasks,
                 },
             );
@@ -247,10 +253,20 @@ impl ProcessRegistry {
         self: &Arc<Self>,
         id: ProcessId,
         mut child: tokio::process::Child,
+        kill_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> tokio::task::JoinHandle<()> {
         let registry = Arc::clone(self);
         tokio::spawn(async move {
-            let status = child.wait().await;
+            let status = tokio::select! {
+                status = child.wait() => status,
+                _ = kill_rx => {
+                    // Kill the child directly through tokio: this sends SIGKILL
+                    // and then reaps it, which is deterministic regardless of
+                    // process-group timing.
+                    let _ = child.start_kill();
+                    child.wait().await
+                }
+            };
             let code = status.ok().and_then(|s| s.code());
             registry
                 .mark_exited(id, code, ProcessExitReason::Natural)
@@ -432,7 +448,7 @@ impl ProcessRegistry {
     }
 
     pub(crate) async fn kill(&self, id: ProcessId) -> Result<(), String> {
-        let pgid = {
+        let (pgid, kill_tx) = {
             let mut inner = self.inner.lock().await;
             let entry = inner
                 .entries
@@ -443,12 +459,17 @@ impl ProcessRegistry {
             }
             entry.kill_pending = true;
             // Closing stdin sends EOF, which lets input-driven processes (a
-            // shell blocked on `cat`/`findstr`, a REPL, ...) exit on their own
-            // even if the group kill below races or misses. Dropping the handle
-            // closes the write end of the pipe.
+            // shell blocked on `cat`, a REPL, ...) exit on their own.
             entry.stdin.take();
-            entry.pgid
+            (entry.pgid, entry.kill_tx.take())
         };
+        // Primary, deterministic path: tell the waiter to SIGKILL and reap the
+        // child directly through tokio.
+        if let Some(tx) = kill_tx {
+            let _ = tx.send(());
+        }
+        // Best-effort group kill to also take down any grandchildren the shell
+        // may have spawned into the child's process group.
         kill_group(pgid);
         Ok(())
     }
