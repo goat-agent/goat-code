@@ -107,6 +107,21 @@ pub struct NewToolCall {
     pub started_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewProcess {
+    pub pgid: i64,
+    pub command: String,
+    pub cwd: String,
+    pub started_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanProcess {
+    pub id: i64,
+    pub pgid: i64,
+    pub command: String,
+}
+
 pub(crate) fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     Ok(Thread {
         id: row.get(0)?,
