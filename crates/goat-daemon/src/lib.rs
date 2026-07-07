@@ -34,7 +34,9 @@ pub struct RemoteSettings {
 
 pub async fn serve(config: DaemonConfig) -> Result<(), DaemonError> {
     let listener = bind(&config.socket_path)?;
+    let db_path = config.db_path.clone();
     sweep_orphaned_turns(&config.db_path).await;
+    sweep_orphaned_processes(&config.db_path).await;
     let manager = Manager::new(config.auth_path, config.db_path);
     let shutdown = tokio_util::sync::CancellationToken::new();
     tracing::info!(socket = %config.socket_path.display(), "daemon listening");
@@ -47,6 +49,10 @@ pub async fn serve(config: DaemonConfig) -> Result<(), DaemonError> {
         tokio::select! {
             () = shutdown.cancelled() => {
                 tracing::info!("daemon shutting down");
+                break;
+            }
+            () = shutdown_signal() => {
+                tracing::info!("received termination signal, shutting down");
                 break;
             }
             accepted = listener.accept() => match accepted {
@@ -62,8 +68,31 @@ pub async fn serve(config: DaemonConfig) -> Result<(), DaemonError> {
         }
     }
 
+    manager.shutdown_all_sessions().await;
+    sweep_orphaned_processes(&db_path).await;
     transport::cleanup(&config.socket_path);
     Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut term), Ok(mut int)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 fn spawn_remote(
@@ -114,4 +143,41 @@ async fn sweep_orphaned_turns(db_path: &Path) {
         Ok(_) => {}
         Err(err) => tracing::warn!(%err, "failed to sweep orphaned turns"),
     }
+}
+
+async fn sweep_orphaned_processes(db_path: &Path) {
+    let Ok(store) = goat_store::Store::open(db_path) else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    match store.take_orphan_processes(now).await {
+        Ok(orphans) => {
+            for orphan in &orphans {
+                kill_process_group(orphan.pgid);
+            }
+            if !orphans.is_empty() {
+                tracing::info!(
+                    count = orphans.len(),
+                    "killed orphaned background processes"
+                );
+            }
+        }
+        Err(err) => tracing::warn!(%err, "failed to sweep orphaned processes"),
+    }
+}
+
+fn kill_process_group(pgid: i64) {
+    #[cfg(unix)]
+    if let Ok(pgid) = i32::try_from(pgid) {
+        let _ = std::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pgid}"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = pgid;
 }
