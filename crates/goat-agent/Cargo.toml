@@ -19,6 +19,7 @@ goat-mcp = { workspace = true }
 goat-tool = { workspace = true }
 goat-sandbox = { workspace = true }
 goat-tools = { workspace = true }
+goat-worktree = { workspace = true }
 rand = { workspace = true }
 goat-tool-computer = { workspace = true }
 goat-tool-browser = { workspace = true }
