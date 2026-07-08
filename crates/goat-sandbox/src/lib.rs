@@ -268,9 +268,7 @@ mod tests {
             .expect("profile arg");
         assert!(profile.contains("(allow file-read*)"));
         assert!(profile.contains(&format!("(deny file-read* (subpath \"{home}/.ssh\"))")));
-        assert!(profile.contains(&format!(
-            "(deny file-read* (subpath \"{home}/.goat\"))"
-        )));
+        assert!(profile.contains(&format!("(deny file-read* (subpath \"{home}/.goat\"))")));
         assert!(profile.contains(&format!("(deny file-read* (literal \"{home}/.netrc\"))")));
         assert!(!profile.contains("/work"));
     }
