@@ -17,7 +17,7 @@ pub fn metadata() -> SearchProviderMetadata {
         default_account: "default",
         kind: SearchProviderKind::Brave,
         credential: SearchCredentialMetadata::EnvApiKey { env_var: ENV_VAR },
-        setup: "set BRAVE_API_KEY or run `goat search login brave --key <key>`",
+        setup: "set BRAVE_API_KEY or run `goat-code search login brave --key <key>`",
         builtins: &[],
     }
 }

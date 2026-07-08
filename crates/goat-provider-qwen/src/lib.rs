@@ -9,7 +9,7 @@ const QWEN_DEFAULT_ENDPOINT: &str = "https://dashscope-us.aliyuncs.com/compatibl
 const QWEN_SETUP: &[&str] = &[
     "Qwen DashScope API-key provider.",
     "Default endpoint: https://dashscope-us.aliyuncs.com/compatible-mode/v1",
-    "Non-US workspaces: `goat provider login qwen --endpoint <url> --key sk-...`.",
+    "Non-US workspaces: `goat-code provider login qwen --endpoint <url> --key sk-...`.",
     "Qwen OAuth enrollment is discontinued upstream.",
 ];
 

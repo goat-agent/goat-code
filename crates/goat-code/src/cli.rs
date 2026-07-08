@@ -1,7 +1,11 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "goat", version, about = "goat — a terminal coding agent")]
+#[command(
+    name = "goat-code",
+    version,
+    about = "goat-code — a terminal coding agent"
+)]
 pub struct Cli {
     #[arg(long)]
     pub print_log_path: bool,

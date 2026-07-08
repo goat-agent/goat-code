@@ -17,7 +17,7 @@ const ALLOWED_HOST: &str = "api.kimi.com";
 
 const SETUP: &[&str] = &[
     "Kimi Code OAuth device-code login.",
-    "Run `goat provider login kimi-code`, open the URL, and enter the code.",
+    "Run `goat-code provider login kimi-code`, open the URL, and enter the code.",
 ];
 
 const CATALOG: &[&str] = &[

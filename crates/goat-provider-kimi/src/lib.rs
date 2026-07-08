@@ -12,8 +12,8 @@ const ENV_VAR: &str = "MOONSHOT_API_KEY";
 
 const KIMI_SETUP: &[&str] = &[
     "Kimi Platform API key provider.",
-    "For Kimi Code OAuth, use `goat provider login kimi-code`.",
-    "API-key setup: `goat provider login kimi --key sk-...`.",
+    "For Kimi Code OAuth, use `goat-code provider login kimi-code`.",
+    "API-key setup: `goat-code provider login kimi --key sk-...`.",
 ];
 
 const CATALOG: &[&str] = &[

@@ -94,8 +94,8 @@ if ! verify; then
 fi
 mkdir -p "$tmp/extract"
 tar -xzf "$tmp/$archive" -C "$tmp/extract"
-test -f "$tmp/extract/goat"
+test -f "$tmp/extract/goat-code"
 test -f "$tmp/extract/goat-update"
-$install_cmd -m 755 "$tmp/extract/goat" "$install_dir/goat"
+$install_cmd -m 755 "$tmp/extract/goat-code" "$install_dir/goat-code"
 $install_cmd -m 755 "$tmp/extract/goat-update" "$install_dir/goat-update"
-printf "%bgoat-code%b installed to %s\n" "$purple" "$reset" "$install_dir/goat"
+printf "%bgoat-code%b installed to %s\n" "$purple" "$reset" "$install_dir/goat-code"

@@ -8,9 +8,9 @@ A terminal coding agent, in Rust.
 curl -fsSL https://raw.githubusercontent.com/goat-agent/goat-code/main/install.sh | sh
 ```
 
-Then update in place with `goat update`.
+Then update in place with `goat-code update`.
 
-Windows initial install is archive-only for now. Download `goat-code-x86_64-pc-windows-msvc.tar.gz` from the latest release, extract `goat.exe` and `goat-update.exe` into a directory on `PATH`, then update in place with `goat update`.
+Windows initial install is archive-only for now. Download `goat-code-x86_64-pc-windows-msvc.tar.gz` from the latest release, extract `goat-code.exe` and `goat-update.exe` into a directory on `PATH`, then update in place with `goat-code update`.
 
 ## Build from source
 
