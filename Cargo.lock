@@ -1876,6 +1876,7 @@ dependencies = [
 [[package]]
 name = "goat-auth"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "base64",
  "fs2",
@@ -2046,6 +2047,7 @@ dependencies = [
 [[package]]
 name = "goat-protocol"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "schemars",
  "serde",
@@ -2054,6 +2056,7 @@ dependencies = [
 [[package]]
 name = "goat-provider"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2069,6 +2072,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-anthropic"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2088,6 +2092,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-deepseek"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2097,6 +2102,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-gemini"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2116,6 +2122,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-groq"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2125,6 +2132,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-kimi"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2134,6 +2142,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-kimi-code"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "async-trait",
  "goat-auth",
@@ -2148,6 +2157,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-local"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-provider-openai-compat",
 ]
@@ -2155,6 +2165,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-mistral"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2164,6 +2175,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-openai"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2173,6 +2185,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-openai-codex"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "async-trait",
  "base64",
@@ -2191,6 +2204,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-openai-compat"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2207,6 +2221,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-openrouter"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2216,6 +2231,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-qwen"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2226,6 +2242,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-xai"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "async-trait",
  "goat-auth",
@@ -2241,6 +2258,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-zai"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2250,6 +2268,7 @@ dependencies = [
 [[package]]
 name = "goat-provider-zai-coding"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2259,6 +2278,7 @@ dependencies = [
 [[package]]
 name = "goat-providers"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-provider",
@@ -2315,6 +2335,7 @@ dependencies = [
 [[package]]
 name = "goat-search-provider"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "reqwest 0.12.28",
@@ -2325,6 +2346,7 @@ dependencies = [
 [[package]]
 name = "goat-search-provider-brave"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-search-provider",
@@ -2335,6 +2357,7 @@ dependencies = [
 [[package]]
 name = "goat-search-provider-duckduckgo"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "chromiumoxide",
  "futures",
@@ -2348,6 +2371,7 @@ dependencies = [
 [[package]]
 name = "goat-search-provider-searxng"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-search-provider",
@@ -2358,6 +2382,7 @@ dependencies = [
 [[package]]
 name = "goat-search-provider-tavily"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-search-provider",
@@ -2368,6 +2393,7 @@ dependencies = [
 [[package]]
 name = "goat-search-providers"
 version = "0.1.23"
+source = "git+https://github.com/goat-agent/goat-sdk.git?rev=3afccf288250f764fd64b19ab9b9bb40d9733176#3afccf288250f764fd64b19ab9b9bb40d9733176"
 dependencies = [
  "goat-auth",
  "goat-search-provider",
