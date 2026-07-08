@@ -434,6 +434,9 @@ async fn compact_inner(
             tools: env.tool_defs.to_vec(),
             effort: None,
             tool_choice: goat_provider::ToolChoice::None,
+            temperature: None,
+            max_tokens: None,
+            system: None,
         };
         match collect_with_retry(ctx, run, env.provider, &request, token).await {
             Ok(collected) => break collected,

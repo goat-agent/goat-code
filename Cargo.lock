@@ -1559,6 +1559,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1844,6 +1854,7 @@ name = "goat-auth"
 version = "0.1.23"
 dependencies = [
  "base64",
+ "fs2",
  "percent-encoding",
  "rand 0.10.1",
  "serde",
@@ -1950,6 +1961,7 @@ dependencies = [
 name = "goat-config"
 version = "0.1.23"
 dependencies = [
+ "goat-search-provider",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2013,7 +2025,6 @@ version = "0.1.23"
 dependencies = [
  "schemars",
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2106,7 +2117,6 @@ dependencies = [
 name = "goat-provider-local"
 version = "0.1.23"
 dependencies = [
- "goat-provider",
  "goat-provider-openai-compat",
 ]
 
@@ -2272,6 +2282,7 @@ version = "0.1.23"
 dependencies = [
  "goat-auth",
  "reqwest 0.12.28",
+ "serde",
  "thiserror 2.0.18",
 ]
 
@@ -2323,7 +2334,6 @@ name = "goat-search-providers"
 version = "0.1.23"
 dependencies = [
  "goat-auth",
- "goat-config",
  "goat-search-provider",
  "goat-search-provider-brave",
  "goat-search-provider-duckduckgo",
@@ -2415,6 +2425,7 @@ dependencies = [
 name = "goat-tool-search"
 version = "0.1.23"
 dependencies = [
+ "goat-auth",
  "goat-config",
  "goat-protocol",
  "goat-search-provider",

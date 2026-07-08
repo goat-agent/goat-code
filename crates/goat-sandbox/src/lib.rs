@@ -54,7 +54,7 @@ mod backend {
 
     const SECRET_SUBDIRS: [&str; 9] = [
         ".ssh",
-        ".goat-code",
+        ".goat",
         ".aws",
         ".gnupg",
         ".config/gcloud",
@@ -137,7 +137,7 @@ mod backend {
 
     const SECRET_SUBDIRS: [&str; 9] = [
         ".ssh",
-        ".goat-code",
+        ".goat",
         ".aws",
         ".gnupg",
         ".config/gcloud",
@@ -269,7 +269,7 @@ mod tests {
         assert!(profile.contains("(allow file-read*)"));
         assert!(profile.contains(&format!("(deny file-read* (subpath \"{home}/.ssh\"))")));
         assert!(profile.contains(&format!(
-            "(deny file-read* (subpath \"{home}/.goat-code\"))"
+            "(deny file-read* (subpath \"{home}/.goat\"))"
         )));
         assert!(profile.contains(&format!("(deny file-read* (literal \"{home}/.netrc\"))")));
         assert!(!profile.contains("/work"));
