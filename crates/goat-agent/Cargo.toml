@@ -35,6 +35,8 @@ unicode-width = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+async-trait = { workspace = true }
+async-stream = { workspace = true }
 
 [lints]
 workspace = true

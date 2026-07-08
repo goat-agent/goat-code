@@ -290,6 +290,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "async-task"
 version = "4.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1823,6 +1845,8 @@ dependencies = [
 name = "goat-agent"
 version = "0.1.23"
 dependencies = [
+ "async-stream",
+ "async-trait",
  "futures",
  "goat-auth",
  "goat-config",
@@ -2031,6 +2055,9 @@ dependencies = [
 name = "goat-provider"
 version = "0.1.23"
 dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures",
  "goat-auth",
  "goat-protocol",
  "serde",
@@ -2043,6 +2070,8 @@ dependencies = [
 name = "goat-provider-anthropic"
 version = "0.1.23"
 dependencies = [
+ "async-stream",
+ "async-trait",
  "eventsource-stream",
  "futures",
  "goat-auth",
@@ -2069,6 +2098,8 @@ dependencies = [
 name = "goat-provider-gemini"
 version = "0.1.23"
 dependencies = [
+ "async-stream",
+ "async-trait",
  "eventsource-stream",
  "futures",
  "goat-auth",
@@ -2104,6 +2135,7 @@ dependencies = [
 name = "goat-provider-kimi-code"
 version = "0.1.23"
 dependencies = [
+ "async-trait",
  "goat-auth",
  "goat-provider",
  "goat-provider-openai-compat",
@@ -2142,6 +2174,7 @@ dependencies = [
 name = "goat-provider-openai-codex"
 version = "0.1.23"
 dependencies = [
+ "async-trait",
  "base64",
  "goat-auth",
  "goat-provider",
@@ -2159,6 +2192,8 @@ dependencies = [
 name = "goat-provider-openai-compat"
 version = "0.1.23"
 dependencies = [
+ "async-stream",
+ "async-trait",
  "eventsource-stream",
  "futures",
  "goat-auth",
@@ -2192,6 +2227,7 @@ dependencies = [
 name = "goat-provider-xai"
 version = "0.1.23"
 dependencies = [
+ "async-trait",
  "goat-auth",
  "goat-provider",
  "goat-provider-openai-compat",

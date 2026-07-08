@@ -465,7 +465,8 @@ mod tests {
     use goat_core::Session;
     use goat_protocol::{Event, ModelTarget, Op, TaskId};
     use goat_provider::{
-        AuthMethod, Capabilities, Model, Provider, ProviderId, Request, StreamError, StreamEvent,
+        AuthMethod, Capabilities, ChunkStream, Model, Provider, ProviderId, Request, StreamChunk,
+        StreamError,
     };
     use goat_providers::Registry;
     use goat_store::Store;
@@ -479,6 +480,7 @@ mod tests {
         delay_ms: u64,
     }
 
+    #[async_trait::async_trait]
     impl Provider for MockProvider {
         fn id(&self) -> ProviderId {
             ProviderId::from(self.id.as_str())
@@ -492,16 +494,15 @@ mod tests {
             }
         }
 
-        fn stream(&self, _req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
+        async fn stream(&self, _req: Request) -> Result<ChunkStream, StreamError> {
             let reply = self.reply.clone();
             let delay = self.delay_ms;
-            tokio::spawn(async move {
+            Ok(Box::pin(async_stream::try_stream! {
                 if delay > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 }
-                let _ = events.send(StreamEvent::TextDelta { text: reply }).await;
-                let _ = events.send(StreamEvent::Completed).await;
-            })
+                yield StreamChunk::TextDelta { text: reply };
+            }))
         }
 
         fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
@@ -515,6 +516,7 @@ mod tests {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
+    #[async_trait::async_trait]
     impl Provider for ScriptedProvider {
         fn id(&self) -> ProviderId {
             ProviderId::from("mock")
@@ -528,37 +530,30 @@ mod tests {
             }
         }
 
-        fn stream(&self, _req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
+        async fn stream(&self, _req: Request) -> Result<ChunkStream, StreamError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            tokio::spawn(async move {
+            Ok(Box::pin(async_stream::try_stream! {
                 match n {
                     0 => {
-                        let _ = events
-                            .send(StreamEvent::ToolCall {
-                                id: "call-1".to_owned(),
-                                name: "Agent".to_owned(),
-                                input: "{\"agent_type\":\"explore\",\"prompt\":\"look into it\"}"
-                                    .to_owned(),
-                            })
-                            .await;
+                        yield StreamChunk::ToolCall {
+                            id: "call-1".to_owned(),
+                            name: "Agent".to_owned(),
+                            input: "{\"agent_type\":\"explore\",\"prompt\":\"look into it\"}"
+                                .to_owned(),
+                        };
                     }
                     1 => {
-                        let _ = events
-                            .send(StreamEvent::TextDelta {
-                                text: "child findings".to_owned(),
-                            })
-                            .await;
+                        yield StreamChunk::TextDelta {
+                            text: "child findings".to_owned(),
+                        };
                     }
                     _ => {
-                        let _ = events
-                            .send(StreamEvent::TextDelta {
-                                text: "final answer".to_owned(),
-                            })
-                            .await;
+                        yield StreamChunk::TextDelta {
+                            text: "final answer".to_owned(),
+                        };
                     }
                 }
-                let _ = events.send(StreamEvent::Completed).await;
-            })
+            }))
         }
 
         fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
@@ -573,6 +568,7 @@ mod tests {
         delay_ms: u64,
     }
 
+    #[async_trait::async_trait]
     impl Provider for SeqTextProvider {
         fn id(&self) -> ProviderId {
             ProviderId::from("mock")
@@ -586,18 +582,15 @@ mod tests {
             }
         }
 
-        fn stream(&self, _req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
+        async fn stream(&self, _req: Request) -> Result<ChunkStream, StreamError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let delay = self.delay_ms;
-            tokio::spawn(async move {
+            Ok(Box::pin(async_stream::try_stream! {
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                let _ = events
-                    .send(StreamEvent::TextDelta {
-                        text: format!("reply {n}"),
-                    })
-                    .await;
-                let _ = events.send(StreamEvent::Completed).await;
-            })
+                yield StreamChunk::TextDelta {
+                    text: format!("reply {n}"),
+                };
+            }))
         }
 
         fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
@@ -612,6 +605,7 @@ mod tests {
         captured: Arc<std::sync::Mutex<Vec<Request>>>,
     }
 
+    #[async_trait::async_trait]
     impl Provider for CapturingProvider {
         fn id(&self) -> ProviderId {
             ProviderId::from("mock")
@@ -625,27 +619,22 @@ mod tests {
             }
         }
 
-        fn stream(&self, req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
+        async fn stream(&self, req: Request) -> Result<ChunkStream, StreamError> {
             self.captured.lock().unwrap().push(req);
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            tokio::spawn(async move {
+            Ok(Box::pin(async_stream::try_stream! {
                 if n == 0 {
-                    let _ = events
-                        .send(StreamEvent::ToolCall {
-                            id: "call-1".to_owned(),
-                            name: "Read".to_owned(),
-                            input: "{\"path\":\"does-not-exist.txt\"}".to_owned(),
-                        })
-                        .await;
+                    yield StreamChunk::ToolCall {
+                        id: "call-1".to_owned(),
+                        name: "Read".to_owned(),
+                        input: "{\"path\":\"does-not-exist.txt\"}".to_owned(),
+                    };
                 } else {
-                    let _ = events
-                        .send(StreamEvent::TextDelta {
-                            text: "final answer".to_owned(),
-                        })
-                        .await;
+                    yield StreamChunk::TextDelta {
+                        text: "final answer".to_owned(),
+                    };
                 }
-                let _ = events.send(StreamEvent::Completed).await;
-            })
+            }))
         }
 
         fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
@@ -863,6 +852,7 @@ mod tests {
         requests: Arc<std::sync::Mutex<Vec<Request>>>,
     }
 
+    #[async_trait::async_trait]
     impl Provider for OverflowThenRecoverProvider {
         fn id(&self) -> ProviderId {
             ProviderId::from("mock")
@@ -876,41 +866,31 @@ mod tests {
             }
         }
 
-        fn stream(&self, req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
+        async fn stream(&self, req: Request) -> Result<ChunkStream, StreamError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.requests
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(req);
-            tokio::spawn(async move {
+            Ok(Box::pin(async_stream::try_stream! {
                 match n {
                     0 => {
-                        let _ = events
-                            .send(StreamEvent::Failed {
-                                error: StreamError::context_overflow("prompt is too long"),
-                            })
-                            .await;
+                        Err(StreamError::context_overflow("prompt is too long"))?;
                     }
                     1 => {
-                        let _ = events
-                            .send(StreamEvent::TextDelta {
-                                text:
-                                    "<analysis>walk</analysis><summary>## Task\nthe work</summary>"
-                                        .to_owned(),
-                            })
-                            .await;
-                        let _ = events.send(StreamEvent::Completed).await;
+                        yield StreamChunk::TextDelta {
+                            text:
+                                "<analysis>walk</analysis><summary>## Task\nthe work</summary>"
+                                    .to_owned(),
+                        };
                     }
                     _ => {
-                        let _ = events
-                            .send(StreamEvent::TextDelta {
-                                text: "recovered after compaction".to_owned(),
-                            })
-                            .await;
-                        let _ = events.send(StreamEvent::Completed).await;
+                        yield StreamChunk::TextDelta {
+                            text: "recovered after compaction".to_owned(),
+                        };
                     }
                 }
-            })
+            }))
         }
 
         fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
@@ -1092,6 +1072,7 @@ mod tests {
         error: StreamError,
     }
 
+    #[async_trait::async_trait]
     impl Provider for FailingProvider {
         fn id(&self) -> ProviderId {
             ProviderId::from("mock")
@@ -1105,22 +1086,18 @@ mod tests {
             }
         }
 
-        fn stream(&self, _req: Request, events: mpsc::Sender<StreamEvent>) -> JoinHandle<()> {
+        async fn stream(&self, _req: Request) -> Result<ChunkStream, StreamError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let failures = self.failures;
             let error = self.error.clone();
-            tokio::spawn(async move {
+            Ok(Box::pin(async_stream::try_stream! {
                 if n < failures {
-                    let _ = events.send(StreamEvent::Failed { error }).await;
-                    return;
+                    Err(error)?;
                 }
-                let _ = events
-                    .send(StreamEvent::TextDelta {
-                        text: "recovered".to_owned(),
-                    })
-                    .await;
-                let _ = events.send(StreamEvent::Completed).await;
-            })
+                yield StreamChunk::TextDelta {
+                    text: "recovered".to_owned(),
+                };
+            }))
         }
 
         fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {

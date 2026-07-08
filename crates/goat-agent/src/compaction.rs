@@ -295,23 +295,25 @@ async fn collect_text(
     request: goat_provider::Request,
     token: &tokio_util::sync::CancellationToken,
 ) -> Result<(String, Usage), CollectEnd> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    let handle = provider.stream(request, tx);
+    use futures::StreamExt;
+    let mut stream = match provider.stream(request).await {
+        Ok(stream) => stream,
+        Err(error) => return Err(CollectEnd::Failed(error)),
+    };
     let mut text = String::new();
     let mut usage = Usage::default();
     loop {
         tokio::select! {
             biased;
             () = token.cancelled() => {
-                handle.abort();
                 return Err(CollectEnd::Cancelled);
             }
-            maybe_event = rx.recv() => match maybe_event {
-                Some(goat_provider::StreamEvent::TextDelta { text: chunk }) => text.push_str(&chunk),
-                Some(goat_provider::StreamEvent::Usage { usage: collected }) => usage = collected,
-                Some(goat_provider::StreamEvent::Failed { error }) => return Err(CollectEnd::Failed(error)),
-                Some(goat_provider::StreamEvent::Completed) | None => return Ok((text, usage)),
-                Some(_) => {}
+            maybe_chunk = stream.next() => match maybe_chunk {
+                Some(Ok(goat_provider::StreamChunk::TextDelta { text: chunk })) => text.push_str(&chunk),
+                Some(Ok(goat_provider::StreamChunk::Usage { usage: collected })) => usage = collected,
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(CollectEnd::Failed(error)),
+                None => return Ok((text, usage)),
             }
         }
     }

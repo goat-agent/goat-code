@@ -1,9 +1,9 @@
+use futures::StreamExt;
 use goat_protocol::Event;
 use goat_provider::{
-    ContentBlock, Message, MessageRole, Provider, Request, StreamError, StreamEvent,
+    ContentBlock, Message, MessageRole, Provider, Request, StreamChunk, StreamError,
 };
 use goat_tool::ToolContext;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -166,8 +166,20 @@ pub(crate) async fn run_round(
     request: Request,
     token: &CancellationToken,
 ) -> RoundResult {
-    let (mev_tx, mut mev_rx) = mpsc::channel(64);
-    let handle = provider.stream(request, mev_tx);
+    let mut stream = match provider.stream(request).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            return RoundResult {
+                end: RoundEnd::Failed(error),
+                raw: String::new(),
+                thinking: None,
+                redacted: Vec::new(),
+                pending_calls: Vec::new(),
+                usage: None,
+                rate_limits: None,
+            };
+        }
+    };
     let mut raw = String::new();
     let mut thinking = String::new();
     let mut signature = String::new();
@@ -179,41 +191,40 @@ pub(crate) async fn run_round(
         tokio::select! {
             biased;
             () = token.cancelled() => {
-                handle.abort();
                 break RoundEnd::Cancelled;
             }
-            maybe_event = mev_rx.recv() => match maybe_event {
-                Some(StreamEvent::TextDelta { text }) => {
+            maybe_chunk = stream.next() => match maybe_chunk {
+                Some(Ok(StreamChunk::TextDelta { text })) => {
                     raw.push_str(&text);
                     let _ = ctx
                         .events
                         .send(Event::TextDelta { id: run.id, chunk: text })
                         .await;
                 }
-                Some(StreamEvent::ThinkingDelta { text }) => {
+                Some(Ok(StreamChunk::ThinkingDelta { text })) => {
                     thinking.push_str(&text);
                     let _ = ctx
                         .events
                         .send(Event::ThinkingDelta { id: run.id, chunk: text })
                         .await;
                 }
-                Some(StreamEvent::ThinkingSignature { signature: sig }) => {
+                Some(Ok(StreamChunk::ThinkingSignature { signature: sig })) => {
                     signature.push_str(&sig);
                 }
-                Some(StreamEvent::RedactedThinking { data }) => {
+                Some(Ok(StreamChunk::RedactedThinking { data })) => {
                     redacted.push(data);
                 }
-                Some(StreamEvent::ToolCall { id: vendor_id, name, input }) => {
+                Some(Ok(StreamChunk::ToolCall { id: vendor_id, name, input })) => {
                     pending_calls.push((vendor_id, name, input));
                 }
-                Some(StreamEvent::Usage { usage: u }) => {
+                Some(Ok(StreamChunk::Usage { usage: u })) => {
                     usage = Some(u);
                 }
-                Some(StreamEvent::RateLimits { snapshot }) => {
+                Some(Ok(StreamChunk::RateLimits { snapshot })) => {
                     rate_limits = Some(snapshot);
                 }
-                Some(StreamEvent::Completed) | None => break RoundEnd::Completed,
-                Some(StreamEvent::Failed { error }) => break RoundEnd::Failed(error),
+                Some(Err(error)) => break RoundEnd::Failed(error),
+                None => break RoundEnd::Completed,
             }
         }
     };
