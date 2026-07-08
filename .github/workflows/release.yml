@@ -103,4 +103,3 @@ jobs:
           files: artifacts/*
           prerelease: ${{ needs.validate.outputs.prerelease }}
           generate_release_notes: true
-tes: true
