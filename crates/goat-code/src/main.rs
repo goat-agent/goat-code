@@ -21,6 +21,10 @@ use crate::{
 async fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
 
+    if let Err(message) = goat_config::check_legacy_layout() {
+        return Err(eyre!(message));
+    }
+
     if cli.print_log_path {
         reject_worktree(cli.worktree.as_ref())?;
         reject_continue(cli.r#continue)?;

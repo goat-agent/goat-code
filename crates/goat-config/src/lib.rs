@@ -28,44 +28,7 @@ pub struct SearchConfig {
     pub accounts: Vec<SearchAccountConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "provider", rename_all = "snake_case")]
-pub enum SearchAccountConfig {
-    Duckduckgo {
-        account: String,
-    },
-    Browser {
-        account: String,
-        #[serde(default = "default_browser_search_engine")]
-        engine: String,
-    },
-    Searxng {
-        account: String,
-        endpoint: String,
-    },
-    Brave {
-        account: String,
-    },
-    Tavily {
-        account: String,
-    },
-}
-
-fn default_browser_search_engine() -> String {
-    "duckduckgo".to_owned()
-}
-
-impl SearchAccountConfig {
-    pub fn target(&self) -> String {
-        match self {
-            Self::Duckduckgo { account } => format!("duckduckgo/{account}"),
-            Self::Browser { account, .. } => format!("browser/{account}"),
-            Self::Searxng { account, .. } => format!("searxng/{account}"),
-            Self::Brave { account } => format!("brave/{account}"),
-            Self::Tavily { account } => format!("tavily/{account}"),
-        }
-    }
-}
+pub use goat_search_provider::SearchAccountConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -136,10 +99,14 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
 }
 
-pub const HOME_NOT_FOUND: &str = "could not resolve ~/.goat-code";
+pub const HOME_NOT_FOUND: &str = "could not resolve ~/.goat/code";
+
+fn shared_home() -> Option<PathBuf> {
+    std::env::home_dir().map(|home| home.join(".goat"))
+}
 
 fn app_home() -> Option<PathBuf> {
-    std::env::home_dir().map(|home| home.join(".goat-code"))
+    shared_home().map(|home| home.join("code"))
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -155,7 +122,7 @@ pub fn db_path() -> Option<PathBuf> {
 }
 
 pub fn auth_path() -> Option<PathBuf> {
-    app_home().map(|home| home.join("auth.json"))
+    shared_home().map(|home| home.join("credentials.json"))
 }
 
 pub fn log_dir() -> Option<PathBuf> {
@@ -204,6 +171,21 @@ pub fn global_instructions_file() -> Option<PathBuf> {
 
 pub fn rate_limits_path() -> Option<PathBuf> {
     app_home().map(|home| home.join("rate_limits.json"))
+}
+
+pub fn check_legacy_layout() -> Result<(), String> {
+    let Some(home) = std::env::home_dir() else {
+        return Ok(());
+    };
+    let legacy = home.join(".goat-code");
+    if legacy.exists() {
+        return Err(format!(
+            "detected the old {} layout: move it to ~/.goat/code, move ~/.goat-code/auth.json \
+             to ~/.goat/credentials.json, then remove ~/.goat-code",
+            legacy.display()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ publish = false
 goat-protocol = { workspace = true }
 goat-tool = { workspace = true }
 goat-config = { workspace = true }
+goat-auth = { workspace = true }
 goat-search-provider = { workspace = true }
 goat-search-providers = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

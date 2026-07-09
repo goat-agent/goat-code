@@ -11,37 +11,37 @@ repository = "https://github.com/goat-agent/goat-code"
 authors = ["jbj338033"]
 
 [workspace.dependencies]
-goat-protocol = { path = "crates/goat-protocol" }
+goat-protocol = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-protocol" }
 goat-config = { path = "crates/goat-config" }
 goat-core = { path = "crates/goat-core" }
 goat-mcp = { path = "crates/goat-mcp" }
 goat-tui = { path = "crates/goat-tui" }
-goat-provider = { path = "crates/goat-provider" }
-goat-auth = { path = "crates/goat-auth" }
+goat-provider = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider" }
+goat-auth = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-auth" }
 goat-store = { path = "crates/goat-store" }
-goat-provider-openai-compat = { path = "crates/goat-provider-openai-compat" }
-goat-provider-openrouter = { path = "crates/goat-provider-openrouter" }
-goat-provider-groq = { path = "crates/goat-provider-groq" }
-goat-provider-deepseek = { path = "crates/goat-provider-deepseek" }
-goat-provider-mistral = { path = "crates/goat-provider-mistral" }
-goat-provider-zai = { path = "crates/goat-provider-zai" }
-goat-provider-zai-coding = { path = "crates/goat-provider-zai-coding" }
-goat-provider-kimi = { path = "crates/goat-provider-kimi" }
-goat-provider-qwen = { path = "crates/goat-provider-qwen" }
-goat-provider-kimi-code = { path = "crates/goat-provider-kimi-code" }
-goat-provider-xai = { path = "crates/goat-provider-xai" }
-goat-provider-openai = { path = "crates/goat-provider-openai" }
-goat-provider-openai-codex = { path = "crates/goat-provider-openai-codex" }
-goat-provider-anthropic = { path = "crates/goat-provider-anthropic" }
-goat-provider-gemini = { path = "crates/goat-provider-gemini" }
-goat-provider-local = { path = "crates/goat-provider-local" }
-goat-providers = { path = "crates/goat-providers" }
-goat-search-provider = { path = "crates/goat-search-provider" }
-goat-search-provider-duckduckgo = { path = "crates/goat-search-provider-duckduckgo" }
-goat-search-provider-searxng = { path = "crates/goat-search-provider-searxng" }
-goat-search-provider-brave = { path = "crates/goat-search-provider-brave" }
-goat-search-provider-tavily = { path = "crates/goat-search-provider-tavily" }
-goat-search-providers = { path = "crates/goat-search-providers" }
+goat-provider-openai-compat = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-openai-compat" }
+goat-provider-openrouter = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-openrouter" }
+goat-provider-groq = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-groq" }
+goat-provider-deepseek = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-deepseek" }
+goat-provider-mistral = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-mistral" }
+goat-provider-zai = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-zai" }
+goat-provider-zai-coding = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-zai-coding" }
+goat-provider-kimi = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-kimi" }
+goat-provider-qwen = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-qwen" }
+goat-provider-kimi-code = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-kimi-code" }
+goat-provider-xai = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-xai" }
+goat-provider-openai = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-openai" }
+goat-provider-openai-codex = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-openai-codex" }
+goat-provider-anthropic = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-anthropic" }
+goat-provider-gemini = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-gemini" }
+goat-provider-local = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-provider-local" }
+goat-providers = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-providers" }
+goat-search-provider = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-search-provider" }
+goat-search-provider-duckduckgo = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-search-provider-duckduckgo" }
+goat-search-provider-searxng = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-search-provider-searxng" }
+goat-search-provider-brave = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-search-provider-brave" }
+goat-search-provider-tavily = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-search-provider-tavily" }
+goat-search-providers = { git = "https://github.com/goat-agent/goat-sdk.git", rev = "3afccf288250f764fd64b19ab9b9bb40d9733176", package = "goat-search-providers" }
 goat-agent = { path = "crates/goat-agent" }
 goat-tool = { path = "crates/goat-tool" }
 goat-sandbox = { path = "crates/goat-sandbox" }
@@ -71,6 +71,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 tokio-util = { version = "0.7", features = ["rt", "codec"] }
 bytes = "1"
 futures = "0.3"
+async-trait = "0.1"
+async-stream = "0.3"
 
 ratatui = "0.30"
 ratatui-image = { version = "11.0.4", default-features = false, features = ["crossterm"] }

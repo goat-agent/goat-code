@@ -123,6 +123,9 @@ pub(crate) async fn run_round_with_retry(
             tools: env.tool_defs.to_vec(),
             effort: env.target.effort,
             tool_choice: goat_provider::ToolChoice::Auto,
+            temperature: None,
+            max_tokens: None,
+            system: None,
         };
         let result = run_round(ctx, run, env.provider, request, token).await;
         let RoundEnd::Failed(error) = &result.end else {

@@ -13,8 +13,14 @@ pub struct WebSearchTool {
 
 impl WebSearchTool {
     pub fn new() -> Self {
+        let config = goat_config::Config::load();
+        let credentials = goat_config::auth_path().map(goat_auth::CredentialStore::new);
         Self {
-            registry: goat_search_providers::SearchRegistry::load(),
+            registry: goat_search_providers::SearchRegistry::from_parts(
+                config.search.default_target.as_deref(),
+                config.search.accounts,
+                credentials,
+            ),
         }
     }
 }
