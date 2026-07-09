@@ -206,7 +206,7 @@ pub(super) fn build_static_lines(
             } | Item::Shell {
                 status: ShellStatus::Running,
                 ..
-            }
+            } | Item::Process { running: true, .. }
         ) {
             spinner_lines.push(lines.len());
         }
@@ -283,6 +283,18 @@ pub(super) fn item_signature(item: &Item) -> u64 {
                 }
             }
         }
+        Item::Process {
+            command,
+            output,
+            running,
+            exit_code,
+        } => {
+            9u8.hash(&mut hasher);
+            command.hash(&mut hasher);
+            output.hash(&mut hasher);
+            running.hash(&mut hasher);
+            exit_code.hash(&mut hasher);
+        }
         Item::Error { message, hint } => {
             3u8.hash(&mut hasher);
             message.hash(&mut hasher);
@@ -356,6 +368,12 @@ pub(super) fn item_rows(
         Item::Shell {
             command, status, ..
         } => shell_rows(command, status, theme, width),
+        Item::Process {
+            command,
+            output,
+            running,
+            exit_code,
+        } => process_rows(command, output, *running, *exit_code, theme, width),
         Item::Error { message, hint } => error_rows(message, hint.as_deref(), theme, width),
         Item::Interrupted => {
             let inner = width.saturating_sub(2);
@@ -655,6 +673,41 @@ pub(super) fn shell_rows(
         }
     }
     out.extend(rows);
+    out
+}
+
+pub(super) fn process_rows(
+    command: &str,
+    output: &str,
+    running: bool,
+    exit_code: Option<i32>,
+    theme: Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(2);
+    let (marker, marker_style) = if running {
+        (symbols::SPINNER[0], theme.accent())
+    } else if exit_code == Some(0) || exit_code.is_none() {
+        (symbols::ui::CHECK, theme.success())
+    } else {
+        (symbols::ui::CROSS, theme.error())
+    };
+    let mut out = hang(
+        &plain_lines(command, theme),
+        Span::styled(format!("{marker} "), marker_style),
+        width,
+    );
+    let lines = sanitize_shell_output(output);
+    for line in &lines {
+        let content = Line::from(Span::styled(
+            line.replace('\t', "  "),
+            shell_line_style(line, theme),
+        ));
+        for mut row in wrap::wrap_line(&content, inner) {
+            row.spans.insert(0, Span::raw("  "));
+            out.push(row);
+        }
+    }
     out
 }
 
