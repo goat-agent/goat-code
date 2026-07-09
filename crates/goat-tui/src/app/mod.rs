@@ -43,10 +43,34 @@ pub(crate) struct AgentRunView {
     pub(crate) done: Option<bool>,
 }
 
+pub(crate) struct ProcessRunView {
+    pub(crate) id: goat_protocol::ProcessId,
+    pub(crate) command: String,
+    pub(crate) state: goat_protocol::ProcessState,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) transcript: Transcript,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainView {
     Live,
     Agent(TaskId),
+    Process(goat_protocol::ProcessId),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunTarget {
+    Agent(TaskId),
+    Process(goat_protocol::ProcessId),
+}
+
+impl RunTarget {
+    fn view(self) -> MainView {
+        match self {
+            RunTarget::Agent(id) => MainView::Agent(id),
+            RunTarget::Process(id) => MainView::Process(id),
+        }
+    }
 }
 
 pub(crate) enum Overlay {
@@ -58,7 +82,7 @@ pub(crate) enum Overlay {
     Config(Config),
     Commands(CommandMenu),
     Files(FileMenu),
-    Agents(usize),
+    Runs(usize),
     Ask(AskPicker, ToolCallId),
     Usage,
     Help,
@@ -127,6 +151,7 @@ pub struct App {
     pub(crate) commands: CommandRegistry,
     pub(crate) toasts: Vec<crate::toast::Toast>,
     pub(crate) agent_runs: Vec<AgentRunView>,
+    pub(crate) process_runs: Vec<ProcessRunView>,
     pub(crate) main_view: MainView,
     pub(crate) turn: TurnStatus,
     pub(crate) usage: UsageState,
@@ -217,6 +242,7 @@ impl App {
             commands: CommandRegistry::builtin(),
             toasts: Vec::new(),
             agent_runs: Vec::new(),
+            process_runs: Vec::new(),
             main_view: MainView::Live,
             turn: TurnStatus::default(),
             usage: UsageState::default(),
@@ -865,7 +891,7 @@ impl App {
     pub(crate) fn wheel_scroll_allowed(&self) -> bool {
         matches!(
             self.overlay,
-            Overlay::None | Overlay::Commands(_) | Overlay::Files(_) | Overlay::Agents(_)
+            Overlay::None | Overlay::Commands(_) | Overlay::Files(_) | Overlay::Runs(_)
         )
     }
 
@@ -877,7 +903,7 @@ impl App {
     }
 
     pub(crate) fn selection_allowed(&self) -> bool {
-        matches!(self.overlay, Overlay::None | Overlay::Agents(_))
+        matches!(self.overlay, Overlay::None | Overlay::Runs(_))
     }
 
     fn screen_to_cache(&self, col: u16, row: u16, clamp: bool) -> Option<(usize, u16)> {
@@ -1236,9 +1262,14 @@ impl App {
 
     pub(crate) fn reset_agents(&mut self) {
         self.agent_runs.clear();
-        self.set_main_view(MainView::Live);
-        if matches!(self.overlay, Overlay::Agents(_)) {
-            self.overlay = Overlay::None;
+        if matches!(self.main_view, MainView::Agent(_)) {
+            self.close_run_selector();
+        } else if self.run_selector().is_some() {
+            if self.run_targets().is_empty() {
+                self.close_run_selector();
+            } else {
+                self.sync_run_selector();
+            }
         }
     }
 
@@ -1258,20 +1289,60 @@ impl App {
                 .iter()
                 .find(|run| run.id == id)
                 .map_or(&self.transcript, |run| &run.transcript),
+            MainView::Process(id) => self
+                .process_runs
+                .iter()
+                .find(|run| run.id == id)
+                .map_or(&self.transcript, |run| &run.transcript),
         }
     }
 
-    pub(crate) fn set_agent_cursor(&mut self, cursor: usize) {
-        if let Some(run) = self.agent_runs.get(cursor) {
-            let view = MainView::Agent(run.id);
-            self.overlay = Overlay::Agents(cursor);
-            self.set_main_view(view);
+    pub(crate) fn run_targets(&self) -> Vec<RunTarget> {
+        let mut targets: Vec<RunTarget> = self
+            .agent_runs
+            .iter()
+            .map(|r| RunTarget::Agent(r.id))
+            .collect();
+        targets.extend(self.process_runs.iter().map(|r| RunTarget::Process(r.id)));
+        targets
+    }
+
+    pub(crate) fn set_run_cursor(&mut self, cursor: usize) {
+        let targets = self.run_targets();
+        if let Some(target) = targets.get(cursor).copied() {
+            self.overlay = Overlay::Runs(cursor);
+            self.set_main_view(target.view());
             self.follow = true;
             self.dirty = true;
         }
     }
 
-    pub(crate) fn close_agent_selector(&mut self) {
+    fn sync_run_selector(&mut self) {
+        let Some(cursor) = self.run_selector() else {
+            return;
+        };
+        let targets = self.run_targets();
+        if targets.is_empty() {
+            self.close_run_selector();
+            return;
+        }
+        let current = match self.main_view {
+            MainView::Agent(id) => Some(RunTarget::Agent(id)),
+            MainView::Process(id) => Some(RunTarget::Process(id)),
+            MainView::Live => None,
+        };
+        match current.and_then(|t| targets.iter().position(|c| *c == t)) {
+            Some(pos) => {
+                if pos != cursor {
+                    self.overlay = Overlay::Runs(pos);
+                    self.dirty = true;
+                }
+            }
+            None => self.set_run_cursor(cursor.min(targets.len() - 1)),
+        }
+    }
+
+    pub(crate) fn close_run_selector(&mut self) {
         self.overlay = Overlay::None;
         self.set_main_view(MainView::Live);
         self.follow = true;
@@ -1281,9 +1352,12 @@ impl App {
     pub(crate) fn agent_runs(&self) -> &[AgentRunView] {
         &self.agent_runs
     }
-    pub(crate) fn agent_selector(&self) -> Option<usize> {
+    pub(crate) fn process_runs(&self) -> &[ProcessRunView] {
+        &self.process_runs
+    }
+    pub(crate) fn run_selector(&self) -> Option<usize> {
         match self.overlay {
-            Overlay::Agents(cursor) => Some(cursor),
+            Overlay::Runs(cursor) => Some(cursor),
             _ => None,
         }
     }
@@ -2590,10 +2664,10 @@ mod tests {
         assert!(app.agent_status().is_none());
 
         assert_eq!(app.transcript().items.len(), 2);
-        app.set_agent_cursor(0);
+        app.set_run_cursor(0);
         assert!(matches!(app.main_view, super::MainView::Agent(_)));
         assert_eq!(app.transcript().items.len(), 1);
-        app.close_agent_selector();
+        app.close_run_selector();
         assert!(matches!(app.main_view, super::MainView::Live));
         assert_eq!(app.transcript().items.len(), 2);
     }
@@ -2783,5 +2857,125 @@ mod tests {
             !summary.contains("#2"),
             "exited process must not show: {summary}"
         );
+    }
+
+    fn process_started(app: &mut App, id: u64, command: &str) {
+        app.on_engine(EngineEvent::ProcessStarted {
+            process: goat_protocol::ProcessId(id),
+            command: command.to_owned(),
+            watched: false,
+        });
+    }
+
+    #[test]
+    fn process_output_is_captured_into_a_process_run() {
+        let mut app = App::new(Theme::dark());
+        process_started(&mut app, 1, "pnpm dev");
+        assert_eq!(app.process_runs().len(), 1);
+        app.on_engine(EngineEvent::ProcessOutput {
+            process: goat_protocol::ProcessId(1),
+            chunk: "listening on :3000".to_owned(),
+        });
+        let item = app.process_runs()[0]
+            .transcript
+            .items
+            .first()
+            .expect("process log item");
+        let output = match item {
+            crate::transcript::Item::Process { output, .. } => output.as_str(),
+            _ => panic!("expected a process log item"),
+        };
+        assert!(output.contains("listening on :3000"), "got: {output}");
+    }
+
+    #[test]
+    fn output_before_started_creates_run_lazily() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::ProcessOutput {
+            process: goat_protocol::ProcessId(7),
+            chunk: "early line".to_owned(),
+        });
+        assert_eq!(app.process_runs().len(), 1);
+        assert_eq!(app.process_runs()[0].id, goat_protocol::ProcessId(7));
+    }
+
+    #[test]
+    fn selector_lists_agents_then_processes() {
+        let mut app = App::new(Theme::dark());
+        app.on_engine(EngineEvent::AgentStarted {
+            id: TaskId(9),
+            parent: TaskId(0),
+            agent_type: "explore".to_owned(),
+            label: String::new(),
+        });
+        process_started(&mut app, 1, "pnpm dev");
+        let targets = app.run_targets();
+        assert_eq!(targets.len(), 2);
+        assert!(matches!(targets[0], super::RunTarget::Agent(_)));
+        assert!(matches!(targets[1], super::RunTarget::Process(_)));
+    }
+
+    #[test]
+    fn selecting_a_process_swaps_the_main_view() {
+        let mut app = App::new(Theme::dark());
+        process_started(&mut app, 1, "pnpm dev");
+        app.set_run_cursor(0);
+        assert!(matches!(app.main_view, super::MainView::Process(_)));
+        app.close_run_selector();
+        assert!(matches!(app.main_view, super::MainView::Live));
+    }
+
+    #[test]
+    fn reset_agents_keeps_process_runs_and_view() {
+        let mut app = App::new(Theme::dark());
+        process_started(&mut app, 1, "pnpm dev");
+        app.set_run_cursor(0);
+        app.reset_agents();
+        assert_eq!(app.process_runs().len(), 1);
+        assert!(matches!(app.main_view, super::MainView::Process(_)));
+    }
+
+    #[test]
+    fn exit_keeps_run_and_marks_exited() {
+        let mut app = App::new(Theme::dark());
+        process_started(&mut app, 1, "pnpm dev");
+        app.on_engine(EngineEvent::ProcessExited {
+            process: goat_protocol::ProcessId(1),
+            code: Some(1),
+            reason: goat_protocol::ProcessExitReason::Natural,
+        });
+        assert_eq!(app.process_runs().len(), 1);
+        assert_eq!(
+            app.process_runs()[0].state,
+            goat_protocol::ProcessState::Exited
+        );
+        app.on_engine(EngineEvent::ProcessListChanged {
+            processes: vec![goat_protocol::ProcessInfo {
+                id: goat_protocol::ProcessId(1),
+                command: "pnpm dev".to_owned(),
+                state: goat_protocol::ProcessState::Exited,
+                watched: false,
+                exit_code: Some(1),
+            }],
+        });
+        assert_eq!(app.process_runs().len(), 1);
+    }
+
+    #[test]
+    fn reconcile_drops_absent_unviewed_run() {
+        let mut app = App::new(Theme::dark());
+        process_started(&mut app, 1, "pnpm dev");
+        app.on_engine(EngineEvent::ProcessListChanged { processes: vec![] });
+        assert!(app.process_runs().is_empty());
+    }
+
+    #[test]
+    fn reconcile_retains_viewed_run_even_if_absent() {
+        let mut app = App::new(Theme::dark());
+        process_started(&mut app, 1, "pnpm dev");
+        app.set_run_cursor(0);
+        app.on_engine(EngineEvent::ProcessListChanged { processes: vec![] });
+        assert_eq!(app.process_runs().len(), 1);
+        assert!(matches!(app.main_view, super::MainView::Process(_)));
     }
 }

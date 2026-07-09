@@ -45,6 +45,12 @@ pub(crate) enum Item {
         command: String,
         status: ShellStatus,
     },
+    Process {
+        command: String,
+        output: String,
+        running: bool,
+        exit_code: Option<i32>,
+    },
     Error {
         message: String,
         hint: Option<String>,

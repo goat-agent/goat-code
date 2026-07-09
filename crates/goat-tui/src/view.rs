@@ -94,7 +94,7 @@ enum Panel {
     Commands,
     Account,
     Files,
-    Agents(usize),
+    Runs(usize),
 }
 
 const HEADER_H: u16 = 2;
@@ -104,13 +104,13 @@ fn active_panel(app: &App) -> Panel {
         Overlay::Commands(_) => Panel::Commands,
         Overlay::Account(_) => Panel::Account,
         Overlay::Files(_) => Panel::Files,
-        Overlay::Agents(cursor) => Panel::Agents(*cursor),
+        Overlay::Runs(cursor) => Panel::Runs(*cursor),
         _ => Panel::None,
     }
 }
 
 fn composer_focused(app: &App) -> bool {
-    !is_full_body_overlay(app) && !matches!(app.overlay(), Overlay::Agents(_))
+    !is_full_body_overlay(app) && !matches!(app.overlay(), Overlay::Runs(_))
 }
 
 fn panel_desired_height(app: &App, panel: &Panel) -> u16 {
@@ -128,7 +128,7 @@ fn panel_desired_height(app: &App, panel: &Panel) -> u16 {
             Overlay::Files(menu) => menu.desired_height(),
             _ => 0,
         },
-        Panel::Agents(_) => u16::try_from(app.agent_runs().len())
+        Panel::Runs(_) => u16::try_from(app.run_targets().len())
             .unwrap_or(1)
             .clamp(1, u16::try_from(LIST_MAX).unwrap_or(10)),
     }
@@ -200,7 +200,7 @@ fn render_hint(frame: &mut Frame, area: Rect, app: &App, theme: Theme, panel: &P
                 vertical: 0,
             }),
         ),
-        Panel::Agents(_) => render_agent_footer(frame, area, theme),
+        Panel::Runs(_) => render_run_footer(frame, area, theme),
         Panel::Account => frame.render_widget(
             Paragraph::new(overlay::hint_line(
                 &[
@@ -277,45 +277,85 @@ fn render_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, panel: &
                 menu.render(frame, area, theme);
             }
         }
-        Panel::Agents(cursor) => render_agent_panel(frame, area, app, theme, *cursor),
+        Panel::Runs(cursor) => render_run_panel(frame, area, app, theme, *cursor),
     }
 }
 
-fn render_agent_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, cursor: usize) {
+fn render_run_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme, cursor: usize) {
     let spinner = app.spinner_frame();
     let inner_width = usize::from(area.width);
-    let lines: Vec<Line> = app
-        .agent_runs()
-        .iter()
-        .enumerate()
-        .map(|(i, run)| {
-            let selected = i == cursor;
-            let (marker, marker_style) = match run.done {
-                None => (spinner, theme.accent()),
-                Some(true) => (symbols::ui::CHECK, theme.success()),
-                Some(false) => (symbols::ui::CROSS, theme.error()),
-            };
-            let name_style = if selected { theme.key() } else { theme.muted() };
-            let mut left = vec![
-                Span::styled(marker, marker_style),
-                Span::raw(" "),
-                Span::styled(run.agent_type.clone(), name_style),
-            ];
-            if !run.label.is_empty() {
-                left.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
-                left.push(Span::styled(run.label.clone(), theme.muted()));
-            }
-            overlay::selection_row(theme, selected, inner_width, left, None)
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), area);
+    let mut rows: Vec<Line> = Vec::new();
+    let mut index = 0usize;
+    for run in app.agent_runs() {
+        let selected = index == cursor;
+        let (marker, marker_style) = match run.done {
+            None => (spinner, theme.accent()),
+            Some(true) => (symbols::ui::CHECK, theme.success()),
+            Some(false) => (symbols::ui::CROSS, theme.error()),
+        };
+        let name_style = if selected { theme.key() } else { theme.muted() };
+        let mut left = vec![
+            Span::styled(marker, marker_style),
+            Span::raw(" "),
+            Span::styled(run.agent_type.clone(), name_style),
+        ];
+        if !run.label.is_empty() {
+            left.push(Span::styled(symbols::ui::SEPARATOR, theme.muted()));
+            left.push(Span::styled(run.label.clone(), theme.muted()));
+        }
+        rows.push(overlay::selection_row(
+            theme,
+            selected,
+            inner_width,
+            left,
+            None,
+        ));
+        index += 1;
+    }
+    for run in app.process_runs() {
+        let selected = index == cursor;
+        let (marker, marker_style) = match run.state {
+            goat_protocol::ProcessState::Running => (spinner, theme.accent()),
+            goat_protocol::ProcessState::Exited => match run.exit_code {
+                Some(0) | None => (symbols::ui::CHECK, theme.success()),
+                Some(_) => (symbols::ui::CROSS, theme.error()),
+            },
+        };
+        let name_style = if selected { theme.key() } else { theme.muted() };
+        let left = vec![
+            Span::styled(marker, marker_style),
+            Span::raw(" "),
+            Span::styled(format!("#{}", run.id), name_style),
+            Span::styled(symbols::ui::SEPARATOR, theme.muted()),
+            Span::styled(flatten_command(&run.command), theme.muted()),
+        ];
+        rows.push(overlay::selection_row(
+            theme,
+            selected,
+            inner_width,
+            left,
+            None,
+        ));
+        index += 1;
+    }
+    frame.render_widget(Paragraph::new(rows), area);
 }
 
-fn render_agent_footer(frame: &mut Frame, area: Rect, theme: Theme) {
+fn flatten_command(command: &str) -> String {
+    let flat = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 48 {
+        let head: String = flat.chars().take(48).collect();
+        format!("{head}{}", symbols::ui::ELLIPSIS)
+    } else {
+        flat
+    }
+}
+
+fn render_run_footer(frame: &mut Frame, area: Rect, theme: Theme) {
     frame.render_widget(
         Paragraph::new(overlay::hint_line(
             &[
-                (symbols::key::ARROWS_UPDOWN, "agents"),
+                (symbols::key::ARROWS_UPDOWN, "select"),
                 (symbols::key::ESC, "back"),
             ],
             theme,
@@ -785,10 +825,10 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             spans.push(Span::styled(symbols::key::BACKSPACE, theme.hint_key()));
             spans.push(Span::styled(" edit queued", theme.muted()));
         }
-        if !app.agent_runs().is_empty() {
+        if !app.run_targets().is_empty() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(symbols::key::ARROW_DOWN, theme.hint_key()));
-            spans.push(Span::styled(" agents", theme.muted()));
+            spans.push(Span::styled(" tasks", theme.muted()));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), inner);
     } else if app.clear_armed() {
@@ -800,13 +840,16 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             inner,
         );
     } else if let Some(summary) = app.process_summary() {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(symbols::ui::BULLET, theme.hint_key()),
-                Span::styled(format!(" {summary}"), theme.muted()),
-            ])),
-            inner,
-        );
+        let mut spans = vec![
+            Span::styled(symbols::ui::BULLET, theme.hint_key()),
+            Span::styled(format!(" {summary}"), theme.muted()),
+        ];
+        if !app.run_targets().is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(symbols::key::ARROW_DOWN, theme.hint_key()));
+            spans.push(Span::styled(" view", theme.muted()));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), inner);
     }
 }
 

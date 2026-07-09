@@ -1,6 +1,9 @@
-use goat_protocol::{Event as EngineEvent, NotifyKind, Op, TaskId, TranscriptEntry};
+use goat_protocol::{
+    Event as EngineEvent, NotifyKind, Op, ProcessExitReason, ProcessId, ProcessInfo, ProcessState,
+    TaskId, TranscriptEntry,
+};
 
-use super::{App, Overlay, ResumeIntent};
+use super::{App, MainView, Overlay, ProcessRunView, ResumeIntent};
 use crate::{ask::AskPicker, picker::ThreadPicker};
 
 impl App {
@@ -106,13 +109,41 @@ impl App {
             }
             EngineEvent::LoginProviders { .. } | EngineEvent::ThreadBound { .. } => {}
             EngineEvent::ProcessListChanged { processes } => {
+                self.reconcile_processes(&processes);
                 self.processes = processes;
                 self.dirty = true;
             }
-            EngineEvent::ProcessStarted { .. }
-            | EngineEvent::ProcessOutput { .. }
-            | EngineEvent::ProcessExited { .. }
-            | EngineEvent::ProcessObserved { .. } => {
+            EngineEvent::ProcessStarted {
+                process,
+                command,
+                watched: _,
+            } => {
+                self.ensure_process_run(process, &command);
+                self.dirty = true;
+            }
+            EngineEvent::ProcessOutput { process, chunk } => {
+                self.ensure_process_run(process, "");
+                if let Some(run) = self.process_runs.iter_mut().find(|r| r.id == process) {
+                    run.transcript.append_process(&chunk);
+                }
+                if self.main_view == MainView::Process(process) {
+                    self.dirty = true;
+                }
+            }
+            EngineEvent::ProcessExited {
+                process,
+                code,
+                reason,
+            } => {
+                if let Some(run) = self.process_runs.iter_mut().find(|r| r.id == process) {
+                    run.state = ProcessState::Exited;
+                    run.exit_code = code;
+                    run.transcript
+                        .finish_process(code, &process_exit_marker(code, reason));
+                }
+                self.dirty = true;
+            }
+            EngineEvent::ProcessObserved { .. } => {
                 self.dirty = true;
             }
             EngineEvent::CompactionStarted { id } => {
@@ -388,5 +419,54 @@ impl App {
 
     pub(crate) fn agent_index(&self, id: TaskId) -> Option<usize> {
         self.agent_runs.iter().position(|run| run.id == id)
+    }
+
+    fn ensure_process_run(&mut self, id: ProcessId, command: &str) {
+        if self.process_runs.iter().any(|run| run.id == id) {
+            return;
+        }
+        let mut transcript = crate::transcript::Transcript::default();
+        transcript.push_process(command.to_owned());
+        self.process_runs.push(ProcessRunView {
+            id,
+            command: command.to_owned(),
+            state: ProcessState::Running,
+            exit_code: None,
+            transcript,
+        });
+    }
+
+    fn reconcile_processes(&mut self, processes: &[ProcessInfo]) {
+        for info in processes {
+            self.ensure_process_run(info.id, &info.command);
+            if let Some(run) = self.process_runs.iter_mut().find(|r| r.id == info.id) {
+                if run.command.is_empty() {
+                    run.command.clone_from(&info.command);
+                }
+                run.state = info.state;
+                run.exit_code = info.exit_code;
+            }
+        }
+        let viewed = match self.main_view {
+            MainView::Process(id) => Some(id),
+            _ => None,
+        };
+        self.process_runs
+            .retain(|run| Some(run.id) == viewed || processes.iter().any(|p| p.id == run.id));
+        if matches!(self.overlay, Overlay::Runs(_)) {
+            self.sync_run_selector();
+        }
+    }
+}
+
+fn process_exit_marker(code: Option<i32>, reason: ProcessExitReason) -> String {
+    match reason {
+        ProcessExitReason::Killed => "[killed]".to_owned(),
+        ProcessExitReason::Timeout => "[timed out]".to_owned(),
+        ProcessExitReason::Shutdown => "[stopped]".to_owned(),
+        ProcessExitReason::Natural => match code {
+            Some(0) | None => "[exited]".to_owned(),
+            Some(code) => format!("[exited: code {code}]"),
+        },
     }
 }

@@ -70,6 +70,19 @@ struct ItemMemoCache {
     entries: Vec<render::ItemMemo>,
 }
 
+const PROCESS_LOG_CAP_BYTES: usize = 128 * 1024;
+
+fn trim_log_front(output: &mut String, cap: usize) {
+    if output.len() <= cap {
+        return;
+    }
+    let overflow = output.len() - cap;
+    let cut = output[overflow..]
+        .find('\n')
+        .map_or(output.len(), |i| overflow + i + 1);
+    output.drain(..cut);
+}
+
 fn pad_left(mut line: Line<'static>, width: u16, theme: Theme) -> Line<'static> {
     if width == 0 {
         return line;
@@ -307,6 +320,50 @@ impl Transcript {
                 && matches!(status, ShellStatus::Running)
             {
                 *status = ShellStatus::Done(output);
+                return;
+            }
+        }
+    }
+
+    pub fn push_process(&mut self, command: String) {
+        self.bump_version();
+        self.items.push(Item::Process {
+            command,
+            output: String::new(),
+            running: true,
+            exit_code: None,
+        });
+    }
+
+    pub fn append_process(&mut self, chunk: &str) {
+        self.bump_version();
+        for item in self.items.iter_mut().rev() {
+            if let Item::Process { output, .. } = item {
+                output.push_str(chunk);
+                if !chunk.ends_with('\n') {
+                    output.push('\n');
+                }
+                trim_log_front(output, PROCESS_LOG_CAP_BYTES);
+                return;
+            }
+        }
+    }
+
+    pub fn finish_process(&mut self, exit_code: Option<i32>, marker: &str) {
+        self.bump_version();
+        for item in self.items.iter_mut().rev() {
+            if let Item::Process {
+                running,
+                exit_code: code,
+                output,
+                ..
+            } = item
+                && *running
+            {
+                *running = false;
+                *code = exit_code;
+                output.push_str(marker);
+                output.push('\n');
                 return;
             }
         }
