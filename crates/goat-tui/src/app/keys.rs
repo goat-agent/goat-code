@@ -22,7 +22,7 @@ impl App {
             Overlay::Effort(_) => return self.on_effort_picker_key(key),
             Overlay::Thread(_) => return self.on_thread_picker_key(key),
             Overlay::Config(_) => return self.on_config_key(key),
-            Overlay::Agents(_) => return self.on_agent_selector_key(key),
+            Overlay::Runs(_) => return self.on_run_selector_key(key),
             Overlay::Ask(_, _) => return self.on_ask_picker_key(key),
             Overlay::Commands(_) => {
                 if let Some(result) = self.on_command_menu_key(key) {
@@ -292,8 +292,8 @@ impl App {
                 Vec::new()
             }
             KeyCode::Down => {
-                if self.composer.is_empty() && !self.agent_runs.is_empty() {
-                    self.set_agent_cursor(0);
+                if self.composer.is_empty() && !self.run_targets().is_empty() {
+                    self.set_run_cursor(0);
                 } else if self.composer.on_last_row() {
                     self.composer.history_next();
                     self.dirty = true;
@@ -637,19 +637,19 @@ impl App {
         Vec::new()
     }
 
-    pub(crate) fn on_agent_selector_key(&mut self, key: KeyEvent) -> Vec<Op> {
+    pub(crate) fn on_run_selector_key(&mut self, key: KeyEvent) -> Vec<Op> {
         self.dirty = true;
         match key.code {
-            KeyCode::Esc => self.close_agent_selector(),
-            KeyCode::Up => match self.agent_selector() {
-                Some(0) | None => self.close_agent_selector(),
-                Some(cursor) => self.set_agent_cursor(cursor - 1),
+            KeyCode::Esc => self.close_run_selector(),
+            KeyCode::Up => match self.run_selector() {
+                Some(0) | None => self.close_run_selector(),
+                Some(cursor) => self.set_run_cursor(cursor - 1),
             },
             KeyCode::Down => {
-                if let Some(cursor) = self.agent_selector()
-                    && cursor + 1 < self.agent_runs.len()
+                if let Some(cursor) = self.run_selector()
+                    && cursor + 1 < self.run_targets().len()
                 {
-                    self.set_agent_cursor(cursor + 1);
+                    self.set_run_cursor(cursor + 1);
                 }
             }
             KeyCode::PageUp => {
