@@ -206,6 +206,7 @@ impl App {
                 max_attempts,
                 delay_ms,
                 reason,
+                resets_at,
             } => {
                 self.turn.thinking = false;
                 if let Some(i) = self.agent_index(id) {
@@ -218,6 +219,7 @@ impl App {
                         reason,
                         until: std::time::Instant::now()
                             + std::time::Duration::from_millis(delay_ms),
+                        resets_at,
                     });
                 }
                 self.dirty = true;
