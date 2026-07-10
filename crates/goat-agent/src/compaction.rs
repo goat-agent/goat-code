@@ -334,6 +334,7 @@ async fn collect_with_retry(
 ) -> Result<(String, Usage), CollectFail> {
     let started = std::time::Instant::now();
     let mut attempt = 1u32;
+    let mut last_reset: Option<i64> = None;
     loop {
         let error = match collect_text(provider, request.clone(), token).await {
             Ok(collected) => return Ok(collected),
@@ -345,6 +346,21 @@ async fn collect_with_retry(
         };
         if !crate::retry::retryable(&error) {
             return Err(CollectFail::Fatal(error.to_string()));
+        }
+        if let Some(target) = crate::retry::reset_wait_target(&error, last_reset) {
+            last_reset = Some(target);
+            match crate::retry::wait_until_reset(
+                ctx.events,
+                run.id,
+                crate::retry::reason_label(&error),
+                target,
+                token,
+            )
+            .await
+            {
+                crate::retry::WaitOutcome::Retry => continue,
+                crate::retry::WaitOutcome::Cancelled => return Err(CollectFail::Cancelled),
+            }
         }
         if attempt >= crate::retry::MAX_ATTEMPTS {
             return Err(CollectFail::Fatal(crate::retry::exhausted_message(
@@ -362,6 +378,7 @@ async fn collect_with_retry(
                 max_attempts: crate::retry::MAX_ATTEMPTS,
                 delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                 reason: crate::retry::reason_label(&error).to_owned(),
+                resets_at: None,
             })
             .await;
         tokio::select! {
