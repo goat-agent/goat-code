@@ -296,9 +296,13 @@ async fn collect_text(
     token: &tokio_util::sync::CancellationToken,
 ) -> Result<(String, Usage), CollectEnd> {
     use futures::StreamExt;
-    let mut stream = match provider.stream(request).await {
-        Ok(stream) => stream,
-        Err(error) => return Err(CollectEnd::Failed(error)),
+    let mut stream = tokio::select! {
+        biased;
+        () = token.cancelled() => return Err(CollectEnd::Cancelled),
+        opened = provider.stream(request) => match opened {
+            Ok(stream) => stream,
+            Err(error) => return Err(CollectEnd::Failed(error)),
+        }
     };
     let mut text = String::new();
     let mut usage = Usage::default();
