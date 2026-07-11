@@ -193,7 +193,7 @@ async fn start(ctx: &Ctx<'_>, env: &LoopEnv<'_>, input_json: &str) -> Result<Too
                 pgid: i64::from(pgid),
                 command: args.command.clone(),
                 cwd: env.cwd.display().to_string(),
-                started_at: now_ms(),
+                started_at: crate::persist::now_ms(),
             })
             .await
             .ok();
@@ -308,12 +308,4 @@ pub(crate) async fn roster_message(ctx: &Ctx<'_>) -> Option<goat_provider::Messa
         goat_provider::MessageRole::User,
         text,
     ))
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
 }

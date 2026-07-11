@@ -333,7 +333,7 @@ impl ProcessRegistry {
             (entry.watched, reason, entry.db_id)
         };
         if let (Some(store), Some(db_id)) = (self.store.as_ref(), db_id) {
-            let _ = store.finish_process(db_id, now_ms()).await;
+            let _ = store.finish_process(db_id, crate::persist::now_ms()).await;
         }
         let _ = self
             .events
@@ -591,14 +591,6 @@ fn kill_group(pgid: Option<i32>) {
             .stderr(Stdio::null())
             .status();
     }
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
