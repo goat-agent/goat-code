@@ -9,6 +9,15 @@ pub fn flatten(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+pub fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() > max_chars {
+        let head: String = s.chars().take(max_chars).collect();
+        format!("{head}…")
+    } else {
+        s.to_owned()
+    }
+}
+
 pub fn format_arg(s: &str) -> String {
     let needs =
         s.is_empty() || s.chars().any(char::is_whitespace) || s.contains('"') || s.contains('\'');
@@ -137,6 +146,13 @@ mod tests {
     #[test]
     fn non_json_passes_raw_through() {
         assert_eq!(generic("src/lib.rs"), ToolDisplay::primary("src/lib.rs"));
+    }
+
+    #[test]
+    fn truncate_chars_appends_ellipsis_past_limit() {
+        assert_eq!(super::truncate_chars("hello", 5), "hello");
+        assert_eq!(super::truncate_chars("hello world", 5), "hello…");
+        assert_eq!(super::truncate_chars("가나다라마", 3), "가나다…");
     }
 
     #[test]

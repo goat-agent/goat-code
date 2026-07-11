@@ -138,7 +138,10 @@ fn answer_summary(questions: &[AskQuestion], answers: &[String]) -> String {
             let answer = answers.get(i).unwrap_or(&empty);
             format!(
                 "{} → {}",
-                truncate_display(&flatten(&question.question), SUMMARY_FIELD_WIDTH),
+                truncate_display(
+                    &goat_tool::display::flatten(&question.question),
+                    SUMMARY_FIELD_WIDTH
+                ),
                 display_answer(answer)
             )
         })
@@ -150,16 +153,12 @@ fn answer_summary(questions: &[AskQuestion], answers: &[String]) -> String {
 }
 
 fn display_answer(answer: &str) -> String {
-    let flattened = flatten(answer);
+    let flattened = goat_tool::display::flatten(answer);
     if flattened.is_empty() {
         "—".to_owned()
     } else {
         truncate_display(&flattened, SUMMARY_FIELD_WIDTH)
     }
-}
-
-fn flatten(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn truncate_display(text: &str, max_width: usize) -> String {

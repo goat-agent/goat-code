@@ -49,10 +49,6 @@ pub async fn model_list_entries(credentials: &CredentialStore) -> Vec<goat_proto
 const CHILD_ID_BASE: u64 = 1 << 32;
 const WAKE_ID_BASE: u64 = 1 << 48;
 
-fn drain_extra_wakes(wake_rx: &mut mpsc::Receiver<process::Wake>) {
-    while wake_rx.try_recv().is_ok() {}
-}
-
 pub struct GoatAgent {
     registry: Registry,
     tools: ToolRegistry,
@@ -248,8 +244,9 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     let semaphore = Arc::new(Semaphore::new(delegate::MAX_CONCURRENT_AGENTS));
     let child_ids = AtomicU64::new(CHILD_ID_BASE);
     let wake_ids = AtomicU64::new(WAKE_ID_BASE);
-    let (wake_tx, mut wake_rx) = mpsc::channel::<process::Wake>(256);
-    let processes = process::ProcessRegistry::new(events.clone(), wake_tx, Some(store.clone()));
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let processes =
+        process::ProcessRegistry::new(events.clone(), wake.clone(), Some(store.clone()));
     let asks: Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>> = Mutex::new(HashMap::new());
     let _ = events
         .send(Event::SkillsChanged {
@@ -311,9 +308,8 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 Some(op) => op,
                 None => break,
             },
-            Some(_wake) = wake_rx.recv() => {
+            () = wake.notified() => {
                 let ctx = ctx!();
-                drain_extra_wakes(&mut wake_rx);
                 if let Flow::Shutdown =
                     turn::handle_wake(&ctx, &mut state, &mut ops).await
                 {
@@ -1434,6 +1430,98 @@ mod tests {
         assert_eq!(deltas, "hello");
         assert!(done);
         assert_eq!(user_echo, Some((TaskId(1), "hi".to_owned())));
+    }
+
+    struct SlowOpenProvider {
+        open_delay_ms: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SlowOpenProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::from("mock")
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                tools: false,
+                auth: AuthMethod::None,
+                images: false,
+            }
+        }
+
+        async fn stream(&self, _req: Request) -> Result<ChunkStream, StreamError> {
+            tokio::time::sleep(std::time::Duration::from_millis(self.open_delay_ms)).await;
+            Ok(Box::pin(async_stream::try_stream! {
+                yield StreamChunk::TextDelta { text: "late".to_owned() };
+            }))
+        }
+
+        fn discover(&self, out: mpsc::Sender<Model>) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                drop(out);
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupt_cancels_pending_stream_open_promptly() {
+        let provider = SlowOpenProvider {
+            open_delay_ms: 30_000,
+        };
+        let registry = Registry::from_providers(vec![Arc::new(provider)]);
+        let store = Store::open_in_memory().unwrap();
+        let credentials =
+            CredentialStore::new(std::env::temp_dir().join("goat-agent-slow-open.json"));
+        let agent = GoatAgent::new(
+            registry,
+            store,
+            credentials,
+            Some(target("mock")),
+            std::env::temp_dir(),
+        )
+        .await;
+        let session = Session::spawn(agent);
+        let (ops, mut events, _handle) = session.into_parts();
+        ops.send(Op::SubmitMessage {
+            id: TaskId(3),
+            text: "go".to_owned(),
+            display: None,
+            attachments: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+        let mut started = false;
+        while let Some(event) = events.recv().await {
+            if matches!(event, Event::TaskStarted { .. }) {
+                started = true;
+                break;
+            }
+        }
+        assert!(started);
+        ops.send(Op::Interrupt { id: TaskId(3) }).await.unwrap();
+
+        let at = std::time::Instant::now();
+        let mut interrupted = false;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::TextDone { .. } => panic!("interrupted turn must not finalize text"),
+                Event::TaskDone {
+                    interrupted: was, ..
+                } => {
+                    interrupted = was;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(interrupted);
+        assert!(
+            at.elapsed() < std::time::Duration::from_secs(5),
+            "interrupt during stream open must cancel promptly, took {:?}",
+            at.elapsed()
+        );
     }
 
     #[tokio::test]

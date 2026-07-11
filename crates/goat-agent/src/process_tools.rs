@@ -29,7 +29,7 @@ pub(crate) fn tool_defs() -> Vec<goat_provider::ToolDefinition> {
     vec![
         def(
             PROCESS_START_TOOL_NAME,
-            "Start a long-running command in the background and return immediately with a process id. Use this for dev servers (pnpm dev, vite), watchers, or a poller that waits for a long task (e.g. `gh run watch`) instead of blocking on Bash. Output is buffered; read it later with ProcessOutput. Set watch=true to be woken when the process prints a matching line or exits (pipe the command through grep to keep events meaningful). The process keeps running across turns until it exits or you call ProcessKill.",
+            "Start a long-running command in the background and return immediately with a process id. Use this for dev servers (pnpm dev, vite), watchers, or a poller that waits for a long task (e.g. `gh run watch`) instead of blocking on Bash. Output is buffered; read it later with ProcessOutput. If you want the result within this same turn, leave watch off and poll with ProcessOutput. Set watch=true only to be woken by a *future* event once this turn has already ended and you are idle: after it exits or prints new output you have not yet read, a fresh turn wakes you (pipe the command through grep to keep those wakes meaningful). Output you already read with ProcessOutput never wakes you again. The process keeps running across turns until it exits or you call ProcessKill.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -76,7 +76,7 @@ pub(crate) fn tool_defs() -> Vec<goat_provider::ToolDefinition> {
         ),
         def(
             PROCESS_WATCH_TOOL_NAME,
-            "Turn push observation on or off for a background process. When on, new output and exit wake the agent; when off, output is only buffered for ProcessOutput.",
+            "Turn push observation on or off for a background process. When on, a future exit or unread new output wakes you in a fresh turn once you are idle — output you already read with ProcessOutput does not. When off, output is only buffered for ProcessOutput.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -104,21 +104,18 @@ pub(crate) fn call_display(name: &str, input: &str) -> goat_protocol::ToolDispla
             let cmd = serde_json::from_str::<StartInput>(input)
                 .map(|i| i.command)
                 .unwrap_or_default();
-            goat_protocol::ToolDisplay::primary(format!("ProcessStart({})", flatten(&cmd)))
+            goat_protocol::ToolDisplay::primary(format!(
+                "ProcessStart({})",
+                process_start_summary(&cmd)
+            ))
         }
         (_, Some(detail)) => goat_protocol::ToolDisplay::primary(format!("{name}({detail})")),
         (_, None) => goat_protocol::ToolDisplay::primary(name.to_owned()),
     }
 }
 
-fn flatten(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > 60 {
-        let head: String = flat.chars().take(60).collect();
-        format!("{head}…")
-    } else {
-        flat
-    }
+fn process_start_summary(text: &str) -> String {
+    goat_tool::display::truncate_chars(&goat_tool::display::flatten(text), 60)
 }
 
 fn process_id_arg(input: &str) -> Option<u64> {
@@ -196,7 +193,7 @@ async fn start(ctx: &Ctx<'_>, env: &LoopEnv<'_>, input_json: &str) -> Result<Too
                 pgid: i64::from(pgid),
                 command: args.command.clone(),
                 cwd: env.cwd.display().to_string(),
-                started_at: now_ms(),
+                started_at: crate::persist::now_ms(),
             })
             .await
             .ok();
@@ -209,7 +206,7 @@ async fn start(ctx: &Ctx<'_>, env: &LoopEnv<'_>, input_json: &str) -> Result<Too
     Ok(ToolOutput::text(format!(
         "Started process #{id}{watched}. Read output with ProcessOutput(process={id}); stop with ProcessKill(process={id})."
     ))
-    .with_summary(format!("#{id} {}", flatten(&args.command))))
+    .with_summary(format!("#{id} {}", process_start_summary(&args.command))))
 }
 
 async fn output(ctx: &Ctx<'_>, input_json: &str) -> Result<ToolOutput, String> {
@@ -311,12 +308,4 @@ pub(crate) async fn roster_message(ctx: &Ctx<'_>) -> Option<goat_provider::Messa
         goat_provider::MessageRole::User,
         text,
     ))
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
 }

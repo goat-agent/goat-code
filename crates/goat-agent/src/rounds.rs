@@ -166,18 +166,12 @@ pub(crate) async fn run_round(
     request: Request,
     token: &CancellationToken,
 ) -> RoundResult {
-    let mut stream = match provider.stream(request).await {
-        Ok(stream) => stream,
-        Err(error) => {
-            return RoundResult {
-                end: RoundEnd::Failed(error),
-                raw: String::new(),
-                thinking: None,
-                redacted: Vec::new(),
-                pending_calls: Vec::new(),
-                usage: None,
-                rate_limits: None,
-            };
+    let mut stream = tokio::select! {
+        biased;
+        () = token.cancelled() => return RoundResult::ended(RoundEnd::Cancelled),
+        opened = provider.stream(request) => match opened {
+            Ok(stream) => stream,
+            Err(error) => return RoundResult::ended(RoundEnd::Failed(error)),
         }
     };
     let mut raw = String::new();

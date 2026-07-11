@@ -4,14 +4,12 @@ use goat_protocol::{Event, ProcessExitReason, ProcessId, ProcessInfo, ProcessSta
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::{Mutex, mpsc},
+    sync::{Mutex, Notify, mpsc},
 };
 
 const RING_CAPACITY: usize = 2000;
 const MAX_LIVE_PROCESSES: usize = 16;
 const WATCH_FLOOD_LINES: usize = 500;
-
-pub(crate) struct Wake;
 
 struct Line {
     stream: Stream,
@@ -30,8 +28,7 @@ struct Entry {
     db_id: Option<i64>,
     lines: std::collections::VecDeque<Line>,
     dropped: usize,
-    read_cursor: usize,
-    watch_cursor: usize,
+    seen_cursor: usize,
     total: usize,
     state: ProcessState,
     exit_code: Option<i32>,
@@ -82,7 +79,7 @@ struct Inner {
 pub(crate) struct ProcessRegistry {
     inner: Mutex<Inner>,
     events: mpsc::Sender<Event>,
-    wake_tx: mpsc::Sender<Wake>,
+    wake: Arc<Notify>,
     store: Option<goat_store::Store>,
 }
 
@@ -112,7 +109,7 @@ pub(crate) struct Started {
 impl ProcessRegistry {
     pub(crate) fn new(
         events: mpsc::Sender<Event>,
-        wake_tx: mpsc::Sender<Wake>,
+        wake: Arc<Notify>,
         store: Option<goat_store::Store>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -121,7 +118,7 @@ impl ProcessRegistry {
                 next_id: 1,
             }),
             events,
-            wake_tx,
+            wake,
             store,
         })
     }
@@ -195,8 +192,7 @@ impl ProcessRegistry {
                     db_id: None,
                     lines: std::collections::VecDeque::new(),
                     dropped: 0,
-                    read_cursor: 0,
-                    watch_cursor: 0,
+                    seen_cursor: 0,
                     total: 0,
                     state: ProcessState::Running,
                     exit_code: None,
@@ -283,11 +279,8 @@ impl ProcessRegistry {
             if entry.lines.len() >= RING_CAPACITY {
                 entry.lines.pop_front();
                 entry.dropped += 1;
-                if entry.read_cursor > 0 {
-                    entry.read_cursor -= 1;
-                }
-                if entry.watch_cursor > 0 {
-                    entry.watch_cursor -= 1;
+                if entry.seen_cursor > 0 {
+                    entry.seen_cursor -= 1;
                 }
             }
             entry.lines.push_back(Line {
@@ -296,7 +289,7 @@ impl ProcessRegistry {
             });
             entry.total += 1;
             if entry.watched && !entry.watch_flooded {
-                let pending = entry.lines.len() - entry.watch_cursor;
+                let pending = entry.lines.len() - entry.seen_cursor;
                 if pending > WATCH_FLOOD_LINES {
                     entry.watched = false;
                     entry.watch_flooded = true;
@@ -312,7 +305,7 @@ impl ProcessRegistry {
             })
             .await;
         if should_wake {
-            let _ = self.wake_tx.send(Wake).await;
+            self.wake.notify_one();
         }
     }
 
@@ -340,7 +333,7 @@ impl ProcessRegistry {
             (entry.watched, reason, entry.db_id)
         };
         if let (Some(store), Some(db_id)) = (self.store.as_ref(), db_id) {
-            let _ = store.finish_process(db_id, now_ms()).await;
+            let _ = store.finish_process(db_id, crate::persist::now_ms()).await;
         }
         let _ = self
             .events
@@ -352,15 +345,18 @@ impl ProcessRegistry {
             .await;
         self.broadcast_list().await;
         if watched {
-            let _ = self.wake_tx.send(Wake).await;
+            self.wake.notify_one();
         }
     }
 
     pub(crate) async fn read_new(&self, id: ProcessId) -> Option<ReadChunk> {
         let mut inner = self.inner.lock().await;
         let entry = inner.entries.get_mut(&id)?;
-        let chunk = collect_from(entry, entry.read_cursor);
-        entry.read_cursor = entry.lines.len();
+        let chunk = collect_from(entry, entry.seen_cursor);
+        entry.seen_cursor = entry.lines.len();
+        if entry.state == ProcessState::Exited {
+            entry.exit_observed = true;
+        }
         Some(ReadChunk {
             text: chunk,
             state: entry.state,
@@ -379,13 +375,13 @@ impl ProcessRegistry {
             if !entry.watched {
                 continue;
             }
-            let has_new = entry.lines.len() > entry.watch_cursor;
+            let has_new = entry.lines.len() > entry.seen_cursor;
             let exited_unseen = entry.state == ProcessState::Exited && !entry.exit_observed;
             if !has_new && !exited_unseen {
                 continue;
             }
-            let text = collect_from(entry, entry.watch_cursor);
-            entry.watch_cursor = entry.lines.len();
+            let text = collect_from(entry, entry.seen_cursor);
+            entry.seen_cursor = entry.lines.len();
             entry.exit_observed = true;
             out.push((
                 id,
@@ -440,7 +436,6 @@ impl ProcessRegistry {
             entry.watched = on;
             if on {
                 entry.watch_flooded = false;
-                entry.watch_cursor = entry.lines.len();
             }
         }
         self.broadcast_list().await;
@@ -598,20 +593,13 @@ fn kill_group(pgid: Option<i32>) {
     }
 }
 
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ProcessRegistry, Wake};
+    use super::ProcessRegistry;
     use goat_protocol::{Event, ProcessState};
+    use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::mpsc;
+    use tokio::sync::{Notify, mpsc};
 
     #[cfg(not(windows))]
     mod plat {
@@ -640,12 +628,12 @@ mod tests {
     fn harness() -> (
         std::sync::Arc<ProcessRegistry>,
         mpsc::Receiver<Event>,
-        mpsc::Receiver<Wake>,
+        Arc<Notify>,
     ) {
         let (event_tx, event_rx) = mpsc::channel(256);
-        let (wake_tx, wake_rx) = mpsc::channel(256);
-        let registry = ProcessRegistry::new(event_tx, wake_tx, None);
-        (registry, event_rx, wake_rx)
+        let wake = Arc::new(Notify::new());
+        let registry = ProcessRegistry::new(event_tx, wake.clone(), None);
+        (registry, event_rx, wake)
     }
 
     async fn wait_until_exited(registry: &ProcessRegistry, id: goat_protocol::ProcessId) {
@@ -711,13 +699,12 @@ mod tests {
 
     #[tokio::test]
     async fn watched_process_wakes_on_output() {
-        let (registry, _events, mut wake) = harness();
+        let (registry, _events, wake) = harness();
         let cwd = std::env::temp_dir();
         let started = registry.spawn(plat::ECHO_PING, &cwd, true).await.unwrap();
-        let _woke = tokio::time::timeout(Duration::from_secs(5), wake.recv())
+        tokio::time::timeout(Duration::from_secs(5), wake.notified())
             .await
-            .expect("should wake")
-            .expect("wake channel open");
+            .expect("should wake");
         let obs = registry.take_pending_observations().await;
         assert!(
             obs.iter()
@@ -732,11 +719,11 @@ mod tests {
 
     #[tokio::test]
     async fn unwatched_process_does_not_wake() {
-        let (registry, _events, mut wake) = harness();
+        let (registry, _events, wake) = harness();
         let cwd = std::env::temp_dir();
         let started = registry.spawn(plat::ECHO_QUIET, &cwd, false).await.unwrap();
         wait_until_exited(&registry, started.id).await;
-        let result = tokio::time::timeout(Duration::from_millis(200), wake.recv()).await;
+        let result = tokio::time::timeout(Duration::from_millis(200), wake.notified()).await;
         assert!(result.is_err(), "unwatched process must not wake the agent");
     }
 
@@ -803,14 +790,51 @@ mod tests {
 
     #[tokio::test]
     async fn watch_can_be_toggled() {
-        let (registry, _events, mut wake) = harness();
+        let (registry, _events, _wake) = harness();
         let cwd = std::env::temp_dir();
         let started = registry.spawn(plat::SLEEP_LONG, &cwd, false).await.unwrap();
         registry.set_watch(started.id, true).await.unwrap();
         registry.write_stdin(started.id, "").await.ok();
         registry.set_watch(started.id, false).await.unwrap();
         registry.kill(started.id).await.unwrap();
-        let _ = wake.try_recv();
+    }
+
+    #[tokio::test]
+    async fn reading_output_leaves_no_pending_observation() {
+        let (registry, _events, _wake) = harness();
+        let cwd = std::env::temp_dir();
+        let started = registry.spawn(plat::ECHO_PING, &cwd, true).await.unwrap();
+        wait_until_exited(&registry, started.id).await;
+
+        let chunk = registry.read_new(started.id).await.unwrap();
+        assert!(chunk.text.contains("ping"), "got: {}", chunk.text);
+        assert_eq!(chunk.state, ProcessState::Exited);
+
+        let pending = registry.take_pending_observations().await;
+        assert!(
+            pending.is_empty(),
+            "output already read via ProcessOutput must not wake the agent again, got: {:?}",
+            pending
+                .iter()
+                .map(|(_, o)| o.output.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn unread_output_still_observed_after_exit() {
+        let (registry, _events, _wake) = harness();
+        let cwd = std::env::temp_dir();
+        let started = registry.spawn(plat::ECHO_PING, &cwd, true).await.unwrap();
+        wait_until_exited(&registry, started.id).await;
+
+        let pending = registry.take_pending_observations().await;
+        assert!(
+            pending
+                .iter()
+                .any(|(id, o)| *id == started.id && o.output.contains("ping")),
+            "output the agent never read must still wake it"
+        );
     }
 
     #[tokio::test]

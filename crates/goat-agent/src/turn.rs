@@ -41,15 +41,8 @@ pub(crate) fn user_message(text: &str, attachments: &[InputAttachment]) -> Messa
     }
 }
 
-fn top_regime(
-    ctx: &Ctx<'_>,
-    provider: &dyn Provider,
-    allow_ask: bool,
-) -> (Vec<ToolDefinition>, SandboxPolicy) {
-    (
-        build_tool_defs(ctx, provider, None, true, allow_ask),
-        SandboxPolicy::Full,
-    )
+fn top_regime(ctx: &Ctx<'_>, provider: &dyn Provider, allow_ask: bool) -> Vec<ToolDefinition> {
+    build_tool_defs(ctx, provider, None, true, allow_ask)
 }
 
 const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
@@ -171,6 +164,69 @@ enum TurnFlow {
     Idle,
     Done(std::collections::VecDeque<crate::UserInput>),
     Shutdown,
+}
+
+enum PumpAction {
+    Continue,
+    Interrupt,
+    Shutdown,
+}
+
+async fn pump_op(
+    ctx: &Ctx<'_>,
+    id: TaskId,
+    op: Option<Op>,
+    steering: &crate::SteeringQueue,
+    deferred: &mut Vec<Op>,
+) -> PumpAction {
+    match op {
+        Some(Op::SubmitMessage {
+            id: msg_id,
+            text: msg_text,
+            display,
+            attachments,
+        }) => {
+            steering
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(crate::UserInput {
+                    id: msg_id,
+                    text: msg_text,
+                    display,
+                    attachments,
+                });
+            PumpAction::Continue
+        }
+        Some(Op::DequeueMessage { id: msg_id }) => {
+            let removed = {
+                let mut queue = steering
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                queue
+                    .iter()
+                    .rposition(|queued| queued.id == msg_id)
+                    .and_then(|index| queue.remove(index))
+            };
+            if let Some(queued) = removed {
+                let _ = ctx
+                    .events
+                    .send(Event::MessageDequeued {
+                        id: queued.id,
+                        text: queued.text,
+                        display: queued.display,
+                        attachments: queued.attachments,
+                    })
+                    .await;
+            }
+            PumpAction::Continue
+        }
+        Some(Op::Interrupt { id: target_id }) if target_id == id => PumpAction::Interrupt,
+        Some(Op::Shutdown {}) | None => PumpAction::Shutdown,
+        Some(op) => {
+            deferred.push(op);
+            PumpAction::Continue
+        }
+    }
 }
 
 pub(crate) async fn handle_wake(
@@ -346,40 +402,10 @@ pub(crate) async fn handle_shell(
             tokio::select! {
                 biased;
                 output = &mut work => break ShellEnd::Done(output),
-                maybe_op = ops.recv() => match maybe_op {
-                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, display, attachments }) => {
-                        steering
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push_back(crate::UserInput { id: msg_id, text: msg_text, display, attachments });
-                    }
-                    Some(Op::DequeueMessage { id: msg_id }) => {
-                        let removed = {
-                            let mut queue = steering
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            queue
-                                .iter()
-                                .rposition(|queued| queued.id == msg_id)
-                                .and_then(|index| queue.remove(index))
-                        };
-                        if let Some(queued) = removed {
-                            let _ = ctx
-                                .events
-                                .send(Event::MessageDequeued {
-                                    id: queued.id,
-                                    text: queued.text,
-                                    display: queued.display,
-                                    attachments: queued.attachments,
-                                })
-                                .await;
-                        }
-                    }
-                    Some(Op::Interrupt { id: target_id }) if target_id == id => {
-                        break ShellEnd::Interrupted;
-                    }
-                    Some(Op::Shutdown {}) | None => break ShellEnd::Shutdown,
-                    Some(op) => deferred.push(op),
+                maybe_op = ops.recv() => match pump_op(ctx, id, maybe_op, &steering, &mut deferred).await {
+                    PumpAction::Continue => {}
+                    PumpAction::Interrupt => break ShellEnd::Interrupted,
+                    PumpAction::Shutdown => break ShellEnd::Shutdown,
                 },
             }
         }
@@ -480,7 +506,7 @@ pub(crate) async fn handle_compact(
         return Flow::Shutdown;
     }
     let cwd = resolve_thread_cwd(ctx, state.thread_id).await;
-    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref(), true);
+    let tool_defs = top_regime(ctx, provider.as_ref(), true);
     let ids = crate::TurnIds {
         stored_thread: state.thread_id,
         turn_db_id: None,
@@ -495,7 +521,7 @@ pub(crate) async fn handle_compact(
         cwd: &cwd,
         allow_delegate: true,
         allow_ask: true,
-        exec_policy,
+        exec_policy: SandboxPolicy::Full,
     };
     let token = CancellationToken::new();
     let mut shutdown = false;
@@ -516,41 +542,13 @@ pub(crate) async fn handle_compact(
             tokio::select! {
                 biased;
                 outcome = &mut work => break outcome,
-                maybe_op = ops.recv() => match maybe_op {
-                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, display, attachments }) => {
-                        steering
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push_back(crate::UserInput { id: msg_id, text: msg_text, display, attachments });
-                    }
-                    Some(Op::DequeueMessage { id: msg_id }) => {
-                        let removed = {
-                            let mut queue = steering
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            queue
-                                .iter()
-                                .rposition(|queued| queued.id == msg_id)
-                                .and_then(|index| queue.remove(index))
-                        };
-                        if let Some(queued) = removed {
-                            let _ = ctx
-                                .events
-                                .send(Event::MessageDequeued {
-                                    id: queued.id,
-                                    text: queued.text,
-                                    display: queued.display,
-                                    attachments: queued.attachments,
-                                })
-                                .await;
-                        }
-                    }
-                    Some(Op::Interrupt { id: target_id }) if target_id == id => token.cancel(),
-                    Some(Op::Shutdown {}) | None => {
+                maybe_op = ops.recv() => match pump_op(ctx, id, maybe_op, &steering, &mut deferred).await {
+                    PumpAction::Continue => {}
+                    PumpAction::Interrupt => token.cancel(),
+                    PumpAction::Shutdown => {
                         shutdown = true;
                         token.cancel();
                     }
-                    Some(op) => deferred.push(op),
                 },
             }
         }
@@ -681,7 +679,7 @@ async fn run_one_turn(
     }
 
     let cwd = resolve_thread_cwd(ctx, ids.stored_thread).await;
-    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref(), allow_ask);
+    let tool_defs = top_regime(ctx, provider.as_ref(), allow_ask);
     let steering: crate::SteeringQueue = std::sync::Mutex::new(seed);
     let run = Run::top(id, &ids, &steering);
     let env = crate::LoopEnv {
@@ -691,7 +689,7 @@ async fn run_one_turn(
         cwd: &cwd,
         allow_delegate: true,
         allow_ask,
-        exec_policy,
+        exec_policy: SandboxPolicy::Full,
     };
     let token = CancellationToken::new();
     let mut shutdown = false;
@@ -711,51 +709,26 @@ async fn run_one_turn(
             tokio::select! {
                 biased;
                 result = &mut core => break result,
-                maybe_op = ops.recv() => match maybe_op {
-                    Some(Op::Answer { call, answers, .. }) => {
-                        if let Some(tx) = ctx.asks.lock().await.remove(&call) {
-                            let _ = tx.send(answers);
+                maybe_op = ops.recv() => {
+                    if let Some(Op::Answer { call, answers, .. }) = &maybe_op {
+                        if let Some(tx) = ctx.asks.lock().await.remove(call) {
+                            let _ = tx.send(answers.clone());
                             let _ = ctx
                                 .events
-                                .send(Event::AskDismissed { id, call })
+                                .send(Event::AskDismissed { id, call: *call })
                                 .await;
                         }
+                        continue;
                     }
-                    Some(Op::SubmitMessage { id: msg_id, text: msg_text, display, attachments }) => {
-                        steering
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push_back(crate::UserInput { id: msg_id, text: msg_text, display, attachments });
-                    }
-                    Some(Op::DequeueMessage { id: msg_id }) => {
-                        let removed = {
-                            let mut queue = steering
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            queue
-                                .iter()
-                                .rposition(|queued| queued.id == msg_id)
-                                .and_then(|index| queue.remove(index))
-                        };
-                        if let Some(queued) = removed {
-                            let _ = ctx
-                                .events
-                                .send(Event::MessageDequeued {
-                                    id: queued.id,
-                                    text: queued.text,
-                                    display: queued.display,
-                                    attachments: queued.attachments,
-                                })
-                                .await;
+                    match pump_op(ctx, id, maybe_op, &steering, &mut deferred).await {
+                        PumpAction::Continue => {}
+                        PumpAction::Interrupt => token.cancel(),
+                        PumpAction::Shutdown => {
+                            shutdown = true;
+                            token.cancel();
                         }
                     }
-                    Some(Op::Interrupt { id: target_id }) if target_id == id => token.cancel(),
-                    Some(Op::Shutdown {}) | None => {
-                        shutdown = true;
-                        token.cancel();
-                    }
-                    Some(op) => deferred.push(op),
-                },
+                }
             }
         }
     };

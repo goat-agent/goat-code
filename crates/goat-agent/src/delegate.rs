@@ -182,12 +182,7 @@ pub(crate) async fn run_delegation(
 
 fn delegation_label(prompt: &str) -> String {
     let line = prompt.lines().next().unwrap_or("").trim();
-    if line.chars().count() > 50 {
-        let head: String = line.chars().take(50).collect();
-        format!("{head}…")
-    } else {
-        line.to_owned()
-    }
+    goat_tool::display::truncate_chars(line, 50)
 }
 
 fn final_text(history: &[Message]) -> String {
