@@ -49,10 +49,6 @@ pub async fn model_list_entries(credentials: &CredentialStore) -> Vec<goat_proto
 const CHILD_ID_BASE: u64 = 1 << 32;
 const WAKE_ID_BASE: u64 = 1 << 48;
 
-fn drain_extra_wakes(wake_rx: &mut mpsc::Receiver<process::Wake>) {
-    while wake_rx.try_recv().is_ok() {}
-}
-
 pub struct GoatAgent {
     registry: Registry,
     tools: ToolRegistry,
@@ -248,8 +244,9 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
     let semaphore = Arc::new(Semaphore::new(delegate::MAX_CONCURRENT_AGENTS));
     let child_ids = AtomicU64::new(CHILD_ID_BASE);
     let wake_ids = AtomicU64::new(WAKE_ID_BASE);
-    let (wake_tx, mut wake_rx) = mpsc::channel::<process::Wake>(256);
-    let processes = process::ProcessRegistry::new(events.clone(), wake_tx, Some(store.clone()));
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let processes =
+        process::ProcessRegistry::new(events.clone(), wake.clone(), Some(store.clone()));
     let asks: Mutex<HashMap<ToolCallId, oneshot::Sender<Vec<String>>>> = Mutex::new(HashMap::new());
     let _ = events
         .send(Event::SkillsChanged {
@@ -311,9 +308,8 @@ async fn run(agent: GoatAgent, mut ops: mpsc::Receiver<Op>, events: mpsc::Sender
                 Some(op) => op,
                 None => break,
             },
-            Some(_wake) = wake_rx.recv() => {
+            () = wake.notified() => {
                 let ctx = ctx!();
-                drain_extra_wakes(&mut wake_rx);
                 if let Flow::Shutdown =
                     turn::handle_wake(&ctx, &mut state, &mut ops).await
                 {

@@ -29,7 +29,7 @@ pub(crate) fn tool_defs() -> Vec<goat_provider::ToolDefinition> {
     vec![
         def(
             PROCESS_START_TOOL_NAME,
-            "Start a long-running command in the background and return immediately with a process id. Use this for dev servers (pnpm dev, vite), watchers, or a poller that waits for a long task (e.g. `gh run watch`) instead of blocking on Bash. Output is buffered; read it later with ProcessOutput. Set watch=true to be woken when the process prints a matching line or exits (pipe the command through grep to keep events meaningful). The process keeps running across turns until it exits or you call ProcessKill.",
+            "Start a long-running command in the background and return immediately with a process id. Use this for dev servers (pnpm dev, vite), watchers, or a poller that waits for a long task (e.g. `gh run watch`) instead of blocking on Bash. Output is buffered; read it later with ProcessOutput. If you want the result within this same turn, leave watch off and poll with ProcessOutput. Set watch=true only to be woken by a *future* event once this turn has already ended and you are idle: after it exits or prints new output you have not yet read, a fresh turn wakes you (pipe the command through grep to keep those wakes meaningful). Output you already read with ProcessOutput never wakes you again. The process keeps running across turns until it exits or you call ProcessKill.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -76,7 +76,7 @@ pub(crate) fn tool_defs() -> Vec<goat_provider::ToolDefinition> {
         ),
         def(
             PROCESS_WATCH_TOOL_NAME,
-            "Turn push observation on or off for a background process. When on, new output and exit wake the agent; when off, output is only buffered for ProcessOutput.",
+            "Turn push observation on or off for a background process. When on, a future exit or unread new output wakes you in a fresh turn once you are idle — output you already read with ProcessOutput does not. When off, output is only buffered for ProcessOutput.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
