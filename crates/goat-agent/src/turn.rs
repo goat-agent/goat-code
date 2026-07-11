@@ -41,15 +41,8 @@ pub(crate) fn user_message(text: &str, attachments: &[InputAttachment]) -> Messa
     }
 }
 
-fn top_regime(
-    ctx: &Ctx<'_>,
-    provider: &dyn Provider,
-    allow_ask: bool,
-) -> (Vec<ToolDefinition>, SandboxPolicy) {
-    (
-        build_tool_defs(ctx, provider, None, true, allow_ask),
-        SandboxPolicy::Full,
-    )
+fn top_regime(ctx: &Ctx<'_>, provider: &dyn Provider, allow_ask: bool) -> Vec<ToolDefinition> {
+    build_tool_defs(ctx, provider, None, true, allow_ask)
 }
 
 const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
@@ -480,7 +473,7 @@ pub(crate) async fn handle_compact(
         return Flow::Shutdown;
     }
     let cwd = resolve_thread_cwd(ctx, state.thread_id).await;
-    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref(), true);
+    let tool_defs = top_regime(ctx, provider.as_ref(), true);
     let ids = crate::TurnIds {
         stored_thread: state.thread_id,
         turn_db_id: None,
@@ -495,7 +488,7 @@ pub(crate) async fn handle_compact(
         cwd: &cwd,
         allow_delegate: true,
         allow_ask: true,
-        exec_policy,
+        exec_policy: SandboxPolicy::Full,
     };
     let token = CancellationToken::new();
     let mut shutdown = false;
@@ -681,7 +674,7 @@ async fn run_one_turn(
     }
 
     let cwd = resolve_thread_cwd(ctx, ids.stored_thread).await;
-    let (tool_defs, exec_policy) = top_regime(ctx, provider.as_ref(), allow_ask);
+    let tool_defs = top_regime(ctx, provider.as_ref(), allow_ask);
     let steering: crate::SteeringQueue = std::sync::Mutex::new(seed);
     let run = Run::top(id, &ids, &steering);
     let env = crate::LoopEnv {
@@ -691,7 +684,7 @@ async fn run_one_turn(
         cwd: &cwd,
         allow_delegate: true,
         allow_ask,
-        exec_policy,
+        exec_policy: SandboxPolicy::Full,
     };
     let token = CancellationToken::new();
     let mut shutdown = false;
