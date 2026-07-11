@@ -104,21 +104,18 @@ pub(crate) fn call_display(name: &str, input: &str) -> goat_protocol::ToolDispla
             let cmd = serde_json::from_str::<StartInput>(input)
                 .map(|i| i.command)
                 .unwrap_or_default();
-            goat_protocol::ToolDisplay::primary(format!("ProcessStart({})", flatten(&cmd)))
+            goat_protocol::ToolDisplay::primary(format!(
+                "ProcessStart({})",
+                process_start_summary(&cmd)
+            ))
         }
         (_, Some(detail)) => goat_protocol::ToolDisplay::primary(format!("{name}({detail})")),
         (_, None) => goat_protocol::ToolDisplay::primary(name.to_owned()),
     }
 }
 
-fn flatten(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > 60 {
-        let head: String = flat.chars().take(60).collect();
-        format!("{head}…")
-    } else {
-        flat
-    }
+fn process_start_summary(text: &str) -> String {
+    goat_tool::display::truncate_chars(&goat_tool::display::flatten(text), 60)
 }
 
 fn process_id_arg(input: &str) -> Option<u64> {
@@ -209,7 +206,7 @@ async fn start(ctx: &Ctx<'_>, env: &LoopEnv<'_>, input_json: &str) -> Result<Too
     Ok(ToolOutput::text(format!(
         "Started process #{id}{watched}. Read output with ProcessOutput(process={id}); stop with ProcessKill(process={id})."
     ))
-    .with_summary(format!("#{id} {}", flatten(&args.command))))
+    .with_summary(format!("#{id} {}", process_start_summary(&args.command))))
 }
 
 async fn output(ctx: &Ctx<'_>, input_json: &str) -> Result<ToolOutput, String> {

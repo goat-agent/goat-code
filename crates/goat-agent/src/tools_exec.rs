@@ -77,13 +77,10 @@ pub(crate) fn call_display(tools: &ToolRegistry, name: &str, input: &str) -> Too
 
 pub(crate) fn summarize_line(text: &str) -> Option<String> {
     let line = text.lines().find(|line| !line.trim().is_empty())?;
-    let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > 80 {
-        let head: String = flat.chars().take(80).collect();
-        Some(format!("{head}…"))
-    } else {
-        Some(flat)
-    }
+    Some(goat_tool::display::truncate_chars(
+        &goat_tool::display::flatten(line),
+        80,
+    ))
 }
 
 async fn run_regular_tool(
