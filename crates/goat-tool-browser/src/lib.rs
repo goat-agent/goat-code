@@ -1,5 +1,9 @@
 mod action;
+mod dialog;
 mod error;
+mod navigation;
+mod observe;
+mod resilience;
 mod session;
 mod snapshot;
 mod tool;
