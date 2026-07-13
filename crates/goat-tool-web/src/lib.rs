@@ -1,29 +1,96 @@
+mod browser;
+mod content;
+mod decode;
+mod error;
+mod extract;
+mod fetch;
+mod normalize;
+mod pdf;
+mod readability;
+mod render;
 mod ssrf;
 
-use std::{
-    net::IpAddr,
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use error::WebFetchError;
 
-use futures::StreamExt;
-use goat_protocol::ToolDisplay;
-use goat_tool::{Tool, ToolContext, ToolError, ToolFuture, ToolOutput, display};
-use serde::Deserialize;
+const DEFAULT_QUERY_PASSAGES: usize = 8;
 
-const MAX_DOWNLOAD: usize = 5 * 1024 * 1024;
-const MAX_OUTPUT: usize = 48 * 1024;
-const USER_AGENT: &str = "goat-code/0.1 (+https://github.com/jbj338033/goat-code)";
-
-pub fn all() -> Vec<Box<dyn Tool>> {
-    vec![Box::new(WebFetchTool)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenderMode {
+    Auto,
+    Always,
+    Never,
 }
 
-pub struct WebFetchTool;
+fn parse_render(mode: Option<&str>) -> RenderMode {
+    match mode {
+        Some("always") => RenderMode::Always,
+        Some("never") => RenderMode::Never,
+        _ => RenderMode::Auto,
+    }
+}
+
+async fn obtain(url: &str, mode: RenderMode) -> Result<fetch::RawFetch, WebFetchError> {
+    match mode {
+        RenderMode::Never => fetch::fetch_raw(url).await,
+        RenderMode::Always => browser::render_to_raw(url).await,
+        RenderMode::Auto => {
+            let raw = fetch::fetch_raw(url).await?;
+            if content::is_empty_html_shell(&raw) {
+                match browser::render_to_raw(url).await {
+                    Ok(rendered) if !content::is_empty_html_shell(&rendered) => Ok(rendered),
+                    _ => Ok(raw),
+                }
+            } else {
+                Ok(raw)
+            }
+        }
+    }
+}
+
+use goat_protocol::ToolDisplay;
+use goat_tool::{Tool, ToolContext, ToolFuture, display};
+use serde::Deserialize;
+
+pub fn all() -> Vec<Box<dyn Tool>> {
+    vec![Box::new(WebFetchTool::new())]
+}
+
+pub struct WebFetchTool {
+    readability: bool,
+    render_enabled: bool,
+    max_length: usize,
+}
+
+impl WebFetchTool {
+    pub fn new() -> Self {
+        let config = goat_config::Config::load();
+        Self {
+            readability: config.web_fetch.readability,
+            render_enabled: config.web_fetch.render_enabled,
+            max_length: config.web_fetch.max_length.max(1024),
+        }
+    }
+}
+
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Deserialize)]
 struct Input {
     url: String,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    raw: bool,
+    #[serde(default)]
+    render: Option<String>,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    max_length: Option<usize>,
 }
 
 impl Tool for WebFetchTool {
@@ -32,14 +99,19 @@ impl Tool for WebFetchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Fetch a web page over HTTPS and return its content as Markdown. Use for reading documentation, articles, or source files referenced by URL. Private and link-local addresses are refused."
+        "Fetch a URL over HTTPS and return its content as Markdown. Detects the page charset, pretty-prints JSON, refuses binary blobs with a typed notice, and prefixes page metadata (title, final URL, status, size). Large pages are paged with offset/max_length. Private and link-local addresses are refused."
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "url": {"type": "string"}
+                "url": {"type": "string", "description": "http(s) URL. http is upgraded to https; github blob URLs are rewritten to raw."},
+                "query": {"type": "string", "description": "If set, return only the passages most relevant to this query (with heading context) instead of the whole page."},
+                "raw": {"type": "boolean", "description": "If true, skip main-content extraction and return the full converted document. Default false."},
+                "render": {"type": "string", "enum": ["auto", "always", "never"], "description": "Headless-browser rendering for JavaScript pages. auto renders only when the static fetch looks like an empty shell. Default auto."},
+                "offset": {"type": "integer", "description": "Byte offset into the processed text to start from. Default 0."},
+                "max_length": {"type": "integer", "description": "Max bytes of processed text to return. Default 49152, capped at 49152."}
             },
             "required": ["url"]
         })
@@ -58,217 +130,67 @@ impl Tool for WebFetchTool {
     fn run<'a>(&'a self, input: &'a str, _ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: Input = serde_json::from_str(input)?;
-            let url = normalize_url(&args.url);
-            reject_blocked_literal(&url)?;
-            fetch(&url).await
+            let url = normalize::normalize_url(&args.url);
+            normalize::reject_blocked_literal(&url)?;
+            let mode = if self.render_enabled {
+                parse_render(args.render.as_deref())
+            } else {
+                RenderMode::Never
+            };
+            let raw = obtain(&url, mode).await?;
+            let kind = content::classify(raw.content_type.as_deref(), &raw.body);
+            let raw_mode = args.raw || !self.readability;
+            let mut processed = if matches!(kind, content::Kind::Pdf) {
+                let body = raw.body.clone();
+                let extracted = tokio::task::spawn_blocking(move || pdf::extract_text(body))
+                    .await
+                    .ok()
+                    .flatten();
+                content::pdf_processed(extracted, &raw)
+            } else {
+                let decoded = decode::decode(&raw);
+                content::process(&kind, decoded, &raw, raw_mode)
+            };
+            if let Some(query) = args
+                .query
+                .as_deref()
+                .map(str::trim)
+                .filter(|q| !q.is_empty())
+            {
+                processed.text = match extract::extract_relevant(
+                    &processed.text,
+                    query,
+                    DEFAULT_QUERY_PASSAGES,
+                ) {
+                    Some(relevant) => {
+                        format!("relevant passages for query: {query}\n\n{relevant}")
+                    }
+                    None => format!(
+                        "no strongly matching sections for query: {query}; showing the document start\n\n{}",
+                        processed.text
+                    ),
+                };
+            }
+            let window = render::Window {
+                offset: args.offset.unwrap_or(0),
+                max_length: args
+                    .max_length
+                    .map_or(self.max_length, |value| value.min(self.max_length)),
+            };
+            Ok(render::render(&raw, processed, window))
         })
     }
-}
-
-fn normalize_url(raw: &str) -> String {
-    let upgraded = raw
-        .strip_prefix("http://")
-        .map_or_else(|| raw.to_owned(), |rest| format!("https://{rest}"));
-    github_blob_to_raw(&upgraded)
-}
-
-fn github_blob_to_raw(url: &str) -> String {
-    let Some(rest) = url.strip_prefix("https://github.com/") else {
-        return url.to_owned();
-    };
-    let parts: Vec<&str> = rest.splitn(4, '/').collect();
-    if parts.len() == 4 && parts[2] == "blob" {
-        format!(
-            "https://raw.githubusercontent.com/{}/{}/{}",
-            parts[0], parts[1], parts[3]
-        )
-    } else {
-        url.to_owned()
-    }
-}
-
-fn reject_blocked_literal(url: &str) -> Result<(), ToolError> {
-    let authority = url
-        .split_once("://")
-        .map_or(url, |(_, rest)| rest)
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("");
-    let host_port = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, after)| after);
-    let host = if let Some(rest) = host_port.strip_prefix('[') {
-        rest.split(']').next().unwrap_or("")
-    } else {
-        host_port.split(':').next().unwrap_or("")
-    };
-    if let Ok(ip) = host.parse::<IpAddr>()
-        && ssrf::is_blocked(ip)
-    {
-        return Err(ToolError::Execution {
-            message: format!("refusing to fetch a private or local address: {host}"),
-        });
-    }
-    Ok(())
-}
-
-fn build_client() -> Result<reqwest::Client, ToolError> {
-    let redirect = reqwest::redirect::Policy::custom(|attempt| {
-        if attempt.previous().len() >= 10 {
-            return attempt.error(RedirectBlocked("too many redirects"));
-        }
-        let blocked = attempt
-            .url()
-            .host_str()
-            .map(|h| h.trim_start_matches('[').trim_end_matches(']').to_owned())
-            .and_then(|h| h.parse::<IpAddr>().ok())
-            .is_some_and(ssrf::is_blocked);
-        if blocked {
-            attempt.error(RedirectBlocked("redirect to a private or local address"))
-        } else {
-            attempt.follow()
-        }
-    });
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .redirect(redirect)
-        .dns_resolver(Arc::new(ssrf::GuardedResolver))
-        .build()
-        .map_err(|err| ToolError::Execution {
-            message: format!("could not build HTTP client: {err}"),
-        })
-}
-
-#[derive(Debug)]
-struct RedirectBlocked(&'static str);
-
-impl std::fmt::Display for RedirectBlocked {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-impl std::error::Error for RedirectBlocked {}
-
-fn shared_client() -> Result<&'static reqwest::Client, ToolError> {
-    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| build_client().map_err(|err| err.to_string()))
-        .as_ref()
-        .map_err(|message| ToolError::Execution {
-            message: message.clone(),
-        })
-}
-
-async fn fetch(url: &str) -> Result<ToolOutput, ToolError> {
-    let client = shared_client()?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|err| ToolError::Execution {
-            message: format!("request failed: {err}"),
-        })?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(ToolError::Execution {
-            message: format!("server returned {status}"),
-        });
-    }
-    let is_html = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.contains("html"));
-
-    let mut stream = response.bytes_stream();
-    let mut body: Vec<u8> = Vec::new();
-    let mut overflowed = false;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|err| ToolError::Execution {
-            message: format!("download failed: {err}"),
-        })?;
-        if body.len() + chunk.len() > MAX_DOWNLOAD {
-            let room = MAX_DOWNLOAD.saturating_sub(body.len());
-            body.extend_from_slice(&chunk[..room]);
-            overflowed = true;
-            break;
-        }
-        body.extend_from_slice(&chunk);
-    }
-
-    let raw = String::from_utf8_lossy(&body);
-    let text = if is_html {
-        htmd::convert(&raw).unwrap_or_else(|_| raw.into_owned())
-    } else {
-        raw.into_owned()
-    };
-
-    let mut text = if text.len() > MAX_OUTPUT {
-        goat_tool::truncate(text, MAX_OUTPUT)
-    } else {
-        text
-    };
-    if overflowed && text.len() <= MAX_OUTPUT {
-        text.push_str(goat_tool::TRUNCATION_NOTICE);
-    }
-
-    Ok(ToolOutput::text(text))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{github_blob_to_raw, normalize_url, reject_blocked_literal, shared_client};
-
-    #[test]
-    fn upgrades_http_to_https() {
-        assert_eq!(
-            normalize_url("http://example.com/x"),
-            "https://example.com/x"
-        );
-    }
-
-    #[test]
-    fn rewrites_github_blob() {
-        assert_eq!(
-            github_blob_to_raw("https://github.com/o/r/blob/main/src/lib.rs"),
-            "https://raw.githubusercontent.com/o/r/main/src/lib.rs"
-        );
-    }
-
-    #[test]
-    fn leaves_other_github_urls() {
-        assert_eq!(
-            github_blob_to_raw("https://github.com/o/r/issues/1"),
-            "https://github.com/o/r/issues/1"
-        );
-    }
-
-    #[test]
-    fn rejects_ip_literal_localhost() {
-        assert!(reject_blocked_literal("https://127.0.0.1/secret").is_err());
-        assert!(reject_blocked_literal("https://[::1]/secret").is_err());
-        assert!(reject_blocked_literal("https://169.254.169.254/latest/meta-data").is_err());
-    }
-
-    #[test]
-    fn allows_public_literal() {
-        assert!(reject_blocked_literal("https://8.8.8.8/").is_ok());
-    }
-
-    #[test]
-    fn shared_client_uses_guarded_builder() {
-        assert!(shared_client().is_ok());
-    }
+    use goat_tool::Tool;
 
     #[tokio::test]
     #[ignore = "requires network access"]
     async fn live_fetch_example() {
-        use goat_tool::Tool;
         let ctx = goat_tool::ToolContext::new(&std::env::temp_dir()).unwrap();
-        let out = super::WebFetchTool
+        let out = super::WebFetchTool::new()
             .run(r#"{"url":"https://example.com"}"#, &ctx)
             .await
             .unwrap();
