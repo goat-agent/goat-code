@@ -134,25 +134,40 @@ pub const SNAPSHOT_JS: &str = r"(() => {
       out.push({ depth: depth, role: 'heading', name: clean(el.innerText).slice(0, 80), level: parseInt(tag[1], 10) });
       next = depth + 1;
     } else if (tag === 'IFRAME') {
-      out.push({ depth: depth, text: '[iframe: ' + (el.getAttribute('src') || '') + ' - content not included]' });
+      let sameOrigin = false;
+      try { const d = el.contentDocument; if (d && d.body) { walk(d.body, depth + 1); sameOrigin = true; } } catch (e) {}
+      if (!sameOrigin) out.push({ depth: depth, text: '[iframe: ' + (el.getAttribute('src') || '') + ' - cross-origin content not included]' });
       return;
     } else if (textTags.includes(tag)) {
       const t = ownText(el);
       if (t) { out.push({ depth: depth, text: t.slice(0, 120) }); next = depth + 1; }
     }
 
+    if (el.shadowRoot) { for (const child of el.shadowRoot.children) walk(child, next); }
     for (const child of el.children) walk(child, next);
   };
 
   if (document.body) walk(document.body, 0);
   const doc = document.scrollingElement || document.documentElement;
+  const passwordField = !!document.querySelector('input[type=password]');
+  let overlay = false;
+  const scan = Array.from(document.querySelectorAll('body *')).slice(0, 4000);
+  for (const el of scan) {
+    const s = getComputedStyle(el);
+    if ((s.position === 'fixed' || s.position === 'sticky') && parseInt(s.zIndex || '0', 10) >= 1000) {
+      const r = el.getBoundingClientRect();
+      if (r.width * r.height > innerWidth * innerHeight * 0.6) { overlay = true; break; }
+    }
+  }
   return {
     title: document.title || '',
     nodes: out,
     truncated: truncated,
     scrollY: Math.round(scrollY),
     viewportHeight: Math.round(innerHeight),
-    documentHeight: Math.round(doc ? doc.scrollHeight : 0)
+    documentHeight: Math.round(doc ? doc.scrollHeight : 0),
+    passwordField: passwordField,
+    overlay: overlay
   };
 })()";
 
@@ -170,6 +185,10 @@ pub struct RawSnapshot {
     pub viewport_height: i64,
     #[serde(default, rename = "documentHeight")]
     pub document_height: i64,
+    #[serde(default, rename = "passwordField")]
+    pub password_field: bool,
+    #[serde(default)]
+    pub overlay: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,6 +286,28 @@ pub fn format_snapshot(snapshot: &BrowserSnapshot<'_>, max_bytes: usize) -> Stri
     }
     if actions == 0 {
         out.push_str("- none\n");
+    }
+    let mut hints: Vec<&str> = Vec::new();
+    if snapshot.raw.password_field {
+        hints.push(
+            "login_form_present: a password field is on the page; if this is a login wall, ask the user to sign in in the Chrome window, then continue",
+        );
+    }
+    if snapshot.raw.overlay {
+        hints.push(
+            "overlay_present: a large fixed overlay may be covering content (cookie/consent/modal); dismiss it if it blocks the task",
+        );
+    }
+    if actions == 0 {
+        hints.push(
+            "no_interactive_elements: the page may be canvas/visual or still rendering; try screenshot or wait_for",
+        );
+    }
+    if !hints.is_empty() {
+        out.push_str("\nhints:\n");
+        for hint in hints {
+            let _ = writeln!(out, "- {hint}");
+        }
     }
     out.push_str("\nwarnings:\n");
     out.push_str("- page_content_untrusted\n");
@@ -367,6 +408,8 @@ mod tests {
             scroll_y: 0,
             viewport_height: 100,
             document_height: 200,
+            password_field: false,
+            overlay: false,
         }
     }
 
