@@ -19,6 +19,7 @@ pub struct Config {
     pub mouse_capture_enabled: bool,
     pub remote: RemoteConfig,
     pub search: SearchConfig,
+    pub web_fetch: WebFetchConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -26,6 +27,24 @@ pub struct Config {
 pub struct SearchConfig {
     pub default_target: Option<String>,
     pub accounts: Vec<SearchAccountConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebFetchConfig {
+    pub readability: bool,
+    pub render_enabled: bool,
+    pub max_length: usize,
+}
+
+impl Default for WebFetchConfig {
+    fn default() -> Self {
+        Self {
+            readability: true,
+            render_enabled: true,
+            max_length: 48 * 1024,
+        }
+    }
 }
 
 pub use goat_search_provider::SearchAccountConfig;
@@ -55,6 +74,7 @@ impl Default for Config {
             mouse_capture_enabled: true,
             remote: RemoteConfig::default(),
             search: SearchConfig::default(),
+            web_fetch: WebFetchConfig::default(),
         }
     }
 }
@@ -190,7 +210,7 @@ pub fn check_legacy_layout() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, RemoteConfig, SearchConfig, ThemeChoice};
+    use super::{Config, RemoteConfig, SearchConfig, ThemeChoice, WebFetchConfig};
 
     #[test]
     fn defaults_to_dark() {
@@ -254,6 +274,7 @@ mod tests {
             mouse_capture_enabled: false,
             remote: RemoteConfig::default(),
             search: SearchConfig::default(),
+            web_fetch: WebFetchConfig::default(),
         };
         let raw = serde_json::to_string(&cfg).unwrap();
         assert_eq!(Config::from_json(&raw).unwrap(), cfg);
