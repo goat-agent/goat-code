@@ -9,6 +9,10 @@ publish = false
 
 [dependencies]
 goat-command = { workspace = true }
+goat-config = { workspace = true }
+goat-auth = { workspace = true }
+goat-search-provider = { workspace = true }
+goat-search-providers = { workspace = true }
 
 [lints]
 workspace = true
