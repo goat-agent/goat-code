@@ -22,7 +22,7 @@ base64 = { workspace = true }
 image = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true
