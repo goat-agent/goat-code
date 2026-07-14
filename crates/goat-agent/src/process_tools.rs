@@ -297,13 +297,13 @@ pub(crate) async fn roster_message(ctx: &Ctx<'_>) -> Option<goat_provider::Messa
         return None;
     }
     let mut text = String::from(
-        "<background-processes>\nProcesses running now (read with ProcessOutput, stop with ProcessKill):\n",
+        "<environment-status>\nAutomated status snapshot, not a user message — background processes running now (read with ProcessOutput, stop with ProcessKill):\n",
     );
     for p in running {
         let watched = if p.watched { " watched" } else { "" };
         let _ = writeln!(text, "  #{}{watched} — {}", p.id, p.command);
     }
-    text.push_str("</background-processes>");
+    text.push_str("</environment-status>");
     Some(goat_provider::Message::text(
         goat_provider::MessageRole::User,
         text,
