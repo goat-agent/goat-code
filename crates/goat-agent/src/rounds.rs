@@ -222,7 +222,7 @@ pub(crate) async fn run_round(
             }
         }
     };
-    let thinking = (!thinking.is_empty()).then_some((thinking, signature));
+    let thinking = (!thinking.is_empty() || !signature.is_empty()).then_some((thinking, signature));
     RoundResult {
         end,
         raw,
