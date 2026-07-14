@@ -193,6 +193,7 @@ pub(crate) struct RetryState {
     pub(crate) max_attempts: u32,
     pub(crate) reason: String,
     pub(crate) until: std::time::Instant,
+    pub(crate) resets_at: Option<i64>,
 }
 
 impl App {
@@ -1218,8 +1219,16 @@ impl App {
             .saturating_duration_since(std::time::Instant::now())
             .as_millis()
             .div_ceil(1000);
+        let clock = format_wait(remaining);
+        if retry.resets_at.is_some() {
+            return Some(format!(
+                "rate limit resets in {clock}{sep}{reason}{sep}will resume automatically",
+                sep = symbols::ui::SEPARATOR,
+                reason = retry.reason,
+            ));
+        }
         Some(format!(
-            "retrying in {remaining}s{sep}attempt {attempt}/{max}{sep}{reason}{sep}response will restart",
+            "retrying in {clock}{sep}attempt {attempt}/{max}{sep}{reason}{sep}response will restart",
             sep = symbols::ui::SEPARATOR,
             attempt = retry.attempt,
             max = retry.max_attempts,
@@ -1576,6 +1585,18 @@ async fn event_loop(
         }
     }
     Ok(())
+}
+
+fn format_wait(secs: u128) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else if secs < 86_400 {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d{:02}h", secs / 86_400, (secs % 86_400) / 3600)
+    }
 }
 
 fn copy_to_terminal_clipboard(text: &str) {
