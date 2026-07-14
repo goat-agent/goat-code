@@ -239,7 +239,7 @@ pub(crate) async fn handle_wake(
         return Flow::Continue;
     }
     let mut body = String::from(
-        "<process-observation>\nBackground processes you are watching produced output or exited. React if needed; otherwise keep waiting.\n",
+        "<environment-notice>\nAutomated runtime signal — this is NOT a message from the user. Do not reply to it conversationally, do not acknowledge or thank it, and do not repeat an earlier waiting reply. A watched background process produced output or exited; act only if it now needs action (read it, fix it, or move on), otherwise produce no user-facing text and continue what you were doing.\n",
     );
     for (id, obs) in &observations {
         let status = match obs.state {
@@ -257,7 +257,7 @@ pub(crate) async fn handle_wake(
             body.push('\n');
         }
     }
-    body.push_str("</process-observation>");
+    body.push_str("</environment-notice>");
 
     let wake_id = TaskId(
         ctx.wake_ids
