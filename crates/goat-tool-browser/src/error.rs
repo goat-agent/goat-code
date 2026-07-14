@@ -6,6 +6,8 @@ pub enum BrowserError {
     Input(String),
     #[error("{0}")]
     Message(String),
+    #[error("{op} timed out after {ms} ms")]
+    Timeout { op: &'static str, ms: u128 },
     #[error("Chrome not found; install Google Chrome to use the browser tool ({0})")]
     NoChrome(String),
     #[error("could not resolve ~/.goat-code/browser/profile")]
