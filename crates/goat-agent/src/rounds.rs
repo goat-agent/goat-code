@@ -295,8 +295,7 @@ pub(crate) async fn process_round_output(
             })
             .await;
     }
-    let raw = round.raw;
-    let pending_calls: Vec<(String, String, String)> = round
+    let mut pending_calls: Vec<(String, String, String)> = round
         .pending_calls
         .into_iter()
         .map(|(vendor_id, name, input)| {
@@ -308,8 +307,31 @@ pub(crate) async fn process_round_output(
             (vendor_id, name, normalize_tool_input(input, schema))
         })
         .collect();
-    let shown_text = (!raw.is_empty()).then(|| raw.clone());
-    if !raw.is_empty()
+    let (raw, recovered) =
+        crate::tool_recovery::recover(&env.target.provider, &round.raw, env.tool_defs);
+    for (idx, (name, raw_input)) in recovered.into_iter().enumerate() {
+        let schema = env
+            .tool_defs
+            .iter()
+            .find(|def| def.name == name)
+            .map(|def| &def.input_schema);
+        let input = normalize_tool_input(raw_input, schema);
+        if pending_calls
+            .iter()
+            .any(|(_, n, i)| *n == name && crate::tool_recovery::input_equivalent(i, &input))
+        {
+            continue;
+        }
+        let vendor_id = format!("recovered-{rounds}-{idx}");
+        tracing::warn!(
+            name = %name,
+            vendor_id = %vendor_id,
+            "recovered a tool call the model emitted as assistant text"
+        );
+        pending_calls.push((vendor_id, name, input));
+    }
+    let shown_text = (!raw.trim().is_empty()).then(|| raw.clone());
+    if !raw.trim().is_empty()
         || !pending_calls.is_empty()
         || round.thinking.is_some()
         || !round.redacted.is_empty()
@@ -324,7 +346,7 @@ pub(crate) async fn process_round_output(
         for data in &round.redacted {
             content.push(ContentBlock::RedactedThinking { data: data.clone() });
         }
-        if !raw.is_empty() {
+        if !raw.trim().is_empty() {
             content.push(ContentBlock::Text { text: raw.clone() });
         }
         for (vendor_id, name, input_json) in &pending_calls {

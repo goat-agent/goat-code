@@ -35,6 +35,7 @@ mod retry;
 mod rounds;
 mod shell;
 mod threads;
+mod tool_recovery;
 mod tools_exec;
 mod turn;
 mod websearch;
