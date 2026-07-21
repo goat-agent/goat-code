@@ -237,6 +237,7 @@ impl App {
                 max_attempts,
                 delay_ms,
                 reason,
+                resets_at: _,
             } => {
                 self.turn.thinking = false;
                 if let Some(i) = self.agent_index(id) {

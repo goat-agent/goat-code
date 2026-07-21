@@ -88,6 +88,14 @@ pub(crate) fn backoff_delay(error: &StreamError, attempt: u32) -> Duration {
         .mul_f64(rand::rng().random_range(0.5..=1.0))
 }
 
+pub(crate) fn resets_at(error: &StreamError) -> Option<i64> {
+    if let StreamError::RateLimited { resets_at, .. } = error {
+        *resets_at
+    } else {
+        None
+    }
+}
+
 fn exhausted(mut result: RoundResult, attempts: u32, started: Instant) -> RoundResult {
     if let RoundEnd::Failed(
         StreamError::RateLimited { message, .. }
@@ -146,6 +154,7 @@ pub(crate) async fn run_round_with_retry(
                 max_attempts: MAX_ATTEMPTS,
                 delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                 reason: reason_label(error).to_owned(),
+                resets_at: resets_at(error),
             })
             .await;
         tokio::select! {

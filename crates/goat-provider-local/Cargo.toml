@@ -1,0 +1,17 @@
+[package]
+name = "goat-provider-local"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+goat-provider-openai-compat = { workspace = true }
+
+[dev-dependencies]
+goat-provider = { workspace = true }
+
+[lints]
+workspace = true
