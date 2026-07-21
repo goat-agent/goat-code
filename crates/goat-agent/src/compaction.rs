@@ -366,6 +366,7 @@ async fn collect_with_retry(
                 max_attempts: crate::retry::MAX_ATTEMPTS,
                 delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                 reason: crate::retry::reason_label(&error).to_owned(),
+                resets_at: crate::retry::resets_at(&error),
             })
             .await;
         tokio::select! {
