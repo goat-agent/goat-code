@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use color_eyre::eyre::{Context, eyre};
@@ -26,12 +26,6 @@ struct Release {
 struct Asset {
     name: String,
     browser_download_url: String,
-}
-
-struct InstallPaths {
-    install_dir: PathBuf,
-    bin_path: PathBuf,
-    helper_path: PathBuf,
 }
 
 pub async fn run(force: bool) -> color_eyre::Result<()> {
@@ -69,17 +63,23 @@ pub async fn run(force: bool) -> color_eyre::Result<()> {
     let staged_dir = stage_dir(&latest, target)?;
     reset_dir(&staged_dir)?;
     extract_archive(&archive, &staged_dir)?;
-    require_file(&staged_dir.join(exe_name("goat-code")))?;
-    require_file(&staged_dir.join(exe_name("goat-update")))?;
+    let staged_bin = staged_dir.join(exe_name("goat-code"));
+    require_file(&staged_bin)?;
 
-    let paths = install_paths()?;
+    let bin_path = install_bin_path()?;
     print_row(
         color,
         "install",
-        paths.bin_path.display().to_string(),
+        bin_path.display().to_string(),
         Palette::Value,
     );
-    run_helper(&staged_dir, &paths, &latest)?;
+    replace_binary(&bin_path, &staged_bin)?;
+    print_row(
+        color,
+        "installed",
+        "restart goat-code to run the new version",
+        Palette::Success,
+    );
     Ok(())
 }
 
@@ -219,14 +219,10 @@ fn extract_archive(bytes: &[u8], dest: &Path) -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn install_paths() -> color_eyre::Result<InstallPaths> {
+fn install_bin_path() -> color_eyre::Result<PathBuf> {
     let current = std::env::current_exe()?;
-    let install_dir = current
-        .parent()
-        .ok_or_else(|| eyre!("could not resolve current executable directory"))?
-        .to_path_buf();
     if let Some(expected) = goat_config::bin_dir()
-        && install_dir != expected
+        && current.parent() != Some(expected.as_path())
     {
         println!("Reinstall goat-code with:");
         println!("  curl -fsSL {INSTALL_URL} | sh");
@@ -235,51 +231,16 @@ fn install_paths() -> color_eyre::Result<InstallPaths> {
             expected.display()
         ));
     }
-    Ok(InstallPaths {
-        bin_path: install_dir.join(exe_name("goat-code")),
-        helper_path: install_dir.join(exe_name("goat-update")),
-        install_dir,
-    })
+    Ok(current)
 }
 
-fn run_helper(
-    staged_dir: &Path,
-    paths: &InstallPaths,
-    version: &Version,
-) -> color_eyre::Result<()> {
-    let helper = staged_dir.join(exe_name("goat-update"));
-    let args = [
-        "apply".to_string(),
-        "--staged-dir".to_string(),
-        staged_dir.display().to_string(),
-        "--install-dir".to_string(),
-        paths.install_dir.display().to_string(),
-        "--bin-path".to_string(),
-        paths.bin_path.display().to_string(),
-        "--helper-path".to_string(),
-        paths.helper_path.display().to_string(),
-        "--version".to_string(),
-        version.to_string(),
-    ];
-
-    let mut command = Command::new(helper);
-    command.args(args);
-
-    if cfg!(windows) {
-        command
-            .spawn()
-            .context("failed to start goat-update helper")?;
-        println!("Update helper started. goat will be replaced after this process exits.");
-        Ok(())
-    } else {
-        let status = command
-            .status()
-            .context("failed to run goat-update helper")?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(eyre!("goat-update failed"))
+fn replace_binary(bin_path: &Path, staged: &Path) -> color_eyre::Result<()> {
+    match self_replace::self_replace(staged) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            Err(eyre!("permission denied writing {}", bin_path.display()))
         }
+        Err(err) => Err(err).with_context(|| format!("replacing {}", bin_path.display())),
     }
 }
 

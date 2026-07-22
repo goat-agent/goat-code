@@ -60,7 +60,6 @@ goat-command-conversation = { path = "crates/goat-command-conversation" }
 goat-command-help = { path = "crates/goat-command-help" }
 goat-command-app = { path = "crates/goat-command-app" }
 goat-commands = { path = "crates/goat-commands" }
-goat-update = { path = "crates/goat-update" }
 goat-worktree = { path = "crates/goat-worktree" }
 goat-wire = { path = "crates/goat-wire" }
 goat-daemon = { path = "crates/goat-daemon" }
@@ -121,6 +120,7 @@ rand = "0.10"
 rmcp = { version = "1.7.0", default-features = false, features = ["client", "transport-child-process"] }
 open = "5"
 fs2 = "0.4"
+self_replace = { package = "self-replace", version = "1" }
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

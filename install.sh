@@ -90,12 +90,10 @@ fi
 mkdir -p "$tmp/extract"
 tar -xzf "$tmp/$archive" -C "$tmp/extract"
 test -f "$tmp/extract/goat-code"
-test -f "$tmp/extract/goat-update"
 
 mkdir -p "$bin_dir"
 cp "$tmp/extract/goat-code" "$bin_dir/goat-code"
-cp "$tmp/extract/goat-update" "$bin_dir/goat-update"
-chmod 755 "$bin_dir/goat-code" "$bin_dir/goat-update"
+chmod 755 "$bin_dir/goat-code"
 
 cat > "$env_file" <<'ENV'
 case ":${PATH}:" in
@@ -151,4 +149,5 @@ esac
 if [ -e /usr/local/bin/goat-code ] || [ -e /usr/local/bin/goat-update ]; then
     echo "An older system install was found. Remove it so it no longer shadows the new one:"
     echo "  sudo rm -f /usr/local/bin/goat-code /usr/local/bin/goat-update"
+    echo "(the current installer uses $bin_dir and never writes to system directories)"
 fi
