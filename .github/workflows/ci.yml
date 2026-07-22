@@ -50,17 +50,24 @@ jobs:
         name: Linux tests with per-binary hang watchdog
         run: |
           set -o pipefail
-          echo "Compiling test executables (no run)..."
-          cargo test --workspace --no-run --message-format=json > cargo-test-build.json
 
-          mapfile -t TEST_BINS < <(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' cargo-test-build.json)
-          echo "Enumerated ${#TEST_BINS[@]} test binaries."
+          COMPILE_TIMEOUT=1200
+          BINARY_TIMEOUT=120
 
-          WATCHDOG_TIMED_OUT=0
+          proc_alive() {
+            local pid="$1" line state
+            line=$(cat /proc/"$pid"/stat 2>/dev/null) || return 1
+            state=${line##*) }
+            state=${state%% *}
+            case "$state" in
+              Z|X|x|"") return 1 ;;
+              *) return 0 ;;
+            esac
+          }
 
           dump_stacks() {
             local pid="$1"
-            echo "----- thread dump for pid $pid -----"
+            echo "----- thread dump for pid $pid ($(cat /proc/"$pid"/comm 2>/dev/null || echo '?')) -----"
             if command -v gdb >/dev/null 2>&1; then
               gdb -batch -p "$pid" -ex "thread apply all bt" 2>&1 || echo "(gdb attach failed)"
             else
@@ -75,21 +82,59 @@ jobs:
             done
           }
 
+          build_with_watchdog() {
+            local timeout="$1"
+            setsid bash -c 'cargo test --workspace --no-run --message-format=json > cargo-test-build.json 2> cargo-test-build.err' &
+            local pid=$!
+            local pgid
+            pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+            [ -n "$pgid" ] || pgid="$pid"
+            local waited=0
+            while proc_alive "$pid"; do
+              if [ "$waited" -ge "$timeout" ]; then
+                echo "::error::HUNG_TEST_BUILD cargo test --no-run exceeded ${timeout}s"
+                echo "===== HUNG_TEST_BUILD: process forest ====="
+                ps -e --forest -o pid,ppid,pgid,stat,etime,rss,args 2>&1 || true
+                echo "===== HUNG_TEST_BUILD: cargo stack (pid $pid) ====="
+                dump_stacks "$pid"
+                local cpid cname
+                for cpid in $(pgrep -g "$pgid" 2>/dev/null); do
+                  [ "$cpid" = "$pid" ] && continue
+                  cname=$(cat /proc/"$cpid"/comm 2>/dev/null || echo '?')
+                  case "$cname" in
+                    rustc|cc|cc1|gcc|clang|collect2|ld|ld.lld|lld|ld.gold|ld.bfd|mold|*lld*)
+                      echo "===== HUNG_TEST_BUILD: descendant $cpid ($cname) ====="
+                      dump_stacks "$cpid" ;;
+                  esac
+                done
+                kill -KILL -"$pgid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                echo "----- build stderr -----"
+                cat cargo-test-build.err 2>/dev/null || true
+                return 124
+              fi
+              sleep 2
+              waited=$((waited + 2))
+            done
+            local status=0
+            wait "$pid" || status=$?
+            cat cargo-test-build.err >&2 2>/dev/null || true
+            return "$status"
+          }
+
           run_with_watchdog() {
-            local bin="$1"
-            WATCHDOG_TIMED_OUT=0
+            local bin="$1" timeout="$2"
             local log
             log=$(mktemp)
-            "$bin" > "$log" 2>&1 &
+            setsid "$bin" > "$log" 2>&1 &
             local pid=$!
             local waited=0
-            while kill -0 "$pid" 2>/dev/null; do
-              if [ "$waited" -ge 120 ]; then
-                WATCHDOG_TIMED_OUT=1
-                echo "::error::HUNG_TEST_BINARY $bin exceeded 120s watchdog"
+            while proc_alive "$pid"; do
+              if [ "$waited" -ge "$timeout" ]; then
+                echo "::error::HUNG_TEST_BINARY $bin exceeded ${timeout}s watchdog"
                 echo "===== HUNG: $bin ====="
                 dump_stacks "$pid"
-                kill -KILL "$pid" 2>/dev/null || true
+                kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
                 wait "$pid" 2>/dev/null || true
                 echo "----- output captured before kill: $bin -----"
                 cat "$log" 2>/dev/null || true
@@ -107,12 +152,27 @@ jobs:
             return "$status"
           }
 
+          echo "Compiling test executables (no run, ${COMPILE_TIMEOUT}s cap)..."
+          build_rc=0
+          build_with_watchdog "$COMPILE_TIMEOUT" || build_rc=$?
+          if [ "$build_rc" -eq 124 ]; then
+            echo "::error::HUNG_TEST_BUILD: test compilation hung; aborting before test enumeration."
+            exit 1
+          elif [ "$build_rc" -ne 0 ]; then
+            echo "::error::cargo test --no-run failed (exit $build_rc)"
+            cat cargo-test-build.err 2>/dev/null || true
+            exit "$build_rc"
+          fi
+
+          mapfile -t TEST_BINS < <(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' cargo-test-build.json)
+          echo "Enumerated ${#TEST_BINS[@]} test binaries."
+
           pids=()
           names=()
           for bin in "${TEST_BINS[@]}"; do
             [ -n "$bin" ] || continue
             echo "Launching watchdog for $bin"
-            run_with_watchdog "$bin" &
+            run_with_watchdog "$bin" "$BINARY_TIMEOUT" &
             pids+=("$!")
             names+=("$bin")
           done
