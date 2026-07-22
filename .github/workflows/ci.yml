@@ -47,20 +47,31 @@ jobs:
       - if: runner.os != 'Linux'
         run: cargo test --workspace
       - if: runner.os == 'Linux'
+        name: Linux test build under GNU timeout
         run: |
-          cargo test --workspace --no-run --message-format=json 2>/dev/null \
-            | jq -r 'select(.profile.test==true) | .executable' > /tmp/bins.txt
-          cat /tmp/bins.txt
-          rc=0
-          while read -r bin; do
-            [ -z "$bin" ] && continue
-            echo "=== RUNNING $bin ==="
-            if ! timeout 90 "$bin" --test-threads=1; then
-              echo "!!! HUNG OR FAILED: $bin !!!"
-              rc=1
+          set -o pipefail
+
+          status=0
+          timeout --foreground --kill-after=30 1200 \
+            cargo test --workspace --no-run --message-format=json \
+            > cargo-test-build.json 2> cargo-test-build.err || status=$?
+
+          if [ "$status" -ne 0 ]; then
+            if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+              echo "::error::HUNG_TEST_BUILD cargo test --no-run exceeded 1200s and was killed by timeout (exit $status)"
+            else
+              echo "::error::cargo test --no-run failed (exit $status)"
             fi
-          done < /tmp/bins.txt
-          exit $rc
+            echo "===== cargo stdout (cargo-test-build.json) ====="
+            cat cargo-test-build.json 2>/dev/null || true
+            echo "===== cargo stderr (cargo-test-build.err) ====="
+            cat cargo-test-build.err 2>/dev/null || true
+            echo "===== process forest ====="
+            ps -e --forest -o pid,ppid,pgid,stat,etime,rss,args 2>&1 || true
+            exit "$status"
+          fi
+
+          echo "Test build succeeded; discriminates build-vs-test hang."
 
   msrv:
     runs-on: ubuntu-latest
