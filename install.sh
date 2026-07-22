@@ -2,7 +2,10 @@ set -eu
 
 repo=goat-agent/goat-code
 base=https://github.com/$repo/releases/latest/download
-install_dir=/usr/local/bin
+app_home="${HOME}/.goat/code"
+bin_dir="${app_home}/bin"
+env_file="${app_home}/env"
+source_line='. "$HOME/.goat/code/env"'
 purple=''
 reset=''
 if [ -t 1 ]; then
@@ -23,7 +26,6 @@ need tar
 need mktemp
 need grep
 need awk
-need id
 
 if command -v curl >/dev/null 2>&1; then
     fetch() {
@@ -59,13 +61,6 @@ case "$os:$arch" in
         ;;
 esac
 
-if [ "$(id -u)" = 0 ]; then
-    install_cmd='install'
-else
-    need sudo
-    install_cmd='sudo install'
-fi
-
 if command -v sha256sum >/dev/null 2>&1; then
     verify() {
         expected=$(grep "  $archive" "$tmp/SHA256SUMS" | awk '{print $1}')
@@ -96,6 +91,64 @@ mkdir -p "$tmp/extract"
 tar -xzf "$tmp/$archive" -C "$tmp/extract"
 test -f "$tmp/extract/goat-code"
 test -f "$tmp/extract/goat-update"
-$install_cmd -m 755 "$tmp/extract/goat-code" "$install_dir/goat-code"
-$install_cmd -m 755 "$tmp/extract/goat-update" "$install_dir/goat-update"
-printf "%bgoat-code%b installed to %s\n" "$purple" "$reset" "$install_dir/goat-code"
+
+mkdir -p "$bin_dir"
+cp "$tmp/extract/goat-code" "$bin_dir/goat-code"
+cp "$tmp/extract/goat-update" "$bin_dir/goat-update"
+chmod 755 "$bin_dir/goat-code" "$bin_dir/goat-update"
+
+cat > "$env_file" <<'ENV'
+case ":${PATH}:" in
+    *:"$HOME/.goat/code/bin":*)
+        ;;
+    *)
+        export PATH="$HOME/.goat/code/bin:$PATH"
+        ;;
+esac
+ENV
+
+add_source() {
+    dir=$(dirname "$1")
+    [ -d "$dir" ] || return 0
+    if [ -f "$1" ] && grep -qF "$source_line" "$1" 2>/dev/null; then
+        return 0
+    fi
+    printf '\n%s\n' "$source_line" >> "$1"
+}
+
+add_source_if_exists() {
+    [ -f "$1" ] || return 0
+    add_source "$1"
+}
+
+add_source "$HOME/.profile"
+add_source "$HOME/.bashrc"
+add_source "${ZDOTDIR:-$HOME}/.zshenv"
+add_source_if_exists "$HOME/.bash_profile"
+add_source_if_exists "$HOME/.bash_login"
+
+fish_root="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
+if [ -d "$fish_root" ] || command -v fish >/dev/null 2>&1; then
+    mkdir -p "$fish_root/conf.d"
+    cat > "$fish_root/conf.d/goat-code.fish" <<'FISH'
+if not contains "$HOME/.goat/code/bin" $PATH
+    set -gx PATH "$HOME/.goat/code/bin" $PATH
+end
+FISH
+fi
+
+printf "%bgoat-code%b installed to %s\n" "$purple" "$reset" "$bin_dir/goat-code"
+
+case ":${PATH}:" in
+    *:"$bin_dir":*)
+        ;;
+    *)
+        echo "Run this now, or open a new terminal, to start using goat-code:"
+        echo "  $source_line"
+        ;;
+esac
+
+if [ -e /usr/local/bin/goat-code ] || [ -e /usr/local/bin/goat-update ]; then
+    echo "An older system install was found. Remove it so it no longer shadows the new one:"
+    echo "  sudo rm -f /usr/local/bin/goat-code /usr/local/bin/goat-update"
+fi
