@@ -2199,6 +2199,7 @@ dependencies = [
  "goat-worktree",
  "qrcode",
  "reqwest 0.12.28",
+ "self-replace",
  "semver",
  "serde",
  "serde_json",
@@ -2843,15 +2844,6 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "unicode-width",
-]
-
-[[package]]
-name = "goat-update"
-version = "0.1.26"
-dependencies = [
- "clap",
- "color-eyre",
- "tempfile",
 ]
 
 [[package]]
@@ -5527,6 +5519,17 @@ dependencies = [
  "rustc-hash",
  "servo_arc",
  "smallvec",
+]
+
+[[package]]
+name = "self-replace"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03ec815b5eab420ab893f63393878d89c90fdd94c0bcc44c07abb8ad95552fb7"
+dependencies = [
+ "fastrand",
+ "tempfile",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

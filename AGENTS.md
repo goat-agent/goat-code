@@ -30,7 +30,6 @@ Before calling any change done, `cargo fmt --all`, the `clippy` line above, and
 - `goat-daemon` — the resident `goatd` (`goat daemon serve`); machine-wide single daemon holding N live sessions keyed by cwd. Owns the session registry, a single seq-stamping event-log pump per session (stamp→log→fan-out), per-window bounded delivery with disconnect-on-overflow, presence broadcast, idle eviction (kept alive while a turn runs or a window is attached or an Ask/Plan is open), orphaned-turn sweep on startup, and the unix-socket listener (`~/.goat-code/daemon.sock`, 0600). Allocates per-session `TaskId`s and echoes a correlation token.
 - `goat-client` — thin transport the TUI talks to; auto-spawns the daemon if absent, performs the handshake, opens/reattaches a session, and exposes the same `Op`/`Event` channels the TUI already consumes. Owns the bidirectional `IdMap` (client-local ↔ daemon `TaskId`) and seq-gap resync.
 - `goat-remote` — network-facing remote access for the daemon. mTLS over WebSocket: the daemon is a tiny `rcgen` CA, devices pair once over an HTTP `/pair` endpoint (one-time high-entropy code, server cert pinned by QR fingerprint, CSR signed by the CA) and thereafter connect to `/ws` presenting their device client cert. A custom `ClientCertVerifier` validates the chain and checks the cert fingerprint against the live device registry on every handshake (revocation works here, no CRL/OCSP). The TCP listener self-gates: it binds only while at least one device is paired or a pairing code is pending, and winds down otherwise — there is no separate enable flag. Depends on `goat-wire`/`goat-protocol` only; `goat-daemon` supplies a `RemoteHandler` that bridges each authenticated WS connection into the shared connection driver as `ClientOrigin::Remote`. Remote = local trust; only pairing issuance and `StopDaemon` stay local-only.
-- `goat-update` — executable replacement helper for `goat update`; small CLI-only crate with no app-state ownership.
 - `goat-worktree` — git-worktree management (`enter`/`list`/`remove`); `enter` resolves and returns the worktree path (the agent cwd is injected explicitly, not via process `set_current_dir` for the engine).
 
 **Providers**
@@ -111,15 +110,15 @@ The UI and the engine communicate only through `goat-protocol` types over bounde
 ## Distribution
 
 Native install only. The root `install.sh` is the official Unix/macOS installer and installs
-`goat-code` plus `goat-update` into `~/.goat/code/bin`, then adds that directory to `PATH` by
+`goat-code` into `~/.goat/code/bin`, then adds that directory to `PATH` by
 writing a sourced `~/.goat/code/env` snippet into the user's shell profiles (`.profile`,
 `.bashrc`, `.zshenv`, and a fish `conf.d` file). Nothing writes to a system directory, so
 neither install nor update ever needs `sudo`; Windows initial install is archive-only.
-GitHub Actions builds stable release archives and `SHA256SUMS`; `goat update` stages releases
-into `~/.goat/code/update` and `goat-update` replaces the executables in place — self-update
-runs entirely under the user and derives its install directory from `current_exe()`, refusing
-to touch a binary that lives outside `~/.goat/code/bin`. Installation metadata is not persisted;
-the install location is fixed by platform policy. `cargo-release` owns version bumping and
+GitHub Actions builds stable release archives and `SHA256SUMS`; `goat-code update` stages the
+release into `~/.goat/code/update` and replaces the running binary in place via `self_replace` —
+self-update runs entirely under the user and derives its install directory from `current_exe()`,
+refusing to touch a binary that lives outside `~/.goat/code/bin`. Installation metadata is not
+persisted; the install location is fixed by platform policy. `cargo-release` owns version bumping and
 `v{{version}}` tag creation; pushed release tags trigger `.github/workflows/release.yml`.
 The project is not published to crates.io and internal crates are `publish = false`. Do not add
 `cargo install` distribution flows and do not reintroduce cargo-dist.
