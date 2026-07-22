@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     fs,
-    io::Read,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -15,7 +14,6 @@ use sha2::{Digest, Sha256};
 use crate::style::{ColorMode, Palette, print_row};
 
 const REPOSITORY: &str = "goat-agent/goat-code";
-const INSTALL_DIR: &str = "/usr/local/bin";
 const INSTALL_URL: &str = "https://raw.githubusercontent.com/goat-agent/goat-code/main/install.sh";
 
 #[derive(Debug, Deserialize)]
@@ -222,31 +220,26 @@ fn extract_archive(bytes: &[u8], dest: &Path) -> color_eyre::Result<()> {
 }
 
 fn install_paths() -> color_eyre::Result<InstallPaths> {
-    if cfg!(windows) {
-        let current = std::env::current_exe()?;
-        let install_dir = current
-            .parent()
-            .ok_or_else(|| eyre!("could not resolve current executable directory"))?
-            .to_path_buf();
-        Ok(InstallPaths {
-            bin_path: install_dir.join(exe_name("goat-code")),
-            helper_path: install_dir.join(exe_name("goat-update")),
-            install_dir,
-        })
-    } else {
-        let current = std::env::current_exe()?;
-        if current.parent() != Some(Path::new(INSTALL_DIR)) {
-            println!("Reinstall goat with:");
-            println!("  curl -fsSL {INSTALL_URL} | sh");
-            return Err(eyre!("goat is not installed in {INSTALL_DIR}"));
-        }
-        let install_dir = PathBuf::from(INSTALL_DIR);
-        Ok(InstallPaths {
-            bin_path: install_dir.join(exe_name("goat-code")),
-            helper_path: install_dir.join("goat-update"),
-            install_dir,
-        })
+    let current = std::env::current_exe()?;
+    let install_dir = current
+        .parent()
+        .ok_or_else(|| eyre!("could not resolve current executable directory"))?
+        .to_path_buf();
+    if let Some(expected) = goat_config::bin_dir()
+        && install_dir != expected
+    {
+        println!("Reinstall goat-code with:");
+        println!("  curl -fsSL {INSTALL_URL} | sh");
+        return Err(eyre!(
+            "goat-code is not installed in {}",
+            expected.display()
+        ));
     }
+    Ok(InstallPaths {
+        bin_path: install_dir.join(exe_name("goat-code")),
+        helper_path: install_dir.join(exe_name("goat-update")),
+        install_dir,
+    })
 }
 
 fn run_helper(
@@ -269,13 +262,7 @@ fn run_helper(
         version.to_string(),
     ];
 
-    let mut command = if needs_sudo(&paths.install_dir) {
-        let mut command = Command::new("sudo");
-        command.arg(helper);
-        command
-    } else {
-        Command::new(helper)
-    };
+    let mut command = Command::new(helper);
     command.args(args);
 
     if cfg!(windows) {
@@ -294,34 +281,6 @@ fn run_helper(
             Err(eyre!("goat-update failed"))
         }
     }
-}
-
-#[cfg(unix)]
-fn needs_sudo(path: &Path) -> bool {
-    path == Path::new(INSTALL_DIR) && unsafe_not_root()
-}
-
-#[cfg(unix)]
-fn unsafe_not_root() -> bool {
-    match fs::File::open("/proc/self/status") {
-        Ok(mut file) => {
-            let mut raw = String::new();
-            if file.read_to_string(&mut raw).is_ok() {
-                raw.lines()
-                    .find_map(|line| line.strip_prefix("Uid:"))
-                    .and_then(|line| line.split_whitespace().next())
-                    .is_none_or(|uid| uid != "0")
-            } else {
-                true
-            }
-        }
-        Err(_) => std::env::var_os("USER").is_none_or(|user| user != "root"),
-    }
-}
-
-#[cfg(not(unix))]
-fn needs_sudo(_path: &Path) -> bool {
-    false
 }
 
 fn require_file(path: &Path) -> color_eyre::Result<()> {

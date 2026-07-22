@@ -111,10 +111,15 @@ The UI and the engine communicate only through `goat-protocol` types over bounde
 ## Distribution
 
 Native install only. The root `install.sh` is the official Unix/macOS installer and installs
-`goat` plus `goat-update` into `/usr/local/bin`; Windows initial install is archive-only.
+`goat-code` plus `goat-update` into `~/.goat/code/bin`, then adds that directory to `PATH` by
+writing a sourced `~/.goat/code/env` snippet into the user's shell profiles (`.profile`,
+`.bashrc`, `.zshenv`, and a fish `conf.d` file). Nothing writes to a system directory, so
+neither install nor update ever needs `sudo`; Windows initial install is archive-only.
 GitHub Actions builds stable release archives and `SHA256SUMS`; `goat update` stages releases
-and `goat-update` performs executable replacement. Installation metadata is not persisted; the
-install location is fixed by platform policy. `cargo-release` owns version bumping and
+into `~/.goat/code/update` and `goat-update` replaces the executables in place — self-update
+runs entirely under the user and derives its install directory from `current_exe()`, refusing
+to touch a binary that lives outside `~/.goat/code/bin`. Installation metadata is not persisted;
+the install location is fixed by platform policy. `cargo-release` owns version bumping and
 `v{{version}}` tag creation; pushed release tags trigger `.github/workflows/release.yml`.
 The project is not published to crates.io and internal crates are `publish = false`. Do not add
 `cargo install` distribution flows and do not reintroduce cargo-dist.
