@@ -39,12 +39,97 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
+        run: sudo apt-get update && sudo apt-get install -y $LINUX_DEPS gdb
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - run: cargo test --workspace
+      - if: runner.os != 'Linux'
+        run: cargo test --workspace
+      - if: runner.os == 'Linux'
+        name: Linux tests with per-binary hang watchdog
+        run: |
+          set -o pipefail
+          echo "Compiling test executables (no run)..."
+          cargo test --workspace --no-run --message-format=json > cargo-test-build.json
+
+          mapfile -t TEST_BINS < <(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' cargo-test-build.json)
+          echo "Enumerated ${#TEST_BINS[@]} test binaries."
+
+          WATCHDOG_TIMED_OUT=0
+
+          dump_stacks() {
+            local pid="$1"
+            echo "----- thread dump for pid $pid -----"
+            if command -v gdb >/dev/null 2>&1; then
+              gdb -batch -p "$pid" -ex "thread apply all bt" 2>&1 || echo "(gdb attach failed)"
+            else
+              echo "(gdb unavailable; falling back to /proc)"
+            fi
+            local task tid
+            for task in /proc/"$pid"/task/*; do
+              [ -d "$task" ] || continue
+              tid=$(basename "$task")
+              echo "--- thread $tid name=$(cat "$task/comm" 2>/dev/null || echo '?') ---"
+              cat "$task/stack" 2>/dev/null || echo "(kernel stack unavailable without privilege)"
+            done
+          }
+
+          run_with_watchdog() {
+            local bin="$1"
+            WATCHDOG_TIMED_OUT=0
+            local log
+            log=$(mktemp)
+            "$bin" > "$log" 2>&1 &
+            local pid=$!
+            local waited=0
+            while kill -0 "$pid" 2>/dev/null; do
+              if [ "$waited" -ge 120 ]; then
+                WATCHDOG_TIMED_OUT=1
+                echo "::error::HUNG_TEST_BINARY $bin exceeded 120s watchdog"
+                echo "===== HUNG: $bin ====="
+                dump_stacks "$pid"
+                kill -KILL "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                echo "----- output captured before kill: $bin -----"
+                cat "$log" 2>/dev/null || true
+                rm -f "$log"
+                return 124
+              fi
+              sleep 1
+              waited=$((waited + 1))
+            done
+            local status=0
+            wait "$pid" || status=$?
+            echo "----- output: $bin (exit $status) -----"
+            cat "$log" 2>/dev/null || true
+            rm -f "$log"
+            return "$status"
+          }
+
+          pids=()
+          names=()
+          for bin in "${TEST_BINS[@]}"; do
+            [ -n "$bin" ] || continue
+            echo "Launching watchdog for $bin"
+            run_with_watchdog "$bin" &
+            pids+=("$!")
+            names+=("$bin")
+          done
+
+          overall=0
+          for i in "${!pids[@]}"; do
+            status=0
+            wait "${pids[$i]}" || status=$?
+            if [ "$status" -eq 124 ]; then
+              echo "::error::Watchdog killed hung test binary: ${names[$i]}"
+              overall=1
+            elif [ "$status" -ne 0 ]; then
+              echo "::error::Test failure in ${names[$i]} (exit $status)"
+              overall=1
+            fi
+          done
+          exit "$overall"
 
   msrv:
     runs-on: ubuntu-latest
