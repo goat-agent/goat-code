@@ -69,7 +69,7 @@ jobs:
             local pid="$1"
             echo "----- thread dump for pid $pid ($(cat /proc/"$pid"/comm 2>/dev/null || echo '?')) -----"
             if command -v gdb >/dev/null 2>&1; then
-              gdb -batch -p "$pid" -ex "thread apply all bt" 2>&1 || echo "(gdb attach failed)"
+              timeout 20 gdb -batch -p "$pid" -ex "thread apply all bt" 2>&1 || echo "(gdb attach failed or timed out)"
             else
               echo "(gdb unavailable; falling back to /proc)"
             fi
