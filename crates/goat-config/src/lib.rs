@@ -173,6 +173,10 @@ pub fn update_dir() -> Option<PathBuf> {
     app_home().map(|home| home.join("update"))
 }
 
+pub fn bin_dir() -> Option<PathBuf> {
+    app_home().map(|home| home.join("bin"))
+}
+
 pub const PROJECT_SKILLS_SUBDIR: &str = ".goat/skills";
 
 pub fn agents_dir() -> Option<PathBuf> {
