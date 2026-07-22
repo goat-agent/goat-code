@@ -71,7 +71,7 @@ pub async fn run(force: bool) -> color_eyre::Result<()> {
     let staged_dir = stage_dir(&latest, target)?;
     reset_dir(&staged_dir)?;
     extract_archive(&archive, &staged_dir)?;
-    require_file(&staged_dir.join(exe_name("goat")))?;
+    require_file(&staged_dir.join(exe_name("goat-code")))?;
     require_file(&staged_dir.join(exe_name("goat-update")))?;
 
     let paths = install_paths()?;
@@ -242,7 +242,7 @@ fn install_paths() -> color_eyre::Result<InstallPaths> {
         }
         let install_dir = PathBuf::from(INSTALL_DIR);
         Ok(InstallPaths {
-            bin_path: install_dir.join("goat"),
+            bin_path: install_dir.join(exe_name("goat-code")),
             helper_path: install_dir.join("goat-update"),
             install_dir,
         })
