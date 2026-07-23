@@ -44,7 +44,7 @@ impl Palette {
     pub const fn dark() -> Self {
         Self {
             id: 1,
-            bg: Color::Rgb(0, 0, 0),
+            bg: Color::Reset,
             dark: true,
             fg: Color::Rgb(0xd7, 0xda, 0xe0),
             user: Color::Rgb(0x7d, 0x9b, 0xd4),
@@ -80,7 +80,7 @@ impl Palette {
     pub const fn light() -> Self {
         Self {
             id: 2,
-            bg: Color::Rgb(0xfa, 0xfa, 0xfa),
+            bg: Color::Reset,
             dark: false,
             fg: Color::Rgb(0x12, 0x14, 0x18),
             user: Color::Rgb(0x1a, 0x56, 0xd6),
@@ -114,6 +114,14 @@ impl Palette {
     }
 }
 
+fn mix(base: Color, tint: Color, t: f32) -> Color {
+    let (Color::Rgb(r0, g0, b0), Color::Rgb(r1, g1, b1)) = (base, tint) else {
+        return base;
+    };
+    let lerp = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    Color::Rgb(lerp(r0, r1), lerp(g0, g1), lerp(b0, b1))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
     palette: Palette,
@@ -136,6 +144,20 @@ impl Theme {
         Self {
             palette: Palette::light(),
         }
+    }
+
+    #[must_use]
+    pub fn with_base(self, base: Option<Color>) -> Self {
+        let Some(base) = base else {
+            return self;
+        };
+        let mut palette = self.palette;
+        let fg = palette.fg;
+        palette.panel = mix(base, fg, 0.12);
+        palette.user_panel = mix(base, fg, 0.15);
+        palette.border_dim = mix(base, fg, 0.17);
+        palette.border = mix(base, fg, 0.20);
+        Self { palette }
     }
 
     pub fn base(self) -> ratatui::style::Style {
