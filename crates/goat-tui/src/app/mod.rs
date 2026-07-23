@@ -111,6 +111,7 @@ pub(crate) enum AppEvent {
 #[allow(clippy::struct_excessive_bools)]
 pub struct App {
     pub(crate) theme: Theme,
+    pub(crate) terminal_bg: Option<ratatui::style::Color>,
     pub(crate) transcript: Transcript,
     pub(crate) composer: Composer,
     pub(crate) highlighter: SyntectHighlighter,
@@ -196,6 +197,15 @@ pub(crate) struct RetryState {
 }
 
 impl App {
+    pub(crate) fn set_terminal_bg(&mut self, bg: Option<ratatui::style::Color>) {
+        self.terminal_bg = bg;
+        self.theme = self.theme.with_base(bg);
+        self.transcript.invalidate();
+        for run in &mut self.agent_runs {
+            run.transcript.invalidate();
+        }
+    }
+
     pub(crate) fn new(theme: Theme) -> Self {
         let cwd = std::env::current_dir()
             .ok()
@@ -207,6 +217,7 @@ impl App {
         let cfg = goat_config::Config::load();
         Self {
             theme,
+            terminal_bg: None,
             transcript: Transcript::default(),
             composer: Composer::default(),
             highlighter: SyntectHighlighter::new(),
@@ -511,7 +522,8 @@ impl App {
                 vec![Op::RemoveAccount { provider, name }]
             }
             ConfigOutcome::SetTheme { dark } => {
-                self.theme = if dark { Theme::dark() } else { Theme::light() };
+                let chosen = if dark { Theme::dark() } else { Theme::light() };
+                self.theme = chosen.with_base(self.terminal_bg);
                 self.transcript.invalidate();
                 for run in &mut self.agent_runs {
                     run.transcript.invalidate();
@@ -1479,8 +1491,9 @@ pub async fn run(
     initial_ops: Vec<Op>,
 ) -> color_eyre::Result<()> {
     let mut app = App::new(theme);
-    let (mut terminal, picker) = tui::init(app.mouse_capture)?;
+    let (mut terminal, picker, background) = tui::init(app.mouse_capture)?;
     app.picker = picker;
+    app.set_terminal_bg(background);
     let result = event_loop(
         &mut terminal,
         &ops,

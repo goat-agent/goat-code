@@ -10,9 +10,11 @@ use crossterm::{
     terminal::supports_keyboard_enhancement,
 };
 use ratatui::DefaultTerminal;
+use ratatui::style::Color;
 use ratatui_image::picker::Picker;
 
-pub fn init(mouse_capture: bool) -> io::Result<(DefaultTerminal, Option<Picker>)> {
+pub fn init(mouse_capture: bool) -> io::Result<(DefaultTerminal, Option<Picker>, Option<Color>)> {
+    let background = query_background();
     let terminal = ratatui::init();
     let picker = crate::screenshot::query_picker();
     if supports_keyboard_enhancement().unwrap_or(false) {
@@ -28,7 +30,16 @@ pub fn init(mouse_capture: bool) -> io::Result<(DefaultTerminal, Option<Picker>)
     if mouse_capture {
         execute!(io::stdout(), EnableMouseCapture)?;
     }
-    Ok((terminal, picker))
+    Ok((terminal, picker, background))
+}
+
+fn query_background() -> Option<Color> {
+    let rgb = termbg::rgb(std::time::Duration::from_millis(100)).ok()?;
+    Some(Color::Rgb(
+        u8::try_from(rgb.r >> 8).unwrap_or_default(),
+        u8::try_from(rgb.g >> 8).unwrap_or_default(),
+        u8::try_from(rgb.b >> 8).unwrap_or_default(),
+    ))
 }
 
 pub fn set_mouse_capture(enabled: bool) {
