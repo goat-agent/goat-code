@@ -2309,6 +2309,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "goat-github"
+version = "0.1.27"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "goat-mcp"
 version = "0.1.27"
 dependencies = [
