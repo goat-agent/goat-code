@@ -747,6 +747,17 @@ pub(crate) fn window_label(window_count: usize) -> Option<String> {
     (window_count > 1).then(|| format!("\u{29c9} {window_count}"))
 }
 
+fn pr_label(app: &App, theme: Theme) -> Option<(Vec<Span<'static>>, usize)> {
+    let pr = app.current_pr()?;
+    let text = format!("#{}", pr.number);
+    let width = 1 + text.width();
+    let style = match pr.state {
+        goat_github::PrState::Open => theme.accent(),
+        goat_github::PrState::Merged | goat_github::PrState::Closed => theme.muted(),
+    };
+    Some((vec![Span::raw(" "), Span::styled(text, style)], width))
+}
+
 fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let row = Rect { height: 1, ..area }.inner(Margin {
         horizontal: PAD_X,
@@ -770,7 +781,9 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         + usize::from(windows.is_some()))
         * 2;
     let status_w = model_w + ctx_w + rates_w + windows_w + status_gap;
-    let left_max = inner_w.saturating_sub(status_w);
+    let pr = pr_label(app, theme);
+    let pr_w = pr.as_ref().map_or(0, |(_, w)| *w);
+    let left_max = inner_w.saturating_sub(status_w + pr_w);
     let (mut spans, left_w) = if let Some(ws) = app.workspace_snapshot() {
         fit_workspace_location_spans(ws, left_max, theme)
     } else {
@@ -778,7 +791,10 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         let w = cwd.width();
         (vec![Span::styled(cwd, theme.muted())], w)
     };
-    let pad = inner_w.saturating_sub(left_w + status_w);
+    if let Some((pr_spans, _)) = pr {
+        spans.extend(pr_spans);
+    }
+    let pad = inner_w.saturating_sub(left_w + pr_w + status_w);
     if pad > 0 {
         spans.push(Span::raw(" ".repeat(pad)));
     }
