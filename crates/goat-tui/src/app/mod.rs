@@ -93,6 +93,7 @@ const TICK: Duration = Duration::from_millis(120);
 const QUIT_ARM_TICKS: u16 = 25;
 const CLEAR_ARM_TICKS: u16 = 25;
 const BRANCH_POLL_TICKS: u16 = 8;
+const PR_POLL_TICKS: u16 = 500;
 
 pub(crate) enum AppEvent {
     Input(CtEvent),
@@ -106,6 +107,15 @@ pub(crate) enum AppEvent {
     ClipboardImage(Result<goat_protocol::InputAttachment, String>),
     EngineClosed,
     Presence(usize),
+    PrStatus {
+        branch: String,
+        pr: Option<goat_github::PrInfo>,
+    },
+}
+
+struct PrLookup {
+    repo_root: std::path::PathBuf,
+    branch: String,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -116,6 +126,11 @@ pub struct App {
     pub(crate) highlighter: SyntectHighlighter,
     pub(crate) cwd: String,
     git_workspace: Option<goat_worktree::Workspace>,
+    pr: Option<goat_github::PrInfo>,
+    pr_branch: Option<String>,
+    pr_inflight: bool,
+    pr_poll: u16,
+    pr_enabled: bool,
     pub(crate) next_task: u64,
     pub(crate) window_count: usize,
     pub(crate) spinner: usize,
@@ -212,6 +227,11 @@ impl App {
             highlighter: SyntectHighlighter::new(),
             cwd,
             git_workspace,
+            pr: None,
+            pr_branch: None,
+            pr_inflight: false,
+            pr_poll: 0,
+            pr_enabled: goat_github::gh_available(),
             next_task: 1,
             window_count: 1,
             spinner: 0,
@@ -283,6 +303,18 @@ impl App {
                 if self.branch_poll == 0 {
                     self.branch_poll = BRANCH_POLL_TICKS;
                     self.refresh_git_branch();
+                }
+                self.pr_poll = self.pr_poll.saturating_sub(1);
+                Vec::new()
+            }
+            AppEvent::PrStatus { branch, pr } => {
+                self.pr_inflight = false;
+                if self.git_workspace.as_ref().map(|w| w.git_branch.as_str())
+                    == Some(branch.as_str())
+                {
+                    self.pr = pr;
+                    self.pr_branch = Some(branch);
+                    self.dirty = true;
                 }
                 Vec::new()
             }
@@ -1126,7 +1158,37 @@ impl App {
         if let Some(ws) = self.git_workspace.as_mut() {
             ws.git_branch = branch;
         }
+        self.pr = None;
+        self.pr_branch = None;
+        self.pr_poll = 0;
         self.dirty = true;
+    }
+    pub(crate) fn current_pr(&self) -> Option<&goat_github::PrInfo> {
+        let ws = self.git_workspace.as_ref()?;
+        if self.pr_branch.as_deref() == Some(ws.git_branch.as_str()) {
+            self.pr.as_ref()
+        } else {
+            None
+        }
+    }
+    fn take_pending_pr_lookup(&mut self) -> Option<PrLookup> {
+        if !self.pr_enabled || self.pr_inflight {
+            return None;
+        }
+        let ws = self.git_workspace.as_ref()?;
+        if ws.git_branch.is_empty() {
+            return None;
+        }
+        let stale = self.pr_branch.as_deref() != Some(ws.git_branch.as_str());
+        if !stale && self.pr_poll > 0 {
+            return None;
+        }
+        self.pr_inflight = true;
+        self.pr_poll = PR_POLL_TICKS;
+        Some(PrLookup {
+            repo_root: ws.repo_root.clone(),
+            branch: ws.git_branch.clone(),
+        })
     }
     pub(crate) fn quit_armed(&self) -> bool {
         self.quit_arm.is_some()
@@ -1569,6 +1631,19 @@ async fn event_loop(
                     let _ = open::that(url);
                 })
                 .await;
+            });
+        }
+        if let Some(PrLookup { repo_root, branch }) = app.take_pending_pr_lookup() {
+            let tx = attach_tx.clone();
+            tokio::spawn(async move {
+                let lookup = branch.clone();
+                let pr = tokio::task::spawn_blocking(move || {
+                    goat_github::pr_for_branch(&repo_root, &lookup)
+                })
+                .await
+                .ok()
+                .flatten();
+                let _ = tx.send(AppEvent::PrStatus { branch, pr }).await;
             });
         }
         if app.take_dirty() {

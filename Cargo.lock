@@ -2839,6 +2839,7 @@ dependencies = [
  "futures",
  "goat-commands",
  "goat-config",
+ "goat-github",
  "goat-protocol",
  "goat-tool",
  "goat-worktree",
