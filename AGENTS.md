@@ -14,7 +14,7 @@ lefthook install
 
 - `bun run check` runs every gate: format, lint, typecheck, tests, unused-code scan.
 - `bun run fix` applies formatting and autofixable lint.
-- `bun run typecheck` and `bun run test` run per package through Turborepo with caching. Scope them with `--filter=@goat-code/<name>`.
+- `bun run typecheck` and `bun run test` run per package through Turborepo with caching. Scope them with `--filter=@goat/code-<name>`.
 - `bun test <file>` runs one test file from inside its package.
 
 ## Done means
@@ -32,7 +32,7 @@ lefthook install
 
 ## Monorepo
 
-- Name a package after the capability it provides, as `packages/<capability>` and `@goat-code/<capability>`, never after the app that uses it.
+- Name a package after the capability it provides, as `packages/<capability>` and `@goat/code-<capability>`, never after the app that uses it.
 - Apps only wire packages together. Logic belongs in `packages/`.
 - Every app sets `"exports": {}` so nothing can import it. Internal dependencies use `workspace:*`.
 - Every package has a `tsconfig.json` that extends `../../tsconfig.base.json` and `typecheck` and `test` scripts.

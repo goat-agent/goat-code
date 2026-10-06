@@ -129,6 +129,11 @@
             "from": "package",
             "name": "ReadableStream",
             "package": "undici-types"
+          },
+          {
+            "from": "package",
+            "name": ["ZodObject", "ZodType"],
+            "package": "zod"
           }
         ],
         "treatMethodsAsReadonly": true
