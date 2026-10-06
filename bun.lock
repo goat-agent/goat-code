@@ -21,6 +21,13 @@
         "zod": "4.6.5",
       },
     },
+    "packages/tool-shell": {
+      "name": "@goat/code-tool-shell",
+      "dependencies": {
+        "@goat/code-tool": "workspace:*",
+        "zod": "4.6.5",
+      },
+    },
   },
   "packages": {
     "@emnapi/core": ["@emnapi/core@1.11.2", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.2", "tslib": "^2.4.0" } }, "sha512-TC8MkTuZUtcTSiFeuC0ksCh9QIJ5+F21MvZ4Wn4ORfYaFJ/0dsiudv5tVkejgwZlwQ39jL9WWDe2lz8x0WglOA=="],
@@ -30,6 +37,8 @@
     "@emnapi/wasi-threads": ["@emnapi/wasi-threads@1.2.2", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-c95qOXkHdydNKhscBTebqEC1CVAZpyqOfVfBzQ1qgzyl3gfeldUjIggDbIZgDKsHLgnsM+igH7TJ/eAasaVuMA=="],
 
     "@goat/code-tool": ["@goat/code-tool@workspace:packages/tool"],
+
+    "@goat/code-tool-shell": ["@goat/code-tool-shell@workspace:packages/tool-shell"],
 
     "@goat/sdk": ["@goat/sdk@github:goat-agent/goat-sdk#ee14a51", { "dependencies": { "zod": "4.6.5" } }, "goat-agent-goat-sdk-ee14a51", "sha512-auw7lAHvg1f2qFGojvWZH3TQ7e+TH2GFtIloVpwhy4gLaYCzs/afbV8XF0I4f2owL7k2a4mNa1UDccfx6xxI1A=="],
 
