@@ -1,0 +1,16 @@
+{
+  "name": "@goat/code-tool",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@goat/sdk": "github:goat-agent/goat-sdk#v0.1.0",
+    "zod": "4.6.5"
+  }
+}
