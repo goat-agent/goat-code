@@ -14,6 +14,13 @@
         "typescript": "7.0.2",
       },
     },
+    "apps/cli": {
+      "name": "@goat/code-cli",
+      "dependencies": {
+        "@goat/code-terminal": "workspace:*",
+        "@goat/code-tui": "workspace:*",
+      },
+    },
     "packages/terminal": {
       "name": "@goat/code-terminal",
     },
@@ -45,6 +52,8 @@
     "@emnapi/runtime": ["@emnapi/runtime@1.11.2", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-kyOl3X0DuTiT1h2ft8r2fYO8JYtU9a9Xis/zBSiGArNaagCOWx90N1k2wxp18czFDH+OgcWGb5ZP/XMt3dcyPA=="],
 
     "@emnapi/wasi-threads": ["@emnapi/wasi-threads@1.2.2", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-c95qOXkHdydNKhscBTebqEC1CVAZpyqOfVfBzQ1qgzyl3gfeldUjIggDbIZgDKsHLgnsM+igH7TJ/eAasaVuMA=="],
+
+    "@goat/code-cli": ["@goat/code-cli@workspace:apps/cli"],
 
     "@goat/code-terminal": ["@goat/code-terminal@workspace:packages/terminal"],
 

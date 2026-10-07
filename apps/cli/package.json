@@ -1,0 +1,15 @@
+{
+  "name": "@goat/code-cli",
+  "private": true,
+  "type": "module",
+  "exports": {},
+  "scripts": {
+    "start": "bun src/main.ts",
+    "build": "bun build --compile src/main.ts --outfile dist/goat-code",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@goat/code-terminal": "workspace:*",
+    "@goat/code-tui": "workspace:*"
+  }
+}
